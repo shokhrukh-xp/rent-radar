@@ -857,6 +857,7 @@ HELP_TEXT = """🤖 <b>Rent Radar</b>
 /min — минимальная цена
 /rooms — комнатность
 /district — районы
+/segment — класс жилья: любой ↔ новый ЖК с ремонтом
 /work — адрес работы (считать расстояние)
 /photos — фото вкл/выкл
 /pause — пауза, /resume — продолжить"""
@@ -873,7 +874,7 @@ RESET_WORDS = {"все", "всё", "любые", "любая", "сброс", "al
 
 def default_settings() -> dict:
     return {"photos": True, "paused": False, "districts": [],
-            "strict_district": True, "exclude_shared": True,
+            "strict_district": True, "exclude_shared": True, "segment": "any",
             "rooms_min": None, "rooms_max": None,
             "max_price_usd": None, "min_price_usd": None}
 
@@ -918,6 +919,8 @@ def _btn(text, data):
 def kb_menu(cfg: dict, settings: dict) -> dict:
     return {"inline_keyboard": [
         [_btn("🔎 Подобрать лучшее сейчас", "f")],
+        [_btn("🏢 Класс: новый ЖК с ремонтом" if settings.get("segment") == "premium"
+              else "🏢 Класс: любой", "sg")],
         [_btn(f"💰 Цена: {price_label(cfg, settings)}", "v:P")],
         [_btn(f"🛏 Комнаты: {rooms_label(settings)}", "v:R"),
          _btn(f"📍 Районы: {districts_label(settings)}", "v:D")],
@@ -1038,6 +1041,15 @@ def handle_command(text: str, settings: dict, store, cfg: dict):
         return "", "M"
     if cmd == "/status":
         return status_text(cfg, settings, store), None
+    if cmd in ("/segment", "/class"):
+        if arg in ("премиум", "premium", "жк", "новостройка", "вкл", "on"):
+            settings["segment"] = "premium"
+        elif arg in RESET_WORDS or arg in OFF_WORDS:
+            settings["segment"] = "any"
+        else:
+            settings["segment"] = "any" if settings.get("segment") == "premium" else "premium"
+        return (("✅ Ищу только новые ЖК с дизайнерским ремонтом"
+                 if settings["segment"] == "premium" else "✅ Класс жилья: любой"), None)
     if cmd == "/work":
         if not raw_arg:
             wp = settings.get("work_point")
@@ -1205,6 +1217,10 @@ def handle_callback(data: str, settings: dict, store, cfg: dict):
         settings["strict_district"] = not settings.get("strict_district")
         return ("Только выбранные районы" if settings["strict_district"]
                 else "Плюс объявления без указанного района"), "D"
+    if act == "sg":
+        settings["segment"] = "any" if settings.get("segment") == "premium" else "premium"
+        return ("Только новые ЖК с ремонтом" if settings["segment"] == "premium"
+                else "Любой класс жилья"), "M"
     if act == "sh":
         settings["exclude_shared"] = not settings.get("exclude_shared", True)
         return ("Подселение и койко-места скрыты" if settings["exclude_shared"]
@@ -1302,6 +1318,11 @@ def relevance_reject(l: dict, cfg: dict, settings: dict) -> str:
     if cfg.get("require_price_or_district") and not l.get("price_value") \
             and not l.get("district"):
         return "нет ни цены, ни района"
+    if settings.get("segment") == "premium":
+        sig = analyst.premium_signals(l)
+        l["premium"] = sig
+        if not analyst.is_premium(l):
+            return "не тот класс жилья (нужен новый ЖК с дизайнерским ремонтом)"
     return ""
 
 
