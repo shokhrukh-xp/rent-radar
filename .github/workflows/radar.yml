@@ -1,0 +1,46 @@
+# Rent Radar на GitHub Actions.
+# Этот файл должен лежать в репозитории по пути:  .github/workflows/radar.yml
+name: Rent Radar
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"   # каждые 5 минут (реально GitHub запускает раз в 5–15 мин)
+  workflow_dispatch: {}      # кнопка ручного запуска
+
+permissions:
+  contents: write            # чтобы сохранять базу radar.db обратно в репозиторий
+
+concurrency:
+  group: rent-radar
+  cancel-in-progress: false
+
+jobs:
+  radar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install deps
+        run: pip install --quiet requests
+
+      - name: Run radar (single pass)
+        env:
+          RADAR_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          RADAR_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python rent_radar.py --once
+
+      - name: Save state (radar.db)
+        run: |
+          git config user.name "rent-radar"
+          git config user.email "actions@users.noreply.github.com"
+          git add radar.db
+          git diff --cached --quiet || git commit -m "state $(date -u +'%Y-%m-%d %H:%M')"
+          git pull --rebase || true
+          git push

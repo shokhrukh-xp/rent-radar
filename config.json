@@ -1,0 +1,44 @@
+{
+  "telegram_bot_token": "PUT_YOUR_BOT_TOKEN_HERE",
+  "telegram_chat_id": "PUT_YOUR_CHAT_ID_HERE",
+  "uzs_per_usd": 11900,
+  "max_price_usd": 1000,
+  "min_price_usd": 0,
+  "notify_max_age_days": 3,
+  "notify_duplicates": false,
+  "hot_keywords": [
+    "без посредник", "без маклер", "bez makler", "maklersiz", "makler yo'q",
+    "хозяин", "от хозяина", "собственник", "egasidan", "uy egasi",
+    "посредникам не беспокоить"
+  ],
+  "makler_user_threshold": 3,
+  "dedup": {
+    "phone_days": 14,
+    "fuzzy_days": 10,
+    "fuzzy_threshold": 0.80,
+    "price_tolerance": 0.07
+  },
+  "sources": {
+    "olx": {
+      "enabled": true, "interval_seconds": 60,
+      "category_id": 1147, "city_id": 4, "owner_type": "private"
+    },
+    "uybor": {
+      "enabled": true, "interval_seconds": 120,
+      "region_id": 13, "category_id": 7
+    },
+    "birbir": {
+      "enabled": true, "interval_seconds": 300,
+      "list_url": "https://birbir.uz/ru/tashkent/cat/nedvizhimost/arenda/kvartiry"
+    },
+    "telegram": {
+      "enabled": true, "interval_seconds": 180,
+      "channels": [
+        "arentash", "arendtashkent", "arendatashkent_uz",
+        "arendakvartir_uz", "arenda_kvartira_v_tashkente"
+      ],
+      "include_keywords": ["сда", "аренд", "ижара", "ijara", "arenda", "rent"],
+      "exclude_keywords": ["сниму", "ищу", "ищем", "нужна квартира", "куплю", "kerak", "izlayapman"]
+    }
+  }
+}
