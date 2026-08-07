@@ -622,10 +622,10 @@ def format_message(l: dict, cfg: dict, likely_makler: bool) -> str:
     return "\n".join(lines)
 
 
-def tg_call(cfg, method: str, payload: dict):
+def tg_call(cfg, method: str, payload: dict, timeout: int = 20):
     api = f'https://api.telegram.org/bot{cfg["telegram_bot_token"]}/{method}'
     try:
-        r = requests.post(api, data=payload, timeout=20)
+        r = requests.post(api, data=payload, timeout=timeout)
         if r.status_code != 200:
             log.error("Telegram %s %s: %s", method, r.status_code, r.text[:200])
             return None
@@ -683,105 +683,24 @@ def send_listing(cfg, settings: dict, l: dict, likely_makler: bool) -> bool:
 
 # ------------------------------------------------- настройки через бота ----
 
-HELP_TEXT = """🤖 <b>Rent Radar — команды</b>
+HELP_TEXT = """🤖 <b>Rent Radar</b>
 
-/menu — ⚙️ меню с кнопками (самый удобный способ)
+Проще всего — <b>/menu</b>: там всё выбирается кнопками.
+
+Команды (можно и без аргумента — покажу кнопки):
+/menu — меню
 /status — текущие фильтры и статистика
-/max 800 — макс. цена, $
-/min 300 — мин. цена, $
-/rooms 2 или /rooms 2-3 — комнатность (/rooms все — сбросить)
-/district Яккасарай, Мирабад — только эти районы (/district все — сбросить)
-/districts — список районов, которые я понимаю
-/photos выкл — присылать без фото (/photos вкл — с фото)
-/pause — пауза уведомлений, /resume — продолжить
+/max — максимальная цена
+/min — минимальная цена
+/rooms — комнатность
+/district — районы
+/photos — фото вкл/выкл
+/pause — пауза, /resume — продолжить"""
 
-⏱ Отвечаю при ближайшей проверке (раз в 5–15 минут), не мгновенно."""
-
-MENU_TEXT = ("⚙️ <b>Меню Rent Radar</b>\n"
-             "Нажмите кнопку — применю при ближайшей проверке (до 5–15 мин) "
-             "и подтвержу сообщением. ✅ — текущие настройки.")
-
-PRICE_PRESETS = [400, 500, 700, 1000, 1500]
+DISTRICT_LIST = sorted(DISTRICTS)
+PRICE_PRESETS = [300, 400, 500, 700, 1000, 1500]
+MIN_PRESETS = [0, 200, 300, 400, 500]
 ROOM_PRESETS = [("1", "1"), ("2", "2"), ("2–3", "2-3"), ("3+", "3-6"), ("любые", "*")]
-
-
-def build_menu_keyboard(settings: dict) -> dict:
-    kb = []
-    cur_max = settings.get("max_price_usd")
-    kb.append([{"text": ("✅" if cur_max == p else "") + f"💰{p}",
-                "callback_data": f"m:{p}"} for p in PRICE_PRESETS])
-    rmin, rmax = settings.get("rooms_min"), settings.get("rooms_max")
-    row = []
-    for label, val in ROOM_PRESETS:
-        if val == "*":
-            active = rmin is None
-        else:
-            a, _, b = val.partition("-")
-            active = (rmin, rmax) == (int(a), int(b) if b else int(a))
-        row.append({"text": ("✅" if active else "") + f"🛏{label}",
-                    "callback_data": f"r:{val}"})
-    kb.append(row)
-    ds = settings.get("districts") or []
-    names = sorted(DISTRICTS)
-    for i in range(0, len(names), 3):
-        kb.append([{"text": ("✅" if n in ds else "") + n, "callback_data": f"d:{n}"}
-                   for n in names[i:i + 3]])
-    kb.append([{"text": "📍 Все районы (сбросить выбор)", "callback_data": "d:*"}])
-    kb.append([
-        {"text": f"🖼 Фото: {'вкл' if settings.get('photos', True) else 'выкл'}",
-         "callback_data": "p"},
-        {"text": "▶️ Возобновить" if settings.get("paused") else "⏸ Пауза",
-         "callback_data": "z"},
-    ])
-    kb.append([{"text": "📊 Статус", "callback_data": "s"},
-               {"text": "❓ Помощь", "callback_data": "h"}])
-    return {"inline_keyboard": kb}
-
-
-def send_menu(cfg, settings: dict) -> bool:
-    return tg_call(cfg, "sendMessage", {
-        "chat_id": cfg["telegram_chat_id"], "text": MENU_TEXT,
-        "parse_mode": "HTML",
-        "reply_markup": json.dumps(build_menu_keyboard(settings), ensure_ascii=False),
-    }) is not None
-
-
-def handle_callback(data: str, settings: dict, store, cfg: dict) -> str:
-    """Нажатия inline-кнопок. Возвращает текст подтверждения."""
-    if data.startswith("m:"):
-        return handle_command(f"/max {data[2:]}", settings, store, cfg)
-    if data.startswith("r:"):
-        v = data[2:]
-        return handle_command("/rooms все" if v == "*" else f"/rooms {v}",
-                              settings, store, cfg)
-    if data == "d:*":
-        return handle_command("/district все", settings, store, cfg)
-    if data.startswith("d:"):
-        name = data[2:]
-        if name not in DISTRICTS:
-            return ""
-        ds = set(settings.get("districts") or [])
-        if name in ds:
-            ds.discard(name)
-            action = f"➖ {name} убран из фильтра"
-        else:
-            ds.add(name)
-            action = f"➕ {name} добавлен в фильтр"
-        settings["districts"] = sorted(ds)
-        now = ", ".join(settings["districts"]) or "все районы"
-        return f"{action}\n📍 Сейчас слежу: {now}"
-    if data == "p":
-        return handle_command(
-            "/photos " + ("выкл" if settings.get("photos", True) else "вкл"),
-            settings, store, cfg)
-    if data == "z":
-        return handle_command("/resume" if settings.get("paused") else "/pause",
-                              settings, store, cfg)
-    if data == "s":
-        return handle_command("/status", settings, store, cfg)
-    if data == "h":
-        return HELP_TEXT
-    return ""
 
 ON_WORDS = {"on", "вкл", "да", "yes", "1"}
 OFF_WORDS = {"off", "выкл", "нет", "no", "0"}
@@ -803,56 +722,176 @@ def effective_cfg(cfg: dict, settings: dict) -> dict:
     return eff
 
 
-def handle_command(text: str, settings: dict, store, cfg: dict) -> str:
-    """Обрабатывает команду, меняет settings (in place). Возвращает ответ."""
+# --------------------------------------------------------- описание фильтров ---
+
+def rooms_label(settings: dict) -> str:
+    rmin, rmax = settings.get("rooms_min"), settings.get("rooms_max")
+    if rmin is None:
+        return "любые"
+    return f"{rmin}" if rmin == rmax else f"{rmin}–{rmax}"
+
+
+def districts_label(settings: dict) -> str:
+    ds = settings.get("districts") or []
+    if not ds:
+        return "все"
+    return ", ".join(ds) if len(ds) <= 2 else f"{len(ds)} выбрано"
+
+
+def price_label(cfg: dict, settings: dict) -> str:
+    eff = effective_cfg(cfg, settings)
+    lo = eff.get("min_price_usd") or 0
+    return f"до ${eff['max_price_usd']}" if not lo else f"${lo}–{eff['max_price_usd']}"
+
+
+def _btn(text, data):
+    return {"text": text, "callback_data": data}
+
+
+# ------------------------------------------------------------- экраны меню ---
+
+def kb_menu(cfg: dict, settings: dict) -> dict:
+    return {"inline_keyboard": [
+        [_btn(f"💰 Цена: {price_label(cfg, settings)}", "v:P")],
+        [_btn(f"🛏 Комнаты: {rooms_label(settings)}", "v:R"),
+         _btn(f"📍 Районы: {districts_label(settings)}", "v:D")],
+        [_btn(f"🖼 Фото: {'вкл' if settings.get('photos', True) else 'выкл'}", "p"),
+         _btn("▶️ Продолжить" if settings.get("paused") else "⏸ Пауза", "z")],
+        [_btn("📊 Статус", "s"), _btn("❓ Помощь", "h")],
+    ]}
+
+
+def kb_price(cfg: dict, settings: dict) -> dict:
+    cur = effective_cfg(cfg, settings)["max_price_usd"]
+    rows, row = [], []
+    for p in PRICE_PRESETS:
+        row.append(_btn(("✅ " if cur == p else "") + f"${p}", f"m:{p}"))
+        if len(row) == 3:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append([_btn(f"Мин. цена: ${settings.get('min_price_usd') or 0} ▸", "v:N")])
+    rows.append([_btn("← Меню", "v:M")])
+    return {"inline_keyboard": rows}
+
+
+def kb_min(cfg: dict, settings: dict) -> dict:
+    cur = settings.get("min_price_usd") or 0
+    return {"inline_keyboard": [
+        [_btn(("✅ " if cur == p else "") + f"${p}", f"n:{p}") for p in MIN_PRESETS],
+        [_btn("← Меню", "v:M")],
+    ]}
+
+
+def kb_rooms(cfg: dict, settings: dict) -> dict:
+    rmin, rmax = settings.get("rooms_min"), settings.get("rooms_max")
+    row = []
+    for label, val in ROOM_PRESETS:
+        if val == "*":
+            active = rmin is None
+        else:
+            a, _, b = val.partition("-")
+            active = (rmin, rmax) == (int(a), int(b) if b else int(a))
+        row.append(_btn(("✅ " if active else "") + label, f"r:{val}"))
+    return {"inline_keyboard": [row, [_btn("← Меню", "v:M")]]}
+
+
+def kb_districts(cfg: dict, settings: dict) -> dict:
+    ds = settings.get("districts") or []
+    rows = []
+    for i in range(0, len(DISTRICT_LIST), 2):
+        rows.append([_btn(("✅ " if n in ds else "▫️ ") + n, f"d:{DISTRICT_LIST.index(n)}")
+                     for n in DISTRICT_LIST[i:i + 2]])
+    rows.append([_btn(("✅ " if not ds else "") + "Весь Ташкент", "da")])
+    rows.append([_btn("← Меню", "v:M")])
+    return {"inline_keyboard": rows}
+
+
+VIEWS = {
+    "M": (lambda cfg, s: "⚙️ <b>Меню Rent Radar</b>\nНажимайте кнопки — фильтры применяются сразу.", kb_menu),
+    "P": (lambda cfg, s: f"💰 <b>Максимальная цена</b>\nСейчас: {price_label(cfg, s)}", kb_price),
+    "N": (lambda cfg, s: f"💰 <b>Минимальная цена</b>\nСейчас: ${s.get('min_price_usd') or 0}", kb_min),
+    "R": (lambda cfg, s: f"🛏 <b>Комнатность</b>\nСейчас: {rooms_label(s)}", kb_rooms),
+    "D": (lambda cfg, s: ("📍 <b>Районы</b>\nНажмите, чтобы включить или убрать. "
+                          f"Сейчас: {districts_label(s)}\n\n"
+                          "<i>Объявления без указанного района присылаю всегда — "
+                          "чтобы ничего не упустить.</i>"), kb_districts),
+}
+
+
+def render_view(cfg, settings, view: str, message_id=None) -> bool:
+    text_fn, kb_fn = VIEWS.get(view, VIEWS["M"])
+    payload = {
+        "chat_id": cfg["telegram_chat_id"],
+        "text": text_fn(cfg, settings),
+        "parse_mode": "HTML",
+        "reply_markup": json.dumps(kb_fn(cfg, settings), ensure_ascii=False),
+    }
+    if message_id:
+        payload["message_id"] = message_id
+        if tg_call(cfg, "editMessageText", payload) is not None:
+            return True
+        payload.pop("message_id", None)  # сообщение не редактируется — шлём новое
+    return tg_call(cfg, "sendMessage", payload) is not None
+
+
+def status_text(cfg: dict, settings: dict, store) -> str:
+    total, dups = store.counts()
+    return (f"📊 <b>Статус Rent Radar</b>\n"
+            f"💰 Цена: {price_label(cfg, settings)}\n"
+            f"🛏 Комнаты: {rooms_label(settings)}\n"
+            f"📍 Районы: {districts_label(settings)}\n"
+            f"🖼 Фото: {'вкл' if settings.get('photos', True) else 'выкл'}\n"
+            f"▶️ Уведомления: {'на паузе ⏸' if settings.get('paused') else 'работают'}\n"
+            f"🗂 В базе: {total} объявлений (дублей отсеяно: {dups})")
+
+
+# ------------------------------------------------------- команды и кнопки ---
+
+def handle_command(text: str, settings: dict, store, cfg: dict):
+    """Возвращает (ответ, view_или_None). view — какой экран показать кнопками."""
     t = (text or "").strip()
     low = t.lower()
     cmd, _, arg = low.partition(" ")
+    cmd = cmd.split("@")[0]
     arg = arg.strip()
     raw_arg = t.partition(" ")[2].strip()
 
     if cmd in ("/start", "/help"):
-        return HELP_TEXT
-
+        return HELP_TEXT, None
+    if cmd == "/menu":
+        return "", "M"
     if cmd == "/status":
-        total, dups = store.counts()
-        d = ", ".join(settings.get("districts") or []) or "все"
-        rmin, rmax = settings.get("rooms_min"), settings.get("rooms_max")
-        rooms = "любая" if rmin is None else (f"{rmin}" if rmin == rmax else f"{rmin}–{rmax}")
-        eff = effective_cfg(cfg, settings)
-        return (f"📊 <b>Статус Rent Radar</b>\n"
-                f"💰 Цена: {eff['min_price_usd'] or 0}–{eff['max_price_usd']}$\n"
-                f"🛏 Комнаты: {rooms}\n📍 Районы: {d}\n"
-                f"🖼 Фото: {'вкл' if settings.get('photos', True) else 'выкл'}\n"
-                f"▶️ Уведомления: {'на паузе ⏸' if settings.get('paused') else 'работают'}\n"
-                f"🗂 В базе: {total} объявлений (из них дублей: {dups})")
+        return status_text(cfg, settings, store), None
 
-    if cmd == "/max" or cmd == "/min":
+    if cmd in ("/max", "/min"):
         n = re.sub(r"[^\d]", "", arg)
         if not n:
-            return f"Укажите число, например: {cmd} 800"
+            return "", ("P" if cmd == "/max" else "N")
         settings["max_price_usd" if cmd == "/max" else "min_price_usd"] = int(n)
-        return f"✅ {'Макс' if cmd == '/max' else 'Мин'}. цена: ${n}"
+        return f"✅ {'Макс' if cmd == '/max' else 'Мин'}. цена: ${n}", None
 
     if cmd == "/rooms":
+        if not arg:
+            return "", "R"
         if arg in RESET_WORDS:
             settings["rooms_min"] = settings["rooms_max"] = None
-            return "✅ Фильтр комнат снят"
+            return "✅ Фильтр комнат снят", None
         m = re.match(r"^(\d)\s*[-–]\s*(\d)$", arg) or re.match(r"^(\d)$", arg)
         if not m:
-            return "Формат: /rooms 2 или /rooms 2-3 (или /rooms все)"
+            return "Формат: /rooms 2 или /rooms 2-3", "R"
         a = int(m.group(1))
         b = int(m.group(2)) if m.lastindex and m.lastindex > 1 else a
         settings["rooms_min"], settings["rooms_max"] = min(a, b), max(a, b)
-        return f"✅ Комнаты: {min(a, b)}–{max(a, b)}" if a != b else f"✅ Комнаты: {a}"
+        return (f"✅ Комнаты: {min(a, b)}–{max(a, b)}" if a != b else f"✅ Комнаты: {a}"), None
 
-    if cmd == "/districts":
-        return "📍 Районы, которые я распознаю:\n" + ", ".join(sorted(DISTRICTS))
-
-    if cmd == "/district":
+    if cmd in ("/district", "/districts"):
+        if not arg:
+            return "", "D"
         if arg in RESET_WORDS:
             settings["districts"] = []
-            return "✅ Фильтр районов снят — слежу за всем Ташкентом"
+            return "✅ Слежу за всем Ташкентом", None
         chosen, unknown = [], []
         for part in re.split(r"[,;]+", raw_arg):
             p = part.strip().lower()
@@ -863,88 +902,131 @@ def handle_command(text: str, settings: dict, store, cfg: dict) -> str:
                         or any(v in p for v in vs)), None)
             (chosen if hit else unknown).append(hit or part.strip())
         if not chosen:
-            return ("Не узнал районы: " + ", ".join(unknown) +
-                    "\nСписок — /districts")
+            return "Не узнал: " + ", ".join(unknown) + ". Выберите кнопками:", "D"
         settings["districts"] = sorted(set(chosen))
         reply = "✅ Районы: " + ", ".join(settings["districts"])
-        reply += "\n(объявления без указанного района тоже присылаю, чтобы ничего не упустить)"
         if unknown:
             reply += "\n⚠️ Не узнал: " + ", ".join(unknown)
-        return reply
+        return reply, None
 
     if cmd == "/photos":
         if arg in OFF_WORDS:
             settings["photos"] = False
-            return "✅ Фото выключены — только текст"
-        settings["photos"] = True
-        return "✅ Фото включены"
+        elif arg in ON_WORDS:
+            settings["photos"] = True
+        else:
+            settings["photos"] = not settings.get("photos", True)
+        return ("✅ Фото включены" if settings["photos"] else "✅ Фото выключены"), None
 
     if cmd == "/pause":
         settings["paused"] = True
-        return "⏸ Уведомления на паузе. Вернуть — /resume"
-
+        return "⏸ Уведомления на паузе. Вернуть — /resume", None
     if cmd == "/resume":
         settings["paused"] = False
-        return "▶️ Уведомления снова работают"
+        return "▶️ Уведомления снова работают", None
 
     if t.startswith("/"):
-        return "Не знаю такую команду. Список — /help"
-    return ""  # обычный текст молча пропускаем
+        return "Не знаю такую команду.", "M"
+    return "", None
 
 
-def process_commands(cfg: dict, store) -> dict:
-    """Читает новые сообщения боту, применяет команды, отвечает."""
+def handle_callback(data: str, settings: dict, store, cfg: dict):
+    """Возвращает (всплывающая_подсказка, view_для_перерисовки)."""
+    act, _, val = (data or "").partition(":")
+
+    if act == "v":
+        return "", (val if val in VIEWS else "M")
+    if act == "m" and val.isdigit():
+        settings["max_price_usd"] = int(val)
+        return f"Макс. цена: ${val}", "P"
+    if act == "n" and val.isdigit():
+        settings["min_price_usd"] = int(val)
+        return f"Мин. цена: ${val}", "N"
+    if act == "r":
+        if val == "*":
+            settings["rooms_min"] = settings["rooms_max"] = None
+            return "Комнаты: любые", "R"
+        a, _, b = val.partition("-")
+        if a.isdigit():
+            settings["rooms_min"] = int(a)
+            settings["rooms_max"] = int(b) if b.isdigit() else int(a)
+            return f"Комнаты: {rooms_label(settings)}", "R"
+        return "", "R"
+    if act == "d" and val.isdigit() and int(val) < len(DISTRICT_LIST):
+        name = DISTRICT_LIST[int(val)]
+        ds = set(settings.get("districts") or [])
+        if name in ds:
+            ds.discard(name)
+            toast = f"{name} убран"
+        else:
+            ds.add(name)
+            toast = f"{name} добавлен"
+        settings["districts"] = sorted(ds)
+        return toast, "D"
+    if act == "da":
+        settings["districts"] = []
+        return "Слежу за всем Ташкентом", "D"
+    if act == "p":
+        settings["photos"] = not settings.get("photos", True)
+        return ("Фото включены" if settings["photos"] else "Фото выключены"), "M"
+    if act == "z":
+        settings["paused"] = not settings.get("paused")
+        return ("Пауза" if settings["paused"] else "Продолжаю"), "M"
+    if act == "s":
+        send_telegram(cfg, status_text(cfg, settings, store))
+        return "Статус отправлен", None
+    if act == "h":
+        send_telegram(cfg, HELP_TEXT)
+        return "Справка отправлена", None
+    return "", None
+
+
+def process_commands(cfg: dict, store, long_poll: int = 0) -> dict:
+    """Читает новые сообщения/нажатия, применяет их, отвечает."""
     settings = {**default_settings(), **(store.get_kv("settings") or {})}
     offset = store.get_kv("tg_offset", 0)
-    resp = tg_call(cfg, "getUpdates", {"offset": offset + 1, "timeout": 0})
+    resp = tg_call(cfg, "getUpdates",
+                   {"offset": offset + 1, "timeout": long_poll},
+                   timeout=long_poll + 20)
     if not resp:
         return settings
     changed = False
-    menu_msg_id = None
     for upd in resp.get("result", []):
         offset = max(offset, upd.get("update_id", 0))
 
         cb = upd.get("callback_query")
         if cb:
-            chat_id = str(((cb.get("message") or {}).get("chat") or {}).get("id") or "")
-            if chat_id != str(cfg["telegram_chat_id"]):
+            msg = cb.get("message") or {}
+            if str((msg.get("chat") or {}).get("id") or "") != str(cfg["telegram_chat_id"]):
                 continue
+            toast, view = handle_callback(cb.get("data") or "", settings, store, cfg)
             tg_call(cfg, "answerCallbackQuery",
-                    {"callback_query_id": cb.get("id")})  # может быть просрочен — не страшно
-            reply = handle_callback(cb.get("data") or "", settings, store, cfg)
-            if reply:
-                send_telegram(cfg, reply)
-                changed = True
-                log.info("Кнопка: %s", (cb.get("data") or "")[:40])
-            menu_msg_id = (cb.get("message") or {}).get("message_id") or menu_msg_id
+                    {"callback_query_id": cb.get("id"), "text": toast})
+            if view:
+                render_view(cfg, settings, view, msg.get("message_id"))
+            changed = True
+            log.info("Кнопка: %s → %s", (cb.get("data") or "")[:30], toast[:40])
             continue
 
         msg = upd.get("message") or upd.get("edited_message") or {}
-        chat_id = str((msg.get("chat") or {}).get("id") or "")
-        if chat_id != str(cfg["telegram_chat_id"]):
+        if str((msg.get("chat") or {}).get("id") or "") != str(cfg["telegram_chat_id"]):
             continue  # игнорируем чужих
         text = (msg.get("text") or "").strip()
-        if text.lower().startswith("/menu"):
-            send_menu(cfg, settings)
-            log.info("Команда: /menu")
+        if not text:
             continue
-        reply = handle_command(text, settings, store, cfg)
+        reply, view = handle_command(text, settings, store, cfg)
         if reply:
             send_telegram(cfg, reply)
+        if view:
+            render_view(cfg, settings, view)
+        if reply or view:
             changed = True
             log.info("Команда: %s", text[:50])
     store.set_kv("tg_offset", offset)
     if changed:
         store.set_kv("settings", settings)
-    if menu_msg_id:  # обновляем отметки ✅ на клавиатуре меню
-        tg_call(cfg, "editMessageReplyMarkup", {
-            "chat_id": cfg["telegram_chat_id"], "message_id": menu_msg_id,
-            "reply_markup": json.dumps(build_menu_keyboard(settings), ensure_ascii=False),
-        })
     return settings
 
-
-# ------------------------------------------------------------------ main ----
 
 def passes_filters(l: dict, cfg: dict) -> bool:
     l["price_usd"] = to_usd(l.get("price_value"), l.get("price_currency"), cfg)
@@ -976,6 +1058,13 @@ def run():
                         format="%(asctime)s %(levelname)s %(message)s",
                         datefmt="%H:%M:%S")
     once = "--once" in sys.argv  # один проход по всем источникам и выход
+    minutes = 0.0                # --minutes N: работать N минут и выйти
+    if "--minutes" in sys.argv:
+        try:
+            minutes = float(sys.argv[sys.argv.index("--minutes") + 1])
+        except (IndexError, ValueError):
+            minutes = 0.0
+    deadline = time.time() + minutes * 60 if minutes else None
     cfg = load_config()
     store = Store(DB_PATH)
     store.prune()
@@ -987,15 +1076,16 @@ def run():
 
     enabled = {name: s for name, s in cfg["sources"].items() if s.get("enabled")}
     next_run = {name: 0.0 for name in enabled}
+    mode = " (разовый проход)" if once else (f" на {minutes:.0f} мин" if minutes else "")
     log.info("Rent Radar запущен%s. Источники: %s. Лимит: $%s",
-             " (разовый проход)" if once else "",
-             ", ".join(enabled) or "нет", cfg["max_price_usd"])
+             mode, ", ".join(enabled) or "нет", cfg["max_price_usd"])
     if first_run:
         log.info("Первый запуск: текущие объявления запоминаю без уведомлений")
 
     while not stop["flag"]:
         now = time.time()
-        settings = process_commands(cfg, store)
+        # long-poll: команды и нажатия кнопок ловим за ~секунду, а не раз в проход
+        settings = process_commands(cfg, store, long_poll=0 if once else 20)
         eff = effective_cfg(cfg, settings)
         for name, scfg in enabled.items():
             if not once and now < next_run[name]:
@@ -1053,9 +1143,14 @@ def run():
             first_run = False
         if once:
             break
-        time.sleep(15)
+        if deadline and time.time() >= deadline:
+            log.info("Отработал отведённое время, выхожу (состояние сохранено)")
+            break
+        elapsed = time.time() - now  # страховка от холостого прокручивания цикла
+        if elapsed < 3:
+            time.sleep(3 - elapsed)
 
-    log.info("Готово" if once else "Остановлено")
+    log.info("Готово" if once or deadline else "Остановлено")
 
 
 if __name__ == "__main__":
