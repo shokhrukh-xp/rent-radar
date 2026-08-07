@@ -1,23 +1,30 @@
 # Rent Radar на GitHub Actions.
-# Этот файл должен лежать в репозитории по пути:  .github/workflows/radar.yml
+# Лежит в репозитории по пути:  .github/workflows/radar.yml
+#
+# Раньше был короткий прогон по cron */5 — но GitHub сильно троттлит частые
+# расписания (реально запускалось раз в 20–40 минут), и бот «не отвечал».
+# Теперь один запуск живёт ~50 минут: команды и кнопки обрабатываются за
+# секунду (long-poll), объявления проверяются раз в 1–3 минуты, а состояние
+# сохраняется каждые 10 минут — чтобы ничего не потерялось при обрыве.
 name: Rent Radar
 
 on:
   schedule:
-    - cron: "*/5 * * * *"   # каждые 5 минут (реально GitHub запускает раз в 5–15 мин)
-  workflow_dispatch: {}      # кнопка ручного запуска
+    - cron: "*/30 * * * *"   # частое расписание = страховка: очередной запуск
+                             # стартует сразу, как закончится предыдущий
+  workflow_dispatch: {}
 
 permissions:
-  contents: write            # чтобы сохранять базу radar.db обратно в репозиторий
+  contents: write
 
 concurrency:
   group: rent-radar
-  cancel-in-progress: false
+  cancel-in-progress: false   # не убиваем работающий радар, ставим в очередь
 
 jobs:
   radar:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 60
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -30,17 +37,19 @@ jobs:
       - name: Install deps
         run: pip install --quiet requests
 
-      - name: Run radar (single pass)
+      - name: Run radar (~50 min, state saved every 10)
         env:
           RADAR_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           RADAR_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python rent_radar.py --once
-
-      - name: Save state (radar.db)
         run: |
           git config user.name "rent-radar"
           git config user.email "actions@users.noreply.github.com"
-          git add radar.db
-          git diff --cached --quiet || git commit -m "state $(date -u +'%Y-%m-%d %H:%M')"
-          git pull --rebase || true
-          git push
+          for i in 1 2 3 4 5; do
+            python rent_radar.py --minutes 10 || true
+            git add radar.db || true
+            git commit -q -m "state $(date -u +'%Y-%m-%d %H:%M')" || true
+            git fetch -q origin main || true
+            # -X theirs = при конфликте побеждает свежее состояние радара
+            git rebase -q -X theirs origin/main || git rebase --abort || true
+            git push -q origin main || true
+          done
