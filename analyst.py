@@ -266,6 +266,12 @@ def score_listing(listing, store, cfg, stats, prefs=None):
     else:
         cons.append("📷 без фото")
 
+    sig = premium_signals(listing)
+    if sig:
+        listing["premium"] = sig
+        pts += min(1.5, 0.5 * len(sig))
+        pros.append("🏙 " + ", ".join(sig[:3]))
+
     listing["score"] = round(max(0.0, min(10.0, pts)), 1)
     listing["pros"], listing["cons"] = pros, cons
     return listing
@@ -307,3 +313,62 @@ def geocode(query: str, requests_mod, headers=None):
         return float(d[0]["lat"]), float(d[0]["lon"]), d[0].get("display_name", query)[:80]
     except Exception:
         return None
+
+
+# ------------------------------------ класс жилья: новый ЖК с ремонтом ----
+# Ориентир — примеры пользователя: ЖК Mirabad Avenue, Tashkent City, Seoul Mun/NEXT.
+# Общее у них: жилой комплекс, авторский/дизайнерский ремонт, просторно.
+
+PREMIUM_COMPLEX = [
+    "жк ", "жк-", "ж/к", "ж.к", "жилой комплекс", "turar-joy majmua",
+    "avenue", "авеню", "residence", "резиденс", "tashkent city", "ташкент сити",
+    "seoul mun", "сеул мун", "next ", "нест", "nest one", "boulevard", "бульвар",
+    "golden house", "akay city", "акай сити", "darkhan", "дархан",
+    "orikzor", "green park", "грин парк", "греен парк", "panorama", "панорама",
+    "skyline", "riviera", "mirabad", "мирабад авеню", "plaza", "tower", "towers",
+]
+PREMIUM_FINISH = [
+    "авторск", "дизайнерск", "элит", "премиум", "premium", "luxury", "люкс",
+    "апартамент", "умный дом", "smart home", "евроремонт", "евро ремонт",
+    "hi-tech", "хай-тек", "бизнес класс", "бизнес-класс",
+]
+PREMIUM_NEW = ["новостройк", "новая квартира", "новый дом", "yangi qurilgan", "новострой"]
+
+
+def premium_signals(listing: dict, split=False):
+    """Признаки нового ЖК с хорошим ремонтом.
+    Сильные — про сам класс жилья; слабые лишь подтверждают."""
+    text = f"{listing.get('title', '')} {listing.get('text', '')}".lower()
+    found, strong = [], []
+    for kw in PREMIUM_COMPLEX:
+        if kw in text:
+            found.append(f"ЖК/комплекс («{kw.strip()}»)"); strong.append(found[-1])
+            break
+    for kw in PREMIUM_FINISH:
+        if kw in text:
+            found.append(f"ремонт/класс («{kw.strip()}»)"); strong.append(found[-1])
+            break
+    for kw in PREMIUM_NEW:
+        if kw in text:
+            found.append("новостройка"); strong.append("новостройка")
+            break
+
+    area, rooms = listing.get("area"), listing.get("rooms")
+    if area and rooms and area / rooms >= 30:
+        found.append(f"просторно ({area} м² на {rooms} комн.)")
+    ht = (listing.get("house_type") or "").lower()
+    if "монолит" in ht or "комплекс" in ht:
+        found.append("монолит/ЖК")
+    if "2 санузла" in (listing.get("text") or "").lower():
+        found.append("2 санузла")
+    return (found, strong) if split else found
+
+
+PREMIUM_MIN_SIGNALS = 2
+
+
+def is_premium(listing: dict) -> bool:
+    """Нужен хотя бы один сильный признак класса жилья и минимум два в сумме —
+    иначе «просторно + монолит» пропускало обычные квартиры за $380."""
+    found, strong = premium_signals(listing, split=True)
+    return bool(strong) and len(found) >= PREMIUM_MIN_SIGNALS
