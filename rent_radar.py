@@ -685,6 +685,7 @@ def send_listing(cfg, settings: dict, l: dict, likely_makler: bool) -> bool:
 
 HELP_TEXT = """🤖 <b>Rent Radar — команды</b>
 
+/menu — ⚙️ меню с кнопками (самый удобный способ)
 /status — текущие фильтры и статистика
 /max 800 — макс. цена, $
 /min 300 — мин. цена, $
@@ -695,6 +696,92 @@ HELP_TEXT = """🤖 <b>Rent Radar — команды</b>
 /pause — пауза уведомлений, /resume — продолжить
 
 ⏱ Отвечаю при ближайшей проверке (раз в 5–15 минут), не мгновенно."""
+
+MENU_TEXT = ("⚙️ <b>Меню Rent Radar</b>\n"
+             "Нажмите кнопку — применю при ближайшей проверке (до 5–15 мин) "
+             "и подтвержу сообщением. ✅ — текущие настройки.")
+
+PRICE_PRESETS = [400, 500, 700, 1000, 1500]
+ROOM_PRESETS = [("1", "1"), ("2", "2"), ("2–3", "2-3"), ("3+", "3-6"), ("любые", "*")]
+
+
+def build_menu_keyboard(settings: dict) -> dict:
+    kb = []
+    cur_max = settings.get("max_price_usd")
+    kb.append([{"text": ("✅" if cur_max == p else "") + f"💰{p}",
+                "callback_data": f"m:{p}"} for p in PRICE_PRESETS])
+    rmin, rmax = settings.get("rooms_min"), settings.get("rooms_max")
+    row = []
+    for label, val in ROOM_PRESETS:
+        if val == "*":
+            active = rmin is None
+        else:
+            a, _, b = val.partition("-")
+            active = (rmin, rmax) == (int(a), int(b) if b else int(a))
+        row.append({"text": ("✅" if active else "") + f"🛏{label}",
+                    "callback_data": f"r:{val}"})
+    kb.append(row)
+    ds = settings.get("districts") or []
+    names = sorted(DISTRICTS)
+    for i in range(0, len(names), 3):
+        kb.append([{"text": ("✅" if n in ds else "") + n, "callback_data": f"d:{n}"}
+                   for n in names[i:i + 3]])
+    kb.append([{"text": "📍 Все районы (сбросить выбор)", "callback_data": "d:*"}])
+    kb.append([
+        {"text": f"🖼 Фото: {'вкл' if settings.get('photos', True) else 'выкл'}",
+         "callback_data": "p"},
+        {"text": "▶️ Возобновить" if settings.get("paused") else "⏸ Пауза",
+         "callback_data": "z"},
+    ])
+    kb.append([{"text": "📊 Статус", "callback_data": "s"},
+               {"text": "❓ Помощь", "callback_data": "h"}])
+    return {"inline_keyboard": kb}
+
+
+def send_menu(cfg, settings: dict) -> bool:
+    return tg_call(cfg, "sendMessage", {
+        "chat_id": cfg["telegram_chat_id"], "text": MENU_TEXT,
+        "parse_mode": "HTML",
+        "reply_markup": json.dumps(build_menu_keyboard(settings), ensure_ascii=False),
+    }) is not None
+
+
+def handle_callback(data: str, settings: dict, store, cfg: dict) -> str:
+    """Нажатия inline-кнопок. Возвращает текст подтверждения."""
+    if data.startswith("m:"):
+        return handle_command(f"/max {data[2:]}", settings, store, cfg)
+    if data.startswith("r:"):
+        v = data[2:]
+        return handle_command("/rooms все" if v == "*" else f"/rooms {v}",
+                              settings, store, cfg)
+    if data == "d:*":
+        return handle_command("/district все", settings, store, cfg)
+    if data.startswith("d:"):
+        name = data[2:]
+        if name not in DISTRICTS:
+            return ""
+        ds = set(settings.get("districts") or [])
+        if name in ds:
+            ds.discard(name)
+            action = f"➖ {name} убран из фильтра"
+        else:
+            ds.add(name)
+            action = f"➕ {name} добавлен в фильтр"
+        settings["districts"] = sorted(ds)
+        now = ", ".join(settings["districts"]) or "все районы"
+        return f"{action}\n📍 Сейчас слежу: {now}"
+    if data == "p":
+        return handle_command(
+            "/photos " + ("выкл" if settings.get("photos", True) else "вкл"),
+            settings, store, cfg)
+    if data == "z":
+        return handle_command("/resume" if settings.get("paused") else "/pause",
+                              settings, store, cfg)
+    if data == "s":
+        return handle_command("/status", settings, store, cfg)
+    if data == "h":
+        return HELP_TEXT
+    return ""
 
 ON_WORDS = {"on", "вкл", "да", "yes", "1"}
 OFF_WORDS = {"off", "выкл", "нет", "no", "0"}
@@ -813,20 +900,47 @@ def process_commands(cfg: dict, store) -> dict:
     if not resp:
         return settings
     changed = False
+    menu_msg_id = None
     for upd in resp.get("result", []):
         offset = max(offset, upd.get("update_id", 0))
+
+        cb = upd.get("callback_query")
+        if cb:
+            chat_id = str(((cb.get("message") or {}).get("chat") or {}).get("id") or "")
+            if chat_id != str(cfg["telegram_chat_id"]):
+                continue
+            tg_call(cfg, "answerCallbackQuery",
+                    {"callback_query_id": cb.get("id")})  # может быть просрочен — не страшно
+            reply = handle_callback(cb.get("data") or "", settings, store, cfg)
+            if reply:
+                send_telegram(cfg, reply)
+                changed = True
+                log.info("Кнопка: %s", (cb.get("data") or "")[:40])
+            menu_msg_id = (cb.get("message") or {}).get("message_id") or menu_msg_id
+            continue
+
         msg = upd.get("message") or upd.get("edited_message") or {}
         chat_id = str((msg.get("chat") or {}).get("id") or "")
         if chat_id != str(cfg["telegram_chat_id"]):
             continue  # игнорируем чужих
-        reply = handle_command(msg.get("text") or "", settings, store, cfg)
+        text = (msg.get("text") or "").strip()
+        if text.lower().startswith("/menu"):
+            send_menu(cfg, settings)
+            log.info("Команда: /menu")
+            continue
+        reply = handle_command(text, settings, store, cfg)
         if reply:
             send_telegram(cfg, reply)
             changed = True
-            log.info("Команда: %s", (msg.get("text") or "")[:50])
+            log.info("Команда: %s", text[:50])
     store.set_kv("tg_offset", offset)
     if changed:
         store.set_kv("settings", settings)
+    if menu_msg_id:  # обновляем отметки ✅ на клавиатуре меню
+        tg_call(cfg, "editMessageReplyMarkup", {
+            "chat_id": cfg["telegram_chat_id"], "message_id": menu_msg_id,
+            "reply_markup": json.dumps(build_menu_keyboard(settings), ensure_ascii=False),
+        })
     return settings
 
 
