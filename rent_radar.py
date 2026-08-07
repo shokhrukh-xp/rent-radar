@@ -27,6 +27,7 @@ from pathlib import Path
 import requests
 
 import analyst
+import concierge
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "config.json"
@@ -143,8 +144,12 @@ ROOMS_RE = [
     re.compile(r"\b([1-6])\s*/\s*\d{1,2}\s*/\s*\d{1,2}\b"),
 ]
 
-PRICE_USD_RE = re.compile(r"(\d[\d\s.,]{0,9}\d|\d)\s*(?:у\.?\s?е|\$|usd)", re.I)
-PRICE_UZS_RE = re.compile(r"(\d[\d\s.,]{5,14}\d)\s*(?:сум|so['’`]?m|sum)", re.I)
+# Отрицательный lookbehind нужен, чтобы «5/9 1100 у.е.» не читалось как «91100»:
+# число не может начинаться сразу после цифры или дроби.
+# Плюс (?<!\w) у варианта с разделителями тысяч: иначе «70м2 850$» читалось как 2850.
+_NUM = r"(?<![\d/.,])((?<!\w)\d{1,3}(?:[\s.,]\d{3})+|\d+)"
+PRICE_USD_RE = re.compile(_NUM + r"\s*(?:у\.?\s?е|\$|usd)", re.I)
+PRICE_UZS_RE = re.compile(_NUM + r"\s*(?:сум|so['’`]?m|sum)", re.I)
 
 DISTRICTS = {
     "Яккасарай": ["яккасарай", "yakkasaroy", "yakkasaray"],
@@ -671,6 +676,14 @@ class Store:
             bid TEXT PRIMARY KEY, source TEXT, name TEXT, phone TEXT, ads INTEGER,
             districts TEXT, min_price REAL, max_price REAL,
             first_seen TEXT, status TEXT DEFAULT 'new', last_contact TEXT)""")
+        self.conn.execute("""CREATE TABLE IF NOT EXISTS broker_offers(
+            oid INTEGER PRIMARY KEY AUTOINCREMENT,
+            broker_chat TEXT, broker_name TEXT, broker_phone TEXT,
+            media_group TEXT, text TEXT, photos TEXT,
+            district TEXT, rooms INTEGER, area REAL, price_usd REAL, price_raw TEXT,
+            floor INTEGER, floors_total INTEGER,
+            created_at TEXT, status TEXT DEFAULT 'new', note TEXT,
+            asked_at TEXT, replied_at TEXT, dup_of INTEGER)""")
         self.conn.execute("""CREATE TABLE IF NOT EXISTS seller_ads(
             seller_id TEXT PRIMARY KEY, cnt INTEGER, checked_at TEXT)""")
         try:                                   # миграция старых баз
@@ -1026,6 +1039,10 @@ HELP_TEXT = """🤖 <b>Rent Radar</b>
 /min — минимальная цена
 /rooms — комнатность
 /district — районы
+/anketa — анкета: параметры поиска по шагам
+/shortlist — шортлист и запрос деталей у маклеров
+/offers — показать новые варианты от маклеров
+/prices — реальные цены по данным маклеров
 /brokers — база маклеров и рассылка запроса в один тап
 /owner — только хозяева (без маклеров)
 /segment — класс жилья: любой ↔ новый ЖК с ремонтом
@@ -1091,7 +1108,8 @@ def _btn(text, data):
 def kb_menu(cfg: dict, settings: dict) -> dict:
     return {"inline_keyboard": [
         [_btn("🔎 Подобрать лучшее сейчас", "f")],
-        [_btn("📇 Написать маклерам", "b")],
+        [_btn("📋 Анкета", "ank"), _btn("📇 Написать маклерам", "b")],
+        [_btn("📥 Новые варианты", "off"), _btn("📋 Шортлист", "sl")],
         [_btn("🏢 Класс: новый ЖК с ремонтом" if settings.get("segment") == "premium"
               else "🏢 Класс: любой", "sg")],
         [_btn("🔑 Только хозяева" if settings.get("owner_only", True)
@@ -1259,6 +1277,27 @@ def handle_command(text: str, settings: dict, store, cfg: dict):
         extra = f"\nБлижайшее метро: «{m[0]}» ({m[2]} мин пешком)" if m else ""
         return (f"✅ Работа: {escape_html(raw_arg)}\n📍 {escape_html(label)}{extra}\n"
                 "Теперь в разборе появится расстояние до неё."), None
+    if cmd in ("/anketa", "/start_search", "/profile"):
+        concierge.start_anketa(cfg, store)
+        return "", None
+    if cmd in ("/shortlist", "/short"):
+        concierge.show_shortlist(cfg, store)
+        return "", None
+    if cmd in ("/offers", "/varianty"):
+        pool = concierge.offers_by_status(store, "new") + \
+               concierge.offers_by_status(store, "later")
+        if not pool:
+            return "Пока маклеры ничего не прислали. Разослать запрос — /brokers", None
+        for o in pool[:8]:
+            concierge.notify_offer(cfg, store, o["oid"])
+        return "", None
+    if cmd in ("/prices", "/index"):
+        return concierge.concierge_status(store), None
+    if cmd in ("/request", "/text"):
+        t = store.get_kv("request_text")
+        if not t:
+            return "Текст запроса ещё не готов — пройдите /anketa", None
+        return f"📝 <b>Текущий запрос маклерам</b>\n\n<code>{escape_html(t)}</code>", None
     if cmd in ("/brokers", "/makler", "/outreach"):
         send_broker_cards(cfg, store, settings)
         return "", None
@@ -1383,9 +1422,9 @@ def tg_phone_link(phone: str) -> str:
     return f"https://t.me/+{digits}"
 
 
-def send_broker_cards(cfg, store, settings, limit=10) -> str:
+def send_broker_cards(cfg, store, settings, limit=10, text=None) -> str:
     """Карточки маклеров с готовым текстом — отправка в один тап."""
-    text = outreach_text(cfg, settings)
+    text = text or store.get_kv("request_text") or outreach_text(cfg, settings)
     pool = store.brokers(status="new", with_phone=True, limit=limit)
     total, withph, by_status = store.broker_stats()
     if not pool:
@@ -1461,8 +1500,22 @@ def run_search(cfg, store, settings, limit=5, days=7) -> str:
     return ""
 
 
-def handle_callback(data: str, settings: dict, store, cfg: dict):
+def handle_callback(data: str, settings: dict, store, cfg: dict, message_id=None):
     """Возвращает (всплывающая_подсказка, view_для_перерисовки)."""
+    d = data or ""
+    if d.startswith("a:"):
+        toast, _ = concierge.handle_anketa_cb(d, cfg, store, message_id)
+        return toast, None
+    if d.startswith("q:"):
+        toast, _ = concierge.handle_request_cb(d, cfg, store, settings)
+        return toast, None
+    if d.startswith("t:"):
+        toast, _ = concierge.handle_triage_cb(d, cfg, store)
+        return toast, None
+    if d.startswith("s:"):
+        toast, done = concierge.handle_shortlist_cb(d, cfg, store, message_id)
+        if done:
+            return toast, None
     act, _, val = (data or "").partition(":")
 
     if act == "v":
@@ -1522,6 +1575,18 @@ def handle_callback(data: str, settings: dict, store, cfg: dict):
     if act == "f":
         run_search(cfg, store, settings)
         return "Подбираю лучшее…", None
+    if act == "ank":
+        concierge.start_anketa(cfg, store)
+        return "Открываю анкету", None
+    if act == "sl":
+        concierge.show_shortlist(cfg, store)
+        return "Шортлист", None
+    if act == "off":
+        pool = concierge.offers_by_status(store, "new") + \
+               concierge.offers_by_status(store, "later")
+        for o in pool[:8]:
+            concierge.notify_offer(cfg, store, o["oid"])
+        return (f"Показываю {len(pool[:8])}" if pool else "Новых вариантов нет"), None
     if act == "b":
         send_broker_cards(cfg, store, settings)
         return "Готовлю рассылку…", None
@@ -1536,6 +1601,63 @@ def handle_callback(data: str, settings: dict, store, cfg: dict):
         send_telegram(cfg, HELP_TEXT)
         return "Справка отправлена", None
     return "", None
+
+
+BROKER_ACK = ("Спасибо! Передал варианты. Если подойдёт — вернусь с уточнениями. "
+              "Присылайте ещё, если появится что-то по параметрам.")
+
+
+def handle_broker_message(cfg, store, msg):
+    """Маклер пишет боту напрямую — сохраняем вариант и показываем владельцу."""
+    chat = msg.get("chat") or {}
+    chat_id = chat.get("id")
+    if not chat_id:
+        return
+    name = " ".join(x for x in [chat.get("first_name"), chat.get("last_name")] if x) \
+        or chat.get("username") or "маклер"
+    text = (msg.get("text") or msg.get("caption") or "").strip()
+
+    photos = []
+    ph = msg.get("photo") or []
+    if ph:                                  # берём самый крупный размер
+        best = max(ph, key=lambda x: (x.get("width") or 0) * (x.get("height") or 0))
+        if best.get("file_id"):
+            photos.append(best["file_id"])
+
+    if not text and not photos:
+        return
+
+    try:
+        oid, is_new = concierge.save_offer(store, cfg, chat_id, name, text, photos,
+                                           msg.get("media_group_id"))
+    except Exception as e:
+        log.warning("не сохранил вариант от %s: %s", chat_id, e)
+        return
+
+    # если по этому маклеру ждали ответ на уточнение — отметим
+    store.conn.execute(
+        "UPDATE broker_offers SET replied_at=? WHERE broker_chat=? AND status='asked'",
+        (datetime.now(timezone.utc).isoformat(), str(chat_id)))
+    store.conn.commit()
+
+    log.info("вариант #%s от %s (%s)", oid, name, "новый" if is_new else "доп. фото")
+    if is_new:
+        tg_call(cfg, "sendMessage", {"chat_id": chat_id, "text": BROKER_ACK})
+        store.set_kv("pending_offer", {"oid": oid, "at": time.time()})
+
+
+def flush_pending_offer(cfg, store):
+    """Показываем вариант через пару секунд — чтобы дособрались фото альбома."""
+    p = store.get_kv("pending_offer")
+    if not p:
+        return
+    if time.time() - p.get("at", 0) < 4:
+        return
+    store.set_kv("pending_offer", None)
+    try:
+        concierge.notify_offer(cfg, store, p["oid"])
+    except Exception as e:
+        log.warning("не показал вариант %s: %s", p.get("oid"), e)
 
 
 def process_commands(cfg: dict, store, long_poll: int = 0) -> dict:
@@ -1556,7 +1678,8 @@ def process_commands(cfg: dict, store, long_poll: int = 0) -> dict:
             msg = cb.get("message") or {}
             if str((msg.get("chat") or {}).get("id") or "") != str(cfg["telegram_chat_id"]):
                 continue
-            toast, view = handle_callback(cb.get("data") or "", settings, store, cfg)
+            toast, view = handle_callback(cb.get("data") or "", settings, store, cfg,
+                                          msg.get("message_id"))
             # подсказка-«всплывашка»; для старых нажатий Telegram её отклоняет — это нормально
             tg_call(cfg, "answerCallbackQuery",
                     {"callback_query_id": cb.get("id"), "text": toast}, quiet=True)
@@ -1567,9 +1690,18 @@ def process_commands(cfg: dict, store, long_poll: int = 0) -> dict:
             continue
 
         msg = upd.get("message") or upd.get("edited_message") or {}
-        if str((msg.get("chat") or {}).get("id") or "") != str(cfg["telegram_chat_id"]):
-            continue  # игнорируем чужих
+        chat = msg.get("chat") or {}
+        if str(chat.get("id") or "") != str(cfg["telegram_chat_id"]):
+            handle_broker_message(cfg, store, msg)   # это маклер прислал вариант
+            continue
+
         text = (msg.get("text") or "").strip()
+        if store.get_kv("awaiting_text") and text and not text.startswith("/"):
+            store.set_kv("request_text", text)
+            store.set_kv("awaiting_text", False)
+            send_telegram(cfg, "✅ Текст запроса сохранён. Показать маклеров — /brokers")
+            changed = True
+            continue
         if not text:
             continue
         reply, view = handle_command(text, settings, store, cfg)
@@ -1677,6 +1809,7 @@ def run():
         now = time.time()
         # long-poll: команды и нажатия кнопок ловим за ~секунду, а не раз в проход
         settings = process_commands(cfg, store, long_poll=0 if once else 20)
+        flush_pending_offer(cfg, store)
         eff = effective_cfg(cfg, settings)
         market = analyst.market_stats(store)
         for name, scfg in enabled.items():
