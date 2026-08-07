@@ -58,6 +58,9 @@ DEFAULT_CONFIG = {
         "посредникам не беспокоить",
     ],
     "makler_user_threshold": 3,
+    # Отсев нерелевантного: подселение/койко-места вместо целой квартиры
+    "min_sane_price_usd": 150,        # дешевле — это комната/подселение, не квартира
+    "require_price_or_district": True,  # без цены И без района толку нет
     "dedup": {
         "phone_days": 14,
         "fuzzy_days": 10,
@@ -161,6 +164,32 @@ UYBOR_DISTRICT_IDS = {
     203: "Чиланзар", 204: "Мирабад", 205: "Яккасарай", 206: "Сергели",
     1332: "Янгихаёт", 671085: "Алмазар", 674731: "Яшнабад",
 }
+
+
+# Признаки подселения / койко-места (это НЕ отдельная квартира).
+# Осторожно: «хозяином» без «с» — это «сдаёт хозяин», наоборот хороший признак.
+SHARED_KEYWORDS = [
+    "шерик", "sherik",                     # шериклик / шерикчилик / sheriklikka
+    "подселен", "койко", "койка", "сожител", "спальное место", "место в комнате",
+    "с хозяйкой", "с хозяином", "с хозяйкою", "xo'jayin bilan", "ega bilan",
+    "bola kerak", "bolalar kerak", "bollar kerak", "yigit kerak",
+    "qiz kerak", "qizlar kerak", "qizlar olinadi", "bola olinadi",
+    "оламиз", "olinadi", "ищу соседа", "ищу соседку", "ищем соседа",
+    "сожительниц", "подсел",
+    # аренда отдельной комнаты, а не квартиры
+    "аренда комнаты", "аренда одной комнаты", "одной комнаты", "одну комнату",
+    "сдается комната", "сдаётся комната", "сдам комнату", "сдаю комнату",
+    "комната в квартире", "комнаты в квартире", "комната для", "комнату в аренду",
+]
+
+
+def looks_like_room_share(text: str) -> str:
+    """Возвращает найденный признак подселения или ''."""
+    low = (text or "").lower()
+    for kw in SHARED_KEYWORDS:
+        if kw in low:
+            return kw
+    return ""
 
 
 def extract_phones(text: str) -> list:
@@ -767,7 +796,7 @@ RESET_WORDS = {"все", "всё", "любые", "любая", "сброс", "al
 
 def default_settings() -> dict:
     return {"photos": True, "paused": False, "districts": [],
-            "strict_district": False,
+            "strict_district": True, "exclude_shared": True,
             "rooms_min": None, "rooms_max": None,
             "max_price_usd": None, "min_price_usd": None}
 
@@ -814,6 +843,8 @@ def kb_menu(cfg: dict, settings: dict) -> dict:
         [_btn(f"💰 Цена: {price_label(cfg, settings)}", "v:P")],
         [_btn(f"🛏 Комнаты: {rooms_label(settings)}", "v:R"),
          _btn(f"📍 Районы: {districts_label(settings)}", "v:D")],
+        [_btn("🚫 Подселение: скрыто" if settings.get("exclude_shared", True)
+              else "⚠️ Подселение: показываю", "sh")],
         [_btn(f"🖼 Фото: {'вкл' if settings.get('photos', True) else 'выкл'}", "p"),
          _btn("▶️ Продолжить" if settings.get("paused") else "⏸ Пауза", "z")],
         [_btn("📊 Статус", "s"), _btn("❓ Помощь", "h")],
@@ -1035,6 +1066,10 @@ def handle_callback(data: str, settings: dict, store, cfg: dict):
         settings["strict_district"] = not settings.get("strict_district")
         return ("Только выбранные районы" if settings["strict_district"]
                 else "Плюс объявления без указанного района"), "D"
+    if act == "sh":
+        settings["exclude_shared"] = not settings.get("exclude_shared", True)
+        return ("Подселение и койко-места скрыты" if settings["exclude_shared"]
+                else "Показываю в том числе подселение"), "M"
     if act == "p":
         settings["photos"] = not settings.get("photos", True)
         return ("Фото включены" if settings["photos"] else "Фото выключены"), "M"
@@ -1110,6 +1145,22 @@ def passes_filters(l: dict, cfg: dict) -> bool:
     if a is not None and cfg["notify_max_age_days"] and a > cfg["notify_max_age_days"]:
         return False
     return True
+
+
+def relevance_reject(l: dict, cfg: dict, settings: dict) -> str:
+    """Возвращает причину отсева как нерелевантного или '' если объявление годится."""
+    if settings.get("exclude_shared", True):
+        hit = looks_like_room_share(f'{l.get("title","")} {l.get("text","")}')
+        if hit:
+            return f"подселение (по слову «{hit}»)"
+        usd = l.get("price_usd")
+        floor = cfg.get("min_sane_price_usd") or 0
+        if usd is not None and floor and usd < floor:
+            return f"цена ${usd:.0f} — это комната, а не квартира"
+    if cfg.get("require_price_or_district") and not l.get("price_value") \
+            and not l.get("district"):
+        return "нет ни цены, ни района"
+    return ""
 
 
 def passes_user_filters(l: dict, settings: dict) -> bool:
@@ -1190,6 +1241,12 @@ def run():
 
                 if not passes_filters(l, eff) or not passes_user_filters(l, settings):
                     store.save(l, notified=False)
+                    continue
+
+                reject = relevance_reject(l, cfg, settings)
+                if reject:
+                    store.save(l, notified=False)
+                    log.info("[%s] не по теме — %s: %s", name, reject, l["title"][:45])
                     continue
 
                 dup_of = store.find_dup(l, cfg)
