@@ -63,6 +63,7 @@ DEFAULT_CONFIG = {
     # Отсев нерелевантного: подселение/койко-места вместо целой квартиры
     "min_sane_price_usd": 150,        # дешевле — это комната/подселение, не квартира
     "require_price_or_district": True,  # без цены И без района толку нет
+    "broker_min_ads": 3,         # от скольких объявлений считаем продавца маклером
     "max_owner_ads": 2,          # у настоящего хозяина 1–2 объявления, не больше
     "seller_cache_days": 3,      # как часто перепроверять число объявлений продавца
     "dedup": {
@@ -666,6 +667,10 @@ class Store:
             seller_id TEXT PRIMARY KEY, cnt INTEGER)""")
         self.conn.execute("""CREATE TABLE IF NOT EXISTS kv(
             key TEXT PRIMARY KEY, value TEXT)""")
+        self.conn.execute("""CREATE TABLE IF NOT EXISTS brokers(
+            bid TEXT PRIMARY KEY, source TEXT, name TEXT, phone TEXT, ads INTEGER,
+            districts TEXT, min_price REAL, max_price REAL,
+            first_seen TEXT, status TEXT DEFAULT 'new', last_contact TEXT)""")
         self.conn.execute("""CREATE TABLE IF NOT EXISTS seller_ads(
             seller_id TEXT PRIMARY KEY, cnt INTEGER, checked_at TEXT)""")
         try:                                   # миграция старых баз
@@ -673,6 +678,67 @@ class Store:
         except sqlite3.OperationalError:
             pass
         self.conn.commit()
+
+    def upsert_broker(self, bid, source, name, phone, ads, district, price):
+        """Копим карточку маклера: телефон, районы, диапазон цен."""
+        row = self.conn.execute(
+            "SELECT districts, min_price, max_price, phone, ads FROM brokers WHERE bid=?",
+            (bid,)).fetchone()
+        ds = set()
+        lo = hi = None
+        if row:
+            ds = set(json.loads(row[0] or "[]"))
+            lo, hi = row[1], row[2]
+            phone = phone or row[3]
+            ads = max(ads or 0, row[4] or 0)
+        if district:
+            ds.add(district)
+        if price:
+            lo = price if lo is None else min(lo, price)
+            hi = price if hi is None else max(hi, price)
+        now = datetime.now(timezone.utc).isoformat()
+        if row:
+            self.conn.execute(
+                "UPDATE brokers SET name=?, phone=?, ads=?, districts=?, "
+                "min_price=?, max_price=? WHERE bid=?",
+                (name, phone, ads, json.dumps(sorted(ds), ensure_ascii=False), lo, hi, bid))
+        else:
+            self.conn.execute(
+                "INSERT INTO brokers(bid, source, name, phone, ads, districts, "
+                "min_price, max_price, first_seen) VALUES(?,?,?,?,?,?,?,?,?)",
+                (bid, source, name, phone, ads,
+                 json.dumps(sorted(ds), ensure_ascii=False), lo, hi, now))
+        self.conn.commit()
+
+    def brokers(self, status=None, with_phone=True, limit=50):
+        q = "SELECT bid, source, name, phone, ads, districts, min_price, max_price, status " \
+            "FROM brokers WHERE 1=1"
+        args = []
+        if status:
+            q += " AND status=?"; args.append(status)
+        if with_phone:
+            q += " AND phone IS NOT NULL AND phone != ''"
+        q += " ORDER BY ads DESC LIMIT ?"; args.append(limit)
+        out = []
+        for r in self.conn.execute(q, args):
+            out.append({"bid": r[0], "source": r[1], "name": r[2], "phone": r[3],
+                        "ads": r[4], "districts": json.loads(r[5] or "[]"),
+                        "min_price": r[6], "max_price": r[7], "status": r[8]})
+        return out
+
+    def broker_status(self, bid, status):
+        self.conn.execute(
+            "UPDATE brokers SET status=?, last_contact=? WHERE bid=?",
+            (status, datetime.now(timezone.utc).isoformat(), bid))
+        self.conn.commit()
+
+    def broker_stats(self):
+        rows = self.conn.execute(
+            "SELECT status, COUNT(*) FROM brokers GROUP BY status").fetchall()
+        total = self.conn.execute("SELECT COUNT(*) FROM brokers").fetchone()[0]
+        withph = self.conn.execute(
+            "SELECT COUNT(*) FROM brokers WHERE phone IS NOT NULL AND phone!=''").fetchone()[0]
+        return total, withph, dict(rows)
 
     def seller_ads_cached(self, seller_id: str, max_age_days: int):
         row = self.conn.execute(
@@ -960,6 +1026,7 @@ HELP_TEXT = """🤖 <b>Rent Radar</b>
 /min — минимальная цена
 /rooms — комнатность
 /district — районы
+/brokers — база маклеров и рассылка запроса в один тап
 /owner — только хозяева (без маклеров)
 /segment — класс жилья: любой ↔ новый ЖК с ремонтом
 /work — адрес работы (считать расстояние)
@@ -1024,6 +1091,7 @@ def _btn(text, data):
 def kb_menu(cfg: dict, settings: dict) -> dict:
     return {"inline_keyboard": [
         [_btn("🔎 Подобрать лучшее сейчас", "f")],
+        [_btn("📇 Написать маклерам", "b")],
         [_btn("🏢 Класс: новый ЖК с ремонтом" if settings.get("segment") == "premium"
               else "🏢 Класс: любой", "sg")],
         [_btn("🔑 Только хозяева" if settings.get("owner_only", True)
@@ -1191,6 +1259,9 @@ def handle_command(text: str, settings: dict, store, cfg: dict):
         extra = f"\nБлижайшее метро: «{m[0]}» ({m[2]} мин пешком)" if m else ""
         return (f"✅ Работа: {escape_html(raw_arg)}\n📍 {escape_html(label)}{extra}\n"
                 "Теперь в разборе появится расстояние до неё."), None
+    if cmd in ("/brokers", "/makler", "/outreach"):
+        send_broker_cards(cfg, store, settings)
+        return "", None
     if cmd in ("/find", "/top", "/search"):
         run_search(cfg, store, settings)
         return "", None
@@ -1258,6 +1329,99 @@ def handle_command(text: str, settings: dict, store, cfg: dict):
     if t.startswith("/"):
         return "Не знаю такую команду.", "M"
     return "", None
+
+
+def harvest_broker(l: dict, store, cfg, ads: int):
+    """Маклер — не проблема, а канал: копим его контакт и специализацию."""
+    if ads is None or ads < cfg.get("broker_min_ads", 3):
+        return
+    phones = l.get("phones") or []
+    bid = l.get("seller_id") or (f"tel:{phones[0]}" if phones else "")
+    if not bid:
+        return
+    store.upsert_broker(bid, l.get("source", ""), (l.get("seller") or "")[:60],
+                        phones[0] if phones else None, ads,
+                        l.get("district"), l.get("price_usd"))
+
+
+def outreach_text(cfg, settings) -> str:
+    """Запрос маклеру, собранный из ваших текущих фильтров."""
+    eff = effective_cfg(cfg, settings)
+    parts = ["Здравствуйте! Ищу квартиру в долгосрочную аренду в Ташкенте."]
+    what = []
+    rmin, rmax = settings.get("rooms_min"), settings.get("rooms_max")
+    if rmin:
+        what.append(f"{rmin}–{rmax} комнаты" if rmax and rmax != rmin else f"{rmin} комнаты")
+    ds = settings.get("districts") or []
+    if ds:
+        what.append("районы: " + ", ".join(ds))
+    lo = eff.get("min_price_usd") or 0
+    what.append(f"бюджет до ${eff['max_price_usd']}" if not lo
+                else f"бюджет ${lo}–{eff['max_price_usd']}")
+    parts.append("Параметры: " + "; ".join(what) + ".")
+    if settings.get("segment") == "premium":
+        parts.append("Интересует новый ЖК с хорошим (авторским) ремонтом, "
+                     "меблированная, желательно не первый и не последний этаж.")
+    parts.append("Если есть подходящие варианты — пришлите, пожалуйста, фото, "
+                 "точный адрес, этаж, площадь и цену.")
+    parts.append("Сразу уточните, пожалуйста, размер комиссии. Спасибо!")
+    return "\n".join(parts)
+
+
+def wa_link(phone: str, text: str) -> str:
+    from urllib.parse import quote
+    digits = re.sub(r"[^\d]", "", phone or "")
+    if len(digits) == 9:
+        digits = "998" + digits
+    return f"https://wa.me/{digits}?text={quote(text)}"
+
+
+def tg_phone_link(phone: str) -> str:
+    digits = re.sub(r"[^\d]", "", phone or "")
+    if len(digits) == 9:
+        digits = "998" + digits
+    return f"https://t.me/+{digits}"
+
+
+def send_broker_cards(cfg, store, settings, limit=10) -> str:
+    """Карточки маклеров с готовым текстом — отправка в один тап."""
+    text = outreach_text(cfg, settings)
+    pool = store.brokers(status="new", with_phone=True, limit=limit)
+    total, withph, by_status = store.broker_stats()
+    if not pool:
+        send_telegram(cfg, "📇 Новых маклеров с телефоном пока нет.\n"
+                           f"Всего в базе: {total} (с телефоном {withph}).\n"
+                           "База пополняется по мере работы радара — попробуйте позже.")
+        return ""
+
+    send_telegram(cfg, (
+        f"📇 <b>Рассылка маклерам</b> — {len(pool)} контактов\n"
+        f"В базе всего {total}, с телефоном {withph}, уже написано "
+        f"{by_status.get('contacted', 0)}.\n\n"
+        "Текст запроса (собран из ваших фильтров):\n"
+        f"<code>{escape_html(text)}</code>\n\n"
+        "Жмите «WhatsApp» — откроется чат с уже набранным текстом, "
+        "останется нажать отправить."))
+
+    for b in pool:
+        d = ", ".join(b["districts"][:3]) or "—"
+        price = ""
+        if b["min_price"] and b["max_price"]:
+            price = f" · ${b['min_price']:.0f}–{b['max_price']:.0f}"
+        body = (f"📇 <b>{escape_html(b['name'] or 'Маклер')}</b> · {escape_html(b['source'])}\n"
+                f"📞 {escape_html(fmt_phone(b['phone']) if len(b['phone']) == 9 else b['phone'])}\n"
+                f"🏘 {b['ads']} объявлений · районы: {escape_html(d)}{price}")
+        kb = {"inline_keyboard": [
+            [{"text": "📱 WhatsApp с текстом", "url": wa_link(b["phone"], text)},
+             {"text": "✈️ Telegram", "url": tg_phone_link(b["phone"])}],
+            [{"text": "✅ Написал", "callback_data": f"bw:{b['bid']}"},
+             {"text": "🚫 Пропустить", "callback_data": f"bx:{b['bid']}"}],
+        ]}
+        tg_call(cfg, "sendMessage", {
+            "chat_id": cfg["telegram_chat_id"], "text": body, "parse_mode": "HTML",
+            "reply_markup": json.dumps(kb, ensure_ascii=False)})
+        time.sleep(0.7)
+    return ""
 
 
 def run_search(cfg, store, settings, limit=5, days=7) -> str:
@@ -1358,6 +1522,13 @@ def handle_callback(data: str, settings: dict, store, cfg: dict):
     if act == "f":
         run_search(cfg, store, settings)
         return "Подбираю лучшее…", None
+    if act == "b":
+        send_broker_cards(cfg, store, settings)
+        return "Готовлю рассылку…", None
+    if act in ("bw", "bx") or data.startswith(("bw:", "bx:")):
+        kind, _, bid = data.partition(":")
+        store.broker_status(bid, "contacted" if kind == "bw" else "skipped")
+        return ("Отмечено: написал" if kind == "bw" else "Пропущен"), None
     if act == "s":
         send_telegram(cfg, status_text(cfg, settings, store))
         return "Статус отправлен", None
@@ -1532,6 +1703,10 @@ def run():
                 if first_run:
                     store.save(l, notified=False)
                     continue
+
+                ads_cnt = count_seller_ads(l, store, cfg)
+                l["seller_ads"] = ads_cnt
+                harvest_broker(l, store, cfg, ads_cnt)
 
                 if not passes_filters(l, eff) or not passes_user_filters(l, settings):
                     store.save(l, notified=False)
