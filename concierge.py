@@ -8,6 +8,7 @@ Rent Radar — консьерж-контур: работа через макле
 нужные функции берутся лениво внутри вызовов.
 """
 
+import base64
 import json
 import re
 import statistics
@@ -680,3 +681,70 @@ def concierge_status(store):
         for d, (m, n) in sorted(idx["m2"].items(), key=lambda x: -x[1][0])[:6]:
             lines.append(f"  {d}: ${m:.1f}/м² (n={n})")
     return "\n".join(lines)
+
+
+# ========================================== TELEGRAM MINI APP ============
+
+WEBAPP_URL = "https://shokhrukh-xp.github.io/rent-radar/"
+
+
+def webapp_url(store):
+    """Ссылка на мини-апп с предзаполнением текущими ответами."""
+    ans = get_anketa(store).get("ans", {})
+    if not ans:
+        return WEBAPP_URL
+    try:
+        blob = base64.b64encode(
+            json.dumps(ans, ensure_ascii=False).encode("utf-8")).decode()
+        if len(blob) < 1500:
+            return f"{WEBAPP_URL}#{blob}"
+    except (TypeError, ValueError):
+        pass
+    return WEBAPP_URL
+
+
+def send_app_button(cfg, store, text=None):
+    """Постоянная клавиатура с кнопкой мини-аппа.
+
+    Именно reply-кнопка, а не inline: только из неё Telegram разрешает
+    WebApp.sendData() — иначе форма не смогла бы вернуть данные боту.
+    """
+    rr = _rr()
+    kb = {"keyboard": [[{"text": "🏠 Открыть приложение",
+                         "web_app": {"url": webapp_url(store)}}]],
+          "resize_keyboard": True, "is_persistent": True}
+    return rr.tg_call(cfg, "sendMessage", {
+        "chat_id": cfg["telegram_chat_id"],
+        "text": text or ("📱 Кнопка приложения — под полем ввода.\n"
+                         "Там все параметры поиска на одном экране."),
+        "reply_markup": json.dumps(kb, ensure_ascii=False)})
+
+
+ALLOWED = {f["k"] for f in STEPS} | {"budget_max"}
+
+
+def apply_webapp_data(cfg, store, raw):
+    """Принимает JSON из мини-аппа и превращает в ответы анкеты."""
+    rr = _rr()
+    try:
+        data = json.loads(raw)
+    except (TypeError, ValueError):
+        rr.send_telegram(cfg, "Не смог прочитать данные из приложения.")
+        return False
+
+    ans = {k: v for k, v in (data.get("ans") or {}).items() if k in ALLOWED}
+    if not ans:
+        return False
+
+    # точная сумма из поля имеет приоритет над пресетом
+    bmax = str(ans.pop("budget_max", "") or "").strip()
+    if bmax.isdigit():
+        ans["budget"] = bmax
+    ans.setdefault("city", "tashkent")
+
+    a = get_anketa(store)
+    a["ans"] = {**a.get("ans", {}), **ans}
+    a["i"] = len(STEPS)
+    save_anketa(store, a)
+    finish_anketa(cfg, store)
+    return True

@@ -1039,7 +1039,8 @@ HELP_TEXT = """🤖 <b>Rent Radar</b>
 /min — минимальная цена
 /rooms — комнатность
 /district — районы
-/anketa — анкета: параметры поиска по шагам
+/app — открыть приложение (все параметры на одном экране)
+/anketa — то же; /steps — старый пошаговый режим
 /shortlist — шортлист и запрос деталей у маклеров
 /offers — показать новые варианты от маклеров
 /prices — реальные цены по данным маклеров
@@ -1108,7 +1109,9 @@ def _btn(text, data):
 def kb_menu(cfg: dict, settings: dict) -> dict:
     return {"inline_keyboard": [
         [_btn("🔎 Подобрать лучшее сейчас", "f")],
-        [_btn("📋 Анкета", "ank"), _btn("📇 Написать маклерам", "b")],
+        # Мини-апп открывается только с reply-клавиатуры: Telegram разрешает
+        # WebApp.sendData() исключительно оттуда. Здесь — кнопка, которая её пришлёт.
+        [_btn("🏠 Открыть приложение", "ank"), _btn("📇 Написать маклерам", "b")],
         [_btn("📥 Новые варианты", "off"), _btn("📋 Шортлист", "sl")],
         [_btn("🏢 Класс: новый ЖК с ремонтом" if settings.get("segment") == "premium"
               else "🏢 Класс: любой", "sg")],
@@ -1277,7 +1280,16 @@ def handle_command(text: str, settings: dict, store, cfg: dict):
         extra = f"\nБлижайшее метро: «{m[0]}» ({m[2]} мин пешком)" if m else ""
         return (f"✅ Работа: {escape_html(raw_arg)}\n📍 {escape_html(label)}{extra}\n"
                 "Теперь в разборе появится расстояние до неё."), None
+    if cmd in ("/app", "/mini", "/開"):
+        concierge.send_app_button(cfg, store)
+        return "", None
     if cmd in ("/anketa", "/start_search", "/profile"):
+        concierge.send_app_button(
+            cfg, store,
+            "📋 Параметры поиска удобнее задать в приложении — кнопка под полем ввода.\n"
+            "Если хочется по старинке, пошагово кнопками — /steps")
+        return "", None
+    if cmd == "/steps":
         concierge.start_anketa(cfg, store)
         return "", None
     if cmd in ("/shortlist", "/short"):
@@ -1576,8 +1588,8 @@ def handle_callback(data: str, settings: dict, store, cfg: dict, message_id=None
         run_search(cfg, store, settings)
         return "Подбираю лучшее…", None
     if act == "ank":
-        concierge.start_anketa(cfg, store)
-        return "Открываю анкету", None
+        concierge.send_app_button(cfg, store)
+        return "Кнопка приложения отправлена", None
     if act == "sl":
         concierge.show_shortlist(cfg, store)
         return "Шортлист", None
@@ -1693,6 +1705,13 @@ def process_commands(cfg: dict, store, long_poll: int = 0) -> dict:
         chat = msg.get("chat") or {}
         if str(chat.get("id") or "") != str(cfg["telegram_chat_id"]):
             handle_broker_message(cfg, store, msg)   # это маклер прислал вариант
+            continue
+
+        wad = msg.get("web_app_data") or {}
+        if wad.get("data"):
+            if concierge.apply_webapp_data(cfg, store, wad["data"]):
+                log.info("параметры получены из мини-аппа")
+                changed = True
             continue
 
         text = (msg.get("text") or "").strip()
