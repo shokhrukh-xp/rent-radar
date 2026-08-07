@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Rent Radar</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  :root{
+    --bg: var(--tg-theme-bg-color, #ffffff);
+    --sec: var(--tg-theme-secondary-bg-color, #f2f2f7);
+    --ink: var(--tg-theme-text-color, #000000);
+    --hint: var(--tg-theme-hint-color, #8e8e93);
+    --link: var(--tg-theme-link-color, #007aff);
+    --btn: var(--tg-theme-button-color, #007aff);
+    --btn-ink: var(--tg-theme-button-text-color, #ffffff);
+    --line: color-mix(in srgb, var(--hint) 25%, transparent);
+  }
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  body{
+    margin:0;background:var(--bg);color:var(--ink);
+    font:16px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+    padding:12px 14px calc(96px + env(safe-area-inset-bottom));
+  }
+  h1{font-size:20px;margin:4px 0 2px;letter-spacing:-.02em}
+  .lead{color:var(--hint);font-size:14px;margin:0 0 18px}
+  section{background:var(--sec);border-radius:14px;padding:14px;margin-bottom:12px}
+  .q{font-size:15px;font-weight:600;margin-bottom:10px;display:flex;
+     justify-content:space-between;align-items:baseline;gap:8px}
+  .q em{font-style:normal;font-weight:500;color:var(--hint);font-size:13px}
+  .chips{display:flex;flex-wrap:wrap;gap:8px}
+  .chip{
+    border:1.5px solid var(--line);background:var(--bg);color:var(--ink);
+    border-radius:11px;padding:9px 14px;font-size:14.5px;cursor:pointer;
+    transition:transform .06s ease, background .12s ease, border-color .12s ease;
+    user-select:none;min-height:40px;display:flex;align-items:center
+  }
+  .chip:active{transform:scale(.96)}
+  .chip.on{background:var(--btn);border-color:var(--btn);color:var(--btn-ink);font-weight:600}
+  .grid3 .chip{flex:1 1 calc(33.333% - 6px);justify-content:center;text-align:center}
+  .grid2 .chip{flex:1 1 calc(50% - 4px);justify-content:center;text-align:center}
+  .row{display:flex;gap:10px;align-items:center;margin-top:10px}
+  input[type=number],input[type=text]{
+    flex:1;background:var(--bg);color:var(--ink);border:1.5px solid var(--line);
+    border-radius:11px;padding:11px 13px;font-size:16px;min-width:0
+  }
+  input:focus{outline:none;border-color:var(--btn)}
+  .preview{
+    background:var(--bg);border:1px solid var(--line);border-radius:11px;
+    padding:13px;font-size:14px;white-space:pre-wrap;color:var(--ink);
+    max-height:230px;overflow:auto
+  }
+  .muted{color:var(--hint);font-size:13px;margin-top:8px}
+  .fallback{position:fixed;left:14px;right:14px;bottom:calc(14px + env(safe-area-inset-bottom));
+    background:var(--btn);color:var(--btn-ink);border:0;border-radius:13px;
+    padding:16px;font-size:16px;font-weight:600;width:calc(100% - 28px);display:none}
+</style>
+</head>
+<body>
+
+<h1>Параметры поиска</h1>
+<p class="lead">Заполните — бот соберёт запрос и разошлёт маклерам.</p>
+
+<div id="form"></div>
+
+<section>
+  <div class="q">Запрос маклерам <em>обновляется сам</em></div>
+  <div class="preview" id="preview"></div>
+  <div class="muted">Текст можно отредактировать в боте перед отправкой.</div>
+</section>
+
+<button class="fallback" id="fallback">Сохранить и продолжить</button>
+
+<script>
+const tg = window.Telegram?.WebApp;
+const DISTRICTS = ["Алмазар","Бектемир","Мирабад","Мирзо-Улугбек","Сергели","Учтепа",
+                   "Чиланзар","Шайхантахур","Юнусабад","Яккасарай","Янгихаёт","Яшнабад"];
+
+const FIELDS = [
+  {k:"deal", q:"Что ищем", o:[["rent","🔑 Аренда"],["buy","🏦 Покупка"]], cols:2},
+  {k:"rooms", q:"Комнат", multi:true, cols:3,
+   o:[["1","1"],["2","2"],["3","3"],["4","4+"],["any","Любое"]]},
+  {k:"budget", q:"Бюджет, $ в месяц", num:"budget_max", cols:2,
+   o:[["500","до 500"],["800","500–800"],["1200","800–1200"],["1800","1200–1800"],["3000","выше 1800"]]},
+  {k:"districts", q:"Районы", multi:true, cols:3, districts:true},
+  {k:"class", q:"Класс жилья", cols:1,
+   o:[["any","Любой"],["new","Новостройка / ЖК"],["premium","ЖК + дизайнерский ремонт"]]},
+  {k:"furniture", q:"Мебель и техника", cols:3,
+   o:[["yes","Нужна"],["no","Не нужна"],["any","Неважно"]]},
+  {k:"floor", q:"Этаж", cols:2,
+   o:[["mid","Не первый и не последний"],["any","Неважно"]]},
+  {k:"term", q:"Срок", cols:3,
+   o:[["12","От года"],["6","6–12 мес"],["3","До полугода"]]},
+  {k:"movein", q:"Когда заезжать", cols:3,
+   o:[["now","Сейчас"],["month","В течение месяца"],["flex","Гибко"]]},
+  {k:"who", q:"Кто будет жить", cols:3,
+   o:[["single","Один / одна"],["couple","Пара"],["family","Семья с детьми"]]},
+  {k:"pets", q:"Животные", cols:2, o:[["no","Нет"],["yes","Есть"]]},
+  {k:"parking", q:"Парковка", cols:2, o:[["yes","Нужна"],["any","Неважно"]]},
+  {k:"contact", q:"Куда маклерам слать варианты", cols:1,
+   o:[["bot","🤖 Помощнику-боту"],["me","👤 Мне лично"],["both","Оба контакта"]]},
+];
+
+let A = {deal:"rent", rooms:[], budget:"1200", districts:[], class:"any",
+         furniture:"any", floor:"any", term:"12", movein:"flex", who:"single",
+         pets:"no", parking:"any", contact:"bot", budget_max:""};
+
+try {                                   // предзаполнение из бота
+  const h = location.hash.slice(1);
+  if (h) Object.assign(A, JSON.parse(decodeURIComponent(escape(atob(h)))));
+} catch (e) {}
+
+function opts(f){
+  return f.districts ? DISTRICTS.map((d,i)=>[String(i),d]).concat([["any","Любой"]]) : f.o;
+}
+
+function render(){
+  const root = document.getElementById("form");
+  root.innerHTML = "";
+  for (const f of FIELDS){
+    const s = document.createElement("section");
+    const hint = f.multi ? "можно несколько" : "";
+    s.innerHTML = `<div class="q"><span>${f.q}</span><em>${hint}</em></div>`;
+    const box = document.createElement("div");
+    box.className = "chips grid" + (f.cols || 2);
+    for (const [val, label] of opts(f)){
+      const b = document.createElement("div");
+      b.className = "chip" + (isOn(f, val) ? " on" : "");
+      b.textContent = label;
+      b.onclick = () => { pick(f, val); tg?.HapticFeedback?.selectionChanged(); };
+      box.appendChild(b);
+    }
+    s.appendChild(box);
+    if (f.num){
+      const row = document.createElement("div");
+      row.className = "row";
+      row.innerHTML = `<input type="number" inputmode="numeric" placeholder="или точная сумма, $"
+                        value="${A.budget_max || ""}" id="bmax">`;
+      s.appendChild(row);
+      row.querySelector("#bmax").oninput = e => { A.budget_max = e.target.value; preview(); };
+    }
+    root.appendChild(s);
+  }
+  preview();
+}
+
+function isOn(f, val){
+  return f.multi ? (A[f.k] || []).includes(val) : A[f.k] === val;
+}
+
+function pick(f, val){
+  if (f.multi){
+    let cur = A[f.k] || [];
+    if (val === "any") cur = ["any"];
+    else {
+      cur = cur.filter(x => x !== "any");
+      cur = cur.includes(val) ? cur.filter(x => x !== val) : cur.concat([val]);
+    }
+    A[f.k] = cur;
+  } else {
+    A[f.k] = val;
+  }
+  render();
+}
+
+function budgetText(){
+  if (A.budget_max) return `бюджет до $${A.budget_max}/мес`;
+  const m = {"500":"до $500","800":"до $800","1200":"до $1200",
+             "1800":"до $1800","3000":"выше $1800"}[A.budget];
+  return "бюджет " + (m || "до $1200") + "/мес";
+}
+
+function preview(){
+  const p = [];
+  p.push(`Здравствуйте! Хочу ${A.deal === "buy" ? "купить" : "снять"} квартиру в Ташкенте.`);
+  const req = [];
+  const rooms = (A.rooms || []).filter(x => x !== "any").sort();
+  if (rooms.length) req.push("комнат: " + rooms.join("–") + (rooms.includes("4") ? "+" : ""));
+  const ds = (A.districts || []).filter(x => x !== "any").map(i => DISTRICTS[+i]);
+  if (ds.length) req.push("районы: " + ds.join(", "));
+  req.push(budgetText());
+  p.push("Параметры: " + req.join("; ") + ".");
+
+  const w = [];
+  if (A.class === "premium") w.push("интересует новый ЖК с хорошим (авторским) ремонтом");
+  else if (A.class === "new") w.push("желательно новостройка или ЖК");
+  if (A.furniture === "yes") w.push("с мебелью и техникой");
+  if (A.floor === "mid") w.push("не первый и не последний этаж");
+  if (A.parking === "yes") w.push("нужна парковка");
+  if (A.term === "12") w.push("на длительный срок, от года");
+  if (A.who === "family") w.push("для семьи");
+  if (A.pets === "yes") w.push("с домашним животным");
+  if (w.length) p.push("Пожелания: " + w.join(", ") + ".");
+
+  const mv = {now:"Готов заехать сразу.", month:"Заезд в течение месяца.",
+              flex:"По срокам гибко."}[A.movein];
+  if (mv) p.push(mv);
+  p.push("Если есть подходящие варианты — пришлите, пожалуйста, фото, точный адрес, " +
+         "этаж, площадь и цену. Сразу уточните размер комиссии.");
+  if (A.contact === "bot" || A.contact === "both")
+    p.push("Варианты удобнее присылать моему помощнику: @rentradarxp_bot — я там всё смотрю.");
+  p.push("Спасибо!");
+  document.getElementById("preview").textContent = p.join("\n");
+}
+
+function submit(){
+  const payload = JSON.stringify({v: 1, ans: A});
+  tg?.HapticFeedback?.notificationOccurred("success");
+  if (tg?.sendData) tg.sendData(payload);
+  else alert("Откройте страницу через кнопку в боте");
+}
+
+if (tg){
+  tg.ready();
+  tg.expand();
+  tg.MainButton.setText("Сохранить и продолжить");
+  tg.MainButton.show();
+  tg.MainButton.onClick(submit);
+} else {
+  const b = document.getElementById("fallback");
+  b.style.display = "block";
+  b.onclick = submit;
+}
+render();
+</script>
+</body>
+</html>
