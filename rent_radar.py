@@ -63,6 +63,8 @@ DEFAULT_CONFIG = {
     # Отсев нерелевантного: подселение/койко-места вместо целой квартиры
     "min_sane_price_usd": 150,        # дешевле — это комната/подселение, не квартира
     "require_price_or_district": True,  # без цены И без района толку нет
+    "max_owner_ads": 2,          # у настоящего хозяина 1–2 объявления, не больше
+    "seller_cache_days": 3,      # как часто перепроверять число объявлений продавца
     "dedup": {
         "phone_days": 14,
         "fuzzy_days": 10,
@@ -178,6 +180,9 @@ SHARED_KEYWORDS = [
     "qiz kerak", "qizlar kerak", "qizlar olinadi", "bola olinadi",
     "оламиз", "olinadi", "ищу соседа", "ищу соседку", "ищем соседа",
     "сожительниц", "подсел",
+    "sherilik", "sherkilik", "шериклик", "шерикчилик",   # частые опечатки
+    "xona / joy", "xona/joy", "joy beriladi", "o'rin beriladi", "o'rindosh",
+    "xona beriladi", "1 o'rin", "bitta joy",
     # аренда отдельной комнаты, а не квартиры
     "аренда комнаты", "аренда одной комнаты", "одной комнаты", "одну комнату",
     "сдается комната", "сдаётся комната", "сдам комнату", "сдаю комнату",
@@ -579,6 +584,73 @@ SOURCE_FETCHERS = {
 }
 
 
+def count_seller_ads(listing: dict, store, cfg) -> int:
+    """Сколько активных объявлений у этого продавца.
+    Для OLX спрашиваем напрямую — это точное число; для прочих считаем по своей базе."""
+    sid = listing.get("seller_id") or ""
+    if not sid:
+        return -1
+    cached = store.seller_ads_cached(sid, cfg.get("seller_cache_days", 3))
+    if cached is not None:
+        return cached
+
+    cnt = -1
+    if sid.startswith("olx:"):
+        uid = sid.split(":", 1)[1]
+        if uid and uid != "None":
+            try:
+                r = requests.get("https://www.olx.uz/api/v1/offers/", timeout=20,
+                                 headers=HEADERS, params={"user_id": uid, "limit": 1})
+                if r.status_code == 200:
+                    md = (r.json() or {}).get("metadata") or {}
+                    cnt = int(md.get("total_elements", md.get("visible_total_count", -1)))
+            except (requests.RequestException, ValueError, TypeError) as e:
+                log.info("не удалось узнать число объявлений %s: %s", sid, e)
+    if cnt < 0:                                   # запасной вариант — своя статистика
+        row = store.conn.execute(
+            "SELECT cnt FROM seller_counts WHERE seller_id=?", (sid,)).fetchone()
+        cnt = row[0] if row else -1
+    if cnt >= 0:
+        store.seller_ads_put(sid, cnt)
+    return cnt
+
+
+def phone_spread(listing: dict, store) -> int:
+    """В скольких объявлениях встречался телефон продавца."""
+    best = 0
+    for ph in (listing.get("phones") or [])[:2]:
+        row = store.conn.execute(
+            "SELECT COUNT(DISTINCT key) FROM phones WHERE phone=?", (ph,)).fetchone()
+        best = max(best, row[0] if row else 0)
+    return best
+
+
+def owner_only_reject(l: dict, store, cfg, settings) -> str:
+    """Строгий режим: пропускаем только тех, кто почти наверняка хозяин."""
+    if (l.get("commission") or "").strip().lower() in ("да", "ha", "yes"):
+        return "продавец берёт комиссию"
+    if l.get("is_business"):
+        return "бизнес-аккаунт, а не частное лицо"
+
+    text = f"{l.get('title', '')} {l.get('text', '')}".lower()
+    says_owner = any(kw.lower() in text for kw in (cfg.get("hot_keywords") or []))
+
+    spread = phone_spread(l, store)
+    if spread > cfg.get("max_owner_ads", 2):
+        return f"телефон встречается в {spread} объявлениях"
+
+    ads = l.get("seller_ads")
+    if ads is None:
+        ads = count_seller_ads(l, store, cfg)
+        l["seller_ads"] = ads
+    limit = cfg.get("max_owner_ads", 2)
+    if ads > limit:
+        return f"у продавца {ads} объявлений — это маклер"
+    if ads < 0 and not says_owner:
+        return "не удалось подтвердить, что это хозяин"
+    return ""
+
+
 # ----------------------------------------------------------------- store ----
 
 class Store:
@@ -594,16 +666,39 @@ class Store:
             seller_id TEXT PRIMARY KEY, cnt INTEGER)""")
         self.conn.execute("""CREATE TABLE IF NOT EXISTS kv(
             key TEXT PRIMARY KEY, value TEXT)""")
+        self.conn.execute("""CREATE TABLE IF NOT EXISTS seller_ads(
+            seller_id TEXT PRIMARY KEY, cnt INTEGER, checked_at TEXT)""")
         try:                                   # миграция старых баз
             self.conn.execute("ALTER TABLE listings ADD COLUMN data TEXT")
         except sqlite3.OperationalError:
             pass
         self.conn.commit()
 
+    def seller_ads_cached(self, seller_id: str, max_age_days: int):
+        row = self.conn.execute(
+            "SELECT cnt, checked_at FROM seller_ads WHERE seller_id=?",
+            (seller_id,)).fetchone()
+        if not row:
+            return None
+        try:
+            when = datetime.fromisoformat(row[1])
+        except (TypeError, ValueError):
+            return None
+        if (datetime.now(timezone.utc) - when).days > max_age_days:
+            return None
+        return row[0]
+
+    def seller_ads_put(self, seller_id: str, cnt: int):
+        self.conn.execute(
+            "INSERT OR REPLACE INTO seller_ads(seller_id, cnt, checked_at) VALUES(?,?,?)",
+            (seller_id, cnt, datetime.now(timezone.utc).isoformat()))
+        self.conn.commit()
+
     KEEP = ("key", "source", "url", "title", "text", "price_value", "price_currency",
             "price_usd", "rooms", "district", "district_raw", "phones", "created_at",
             "seller", "seller_id", "is_business", "photo_urls", "lat", "lon", "area",
-            "floor", "floors_total", "furnished", "house_type", "commission")
+            "floor", "floors_total", "furnished", "house_type", "commission",
+            "seller_ads", "premium")
 
     def pack(self, listing: dict) -> str:
         d = {k: listing.get(k) for k in self.KEEP}
@@ -767,6 +862,14 @@ def format_message(l: dict, cfg: dict, likely_makler: bool) -> str:
     if dt:
         lines.append(f'🕐 {dt.astimezone(TASHKENT_TZ).strftime("%d.%m %H:%M")}')
 
+    ev = []
+    if l.get("seller_ads") is not None and l["seller_ads"] >= 0:
+        ev.append(f"{l['seller_ads']} объявл. у продавца")
+    if (l.get("commission") or "").lower() in ("нет", "yo'q", "no"):
+        ev.append("без комиссии")
+    if ev:
+        lines.append("🔑 " + " · ".join(ev))
+
     if l.get("score") is not None:              # разбор от аналитика
         lines.append(f'\n<b>Оценка {l["score"]}/10</b>')
         for x in (l.get("pros") or [])[:5]:
@@ -857,6 +960,7 @@ HELP_TEXT = """🤖 <b>Rent Radar</b>
 /min — минимальная цена
 /rooms — комнатность
 /district — районы
+/owner — только хозяева (без маклеров)
 /segment — класс жилья: любой ↔ новый ЖК с ремонтом
 /work — адрес работы (считать расстояние)
 /photos — фото вкл/выкл
@@ -875,6 +979,7 @@ RESET_WORDS = {"все", "всё", "любые", "любая", "сброс", "al
 def default_settings() -> dict:
     return {"photos": True, "paused": False, "districts": [],
             "strict_district": True, "exclude_shared": True, "segment": "any",
+            "owner_only": True,
             "rooms_min": None, "rooms_max": None,
             "max_price_usd": None, "min_price_usd": None}
 
@@ -921,6 +1026,8 @@ def kb_menu(cfg: dict, settings: dict) -> dict:
         [_btn("🔎 Подобрать лучшее сейчас", "f")],
         [_btn("🏢 Класс: новый ЖК с ремонтом" if settings.get("segment") == "premium"
               else "🏢 Класс: любой", "sg")],
+        [_btn("🔑 Только хозяева" if settings.get("owner_only", True)
+              else "🔓 Все, включая маклеров", "oo")],
         [_btn(f"💰 Цена: {price_label(cfg, settings)}", "v:P")],
         [_btn(f"🛏 Комнаты: {rooms_label(settings)}", "v:R"),
          _btn(f"📍 Районы: {districts_label(settings)}", "v:D")],
@@ -1019,6 +1126,8 @@ def status_text(cfg: dict, settings: dict, store) -> str:
             f"💰 Цена: {price_label(cfg, settings)}\n"
             f"🛏 Комнаты: {rooms_label(settings)}\n"
             f"📍 Районы: {districts_label(settings)}\n"
+            f"🔑 Только хозяева: {'да' if settings.get('owner_only', True) else 'нет'}\n"
+            f"🏢 Класс: {'новый ЖК' if settings.get('segment') == 'premium' else 'любой'}\n"
             f"🖼 Фото: {'вкл' if settings.get('photos', True) else 'выкл'}\n"
             f"▶️ Уведомления: {'на паузе ⏸' if settings.get('paused') else 'работают'}\n"
             f"🗂 В базе: {total} объявлений (дублей отсеяно: {dups})")
@@ -1041,6 +1150,16 @@ def handle_command(text: str, settings: dict, store, cfg: dict):
         return "", "M"
     if cmd == "/status":
         return status_text(cfg, settings, store), None
+    if cmd in ("/owner", "/hozyain"):
+        if arg in OFF_WORDS or arg in RESET_WORDS:
+            settings["owner_only"] = False
+        elif arg in ON_WORDS:
+            settings["owner_only"] = True
+        else:
+            settings["owner_only"] = not settings.get("owner_only", True)
+        return (("🔑 Только хозяева: проверяю комиссию, число объявлений продавца "
+                 "и повторы телефона" if settings["owner_only"]
+                 else "🔓 Показываю всех, включая маклеров"), None)
     if cmd in ("/segment", "/class"):
         if arg in ("премиум", "premium", "жк", "новостройка", "вкл", "on"):
             settings["segment"] = "premium"
@@ -1150,7 +1269,8 @@ def run_search(cfg, store, settings, limit=5, days=7) -> str:
         try:
             if not passes_filters(l, effective_cfg(cfg, settings)):
                 continue
-            if not passes_user_filters(l, settings) or relevance_reject(l, cfg, settings):
+            if not passes_user_filters(l, settings) or \
+                    relevance_reject(l, cfg, settings, store):
                 continue
             ok.append(analyst.score_listing(l, store, cfg, stats, settings))
         except Exception as e:
@@ -1217,6 +1337,10 @@ def handle_callback(data: str, settings: dict, store, cfg: dict):
         settings["strict_district"] = not settings.get("strict_district")
         return ("Только выбранные районы" if settings["strict_district"]
                 else "Плюс объявления без указанного района"), "D"
+    if act == "oo":
+        settings["owner_only"] = not settings.get("owner_only", True)
+        return ("Только хозяева" if settings["owner_only"]
+                else "Показываю всех, включая маклеров"), "M"
     if act == "sg":
         settings["segment"] = "any" if settings.get("segment") == "premium" else "premium"
         return ("Только новые ЖК с ремонтом" if settings["segment"] == "premium"
@@ -1305,7 +1429,7 @@ def passes_filters(l: dict, cfg: dict) -> bool:
     return True
 
 
-def relevance_reject(l: dict, cfg: dict, settings: dict) -> str:
+def relevance_reject(l: dict, cfg: dict, settings: dict, store=None) -> str:
     """Возвращает причину отсева как нерелевантного или '' если объявление годится."""
     if settings.get("exclude_shared", True):
         hit = looks_like_room_share(f'{l.get("title","")} {l.get("text","")}')
@@ -1323,6 +1447,10 @@ def relevance_reject(l: dict, cfg: dict, settings: dict) -> str:
         l["premium"] = sig
         if not analyst.is_premium(l):
             return "не тот класс жилья (нужен новый ЖК с дизайнерским ремонтом)"
+    if settings.get("owner_only", True) and store is not None:
+        why = owner_only_reject(l, store, cfg, settings)
+        if why:
+            return "не хозяин: " + why
     return ""
 
 
@@ -1409,7 +1537,7 @@ def run():
                     store.save(l, notified=False)
                     continue
 
-                reject = relevance_reject(l, cfg, settings)
+                reject = relevance_reject(l, cfg, settings, store)
                 if reject:
                     store.save(l, notified=False)
                     log.info("[%s] не по теме — %s: %s", name, reject, l["title"][:45])
