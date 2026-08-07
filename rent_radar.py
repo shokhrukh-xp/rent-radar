@@ -26,6 +26,8 @@ from pathlib import Path
 
 import requests
 
+import analyst
+
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "config.json"
 DB_PATH = BASE_DIR / "radar.db"
@@ -201,6 +203,11 @@ def extract_phones(text: str) -> list:
     return phones
 
 
+def sane(v, lo, hi):
+    """Отбрасывает мусорные значения из объявлений (площадь 4 м², этаж 99 и т.п.)."""
+    return v if (v is not None and lo <= v <= hi) else None
+
+
 def as_int(v):
     """Аккуратно приводит к int: API источников иногда отдают числа строками."""
     if isinstance(v, bool) or v is None:
@@ -345,6 +352,11 @@ def fetch_olx(scfg: dict, cfg: dict) -> list:
                     price_currency = "USD" if ("у.е" in v["label"] or "$" in v["label"]) else "UZS"
         loc = o.get("location") or {}
         text = f'{o.get("title") or ""}\n{(o.get("description") or "")[:800]}'
+        prm = {}
+        for p_ in o.get("params", []):
+            v_ = p_.get("value") or {}
+            prm[p_.get("key")] = v_.get("label") or v_.get("key")
+        mp = o.get("map") or {}
         photo_urls = []
         for ph in (o.get("photos") or [])[:6]:
             link = (ph or {}).get("link") or ""
@@ -354,6 +366,13 @@ def fetch_olx(scfg: dict, cfg: dict) -> list:
                         .replace("{width}", "1280").replace("{height}", "1024"))
         out.append({
             "photo_urls": photo_urls,
+            "lat": mp.get("lat"), "lon": mp.get("lon"),
+            "area": sane(as_int(prm.get("total_area")), 10, 500),
+            "floor": sane(as_int(prm.get("floor")), 1, 60),
+            "floors_total": sane(as_int(prm.get("total_floors")), 1, 60),
+            "furnished": prm.get("furnished"),
+            "house_type": prm.get("house_type"),
+            "commission": prm.get("comission"),
             "key": f'olx:{o.get("id")}',
             "source": "OLX",
             "url": o.get("url") or "",
@@ -410,6 +429,11 @@ def fetch_uybor(scfg: dict, cfg: dict) -> list:
             photo_urls.append(u)
         out.append({
             "photo_urls": photo_urls,
+            "lat": o.get("lat"), "lon": o.get("lng"),
+            "area": sane(as_int(o.get("square")), 10, 500),
+            "floor": sane(as_int(o.get("floor")), 1, 60),
+            "floors_total": sane(as_int(o.get("floorTotal")), 1, 60),
+            "house_type": o.get("foundation"),
             "key": f'uybor:{o.get("id")}',
             "source": "Uybor",
             "url": f'https://uybor.uz/listings/{o.get("id")}',
@@ -570,7 +594,45 @@ class Store:
             seller_id TEXT PRIMARY KEY, cnt INTEGER)""")
         self.conn.execute("""CREATE TABLE IF NOT EXISTS kv(
             key TEXT PRIMARY KEY, value TEXT)""")
+        try:                                   # миграция старых баз
+            self.conn.execute("ALTER TABLE listings ADD COLUMN data TEXT")
+        except sqlite3.OperationalError:
+            pass
         self.conn.commit()
+
+    KEEP = ("key", "source", "url", "title", "text", "price_value", "price_currency",
+            "price_usd", "rooms", "district", "district_raw", "phones", "created_at",
+            "seller", "seller_id", "is_business", "photo_urls", "lat", "lon", "area",
+            "floor", "floors_total", "furnished", "house_type", "commission")
+
+    def pack(self, listing: dict) -> str:
+        d = {k: listing.get(k) for k in self.KEEP}
+        d["text"] = (d.get("text") or "")[:600]
+        d["photo_urls"] = (d.get("photo_urls") or [])[:4]
+        return json.dumps(d, ensure_ascii=False)
+
+    def has_data(self, key: str) -> bool:
+        row = self.conn.execute(
+            "SELECT data IS NOT NULL FROM listings WHERE key=?", (key,)).fetchone()
+        return bool(row and row[0])
+
+    def backfill(self, listing: dict):
+        self.conn.execute("UPDATE listings SET data=? WHERE key=?",
+                          (self.pack(listing), listing["key"]))
+        self.conn.commit()
+
+    def recent(self, days=7):
+        since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        rows = self.conn.execute(
+            "SELECT data FROM listings WHERE first_seen > ? AND dup_of IS NULL "
+            "AND data IS NOT NULL", (since,)).fetchall()
+        out = []
+        for (raw,) in rows:
+            try:
+                out.append(json.loads(raw))
+            except (TypeError, ValueError):
+                pass
+        return out
 
     def get_kv(self, key, default=None):
         row = self.conn.execute("SELECT value FROM kv WHERE key=?", (key,)).fetchone()
@@ -631,12 +693,12 @@ class Store:
         now = datetime.now(timezone.utc).isoformat()
         self.conn.execute(
             "INSERT OR IGNORE INTO listings(key, source, url, title, norm_text, "
-            "price_usd, rooms, district, first_seen, notified, dup_of) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            "price_usd, rooms, district, first_seen, notified, dup_of, data) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
             (listing["key"], listing["source"], listing["url"], listing["title"],
              normalize_text(listing["text"]), listing.get("price_usd"),
              listing.get("rooms"), listing.get("district"), now,
-             int(notified), dup_of))
+             int(notified), dup_of, self.pack(listing)))
         for ph in listing["phones"]:
             self.conn.execute(
                 "INSERT INTO phones(phone, key, first_seen) VALUES(?,?,?)",
@@ -704,6 +766,17 @@ def format_message(l: dict, cfg: dict, likely_makler: bool) -> str:
     dt = parse_iso(l.get("created_at") or "")
     if dt:
         lines.append(f'🕐 {dt.astimezone(TASHKENT_TZ).strftime("%d.%m %H:%M")}')
+
+    if l.get("score") is not None:              # разбор от аналитика
+        lines.append(f'\n<b>Оценка {l["score"]}/10</b>')
+        for x in (l.get("pros") or [])[:5]:
+            lines.append(escape_html(x))
+        for x in (l.get("cons") or [])[:3]:
+            lines.append("⚠️ " + escape_html(x))
+        q = analyst.ask_seller(l)
+        if q:
+            lines.append("❓ Спросить: " + escape_html("; ".join(q)))
+
     lines.append(f'\n<a href="{l["url"]}">Открыть объявление</a>  ⚡ Звоните сразу!')
     return "\n".join(lines)
 
@@ -772,6 +845,9 @@ def send_listing(cfg, settings: dict, l: dict, likely_makler: bool) -> bool:
 
 HELP_TEXT = """🤖 <b>Rent Radar</b>
 
+<b>/find</b> — подобрать лучшее прямо сейчас: агент оценит всё накопленное,
+сравнит с рынком, посчитает метро и отдаст топ-5 с разбором.
+
 Проще всего — <b>/menu</b>: там всё выбирается кнопками.
 
 Команды (можно и без аргумента — покажу кнопки):
@@ -781,6 +857,7 @@ HELP_TEXT = """🤖 <b>Rent Radar</b>
 /min — минимальная цена
 /rooms — комнатность
 /district — районы
+/work — адрес работы (считать расстояние)
 /photos — фото вкл/выкл
 /pause — пауза, /resume — продолжить"""
 
@@ -840,6 +917,7 @@ def _btn(text, data):
 
 def kb_menu(cfg: dict, settings: dict) -> dict:
     return {"inline_keyboard": [
+        [_btn("🔎 Подобрать лучшее сейчас", "f")],
         [_btn(f"💰 Цена: {price_label(cfg, settings)}", "v:P")],
         [_btn(f"🛏 Комнаты: {rooms_label(settings)}", "v:R"),
          _btn(f"📍 Районы: {districts_label(settings)}", "v:D")],
@@ -960,6 +1038,31 @@ def handle_command(text: str, settings: dict, store, cfg: dict):
         return "", "M"
     if cmd == "/status":
         return status_text(cfg, settings, store), None
+    if cmd == "/work":
+        if not raw_arg:
+            wp = settings.get("work_point")
+            cur = (f"Сейчас: {settings.get('work_label') or wp}" if wp
+                   else "Пока не задан.")
+            return ("🏢 <b>Адрес работы</b> — агент будет считать до него расстояние.\n"
+                    f"{cur}\nЗадать: <code>/work Амир Темур 107Б</code>\n"
+                    "Убрать: <code>/work нет</code>"), None
+        if arg in RESET_WORDS or arg in OFF_WORDS:
+            settings["work_point"] = None
+            settings["work_label"] = None
+            return "✅ Адрес работы убран", None
+        g = analyst.geocode(raw_arg, requests)
+        if not g:
+            return "Не нашёл такой адрес. Попробуйте иначе, например: /work метро Айбек", None
+        lat, lon, label = g
+        settings["work_point"] = [lat, lon]
+        settings["work_label"] = raw_arg
+        m = analyst.nearest_metro(lat, lon)
+        extra = f"\nБлижайшее метро: «{m[0]}» ({m[2]} мин пешком)" if m else ""
+        return (f"✅ Работа: {escape_html(raw_arg)}\n📍 {escape_html(label)}{extra}\n"
+                "Теперь в разборе появится расстояние до неё."), None
+    if cmd in ("/find", "/top", "/search"):
+        run_search(cfg, store, settings)
+        return "", None
 
     if cmd in ("/max", "/min"):
         n = re.sub(r"[^\d]", "", arg)
@@ -1026,6 +1129,42 @@ def handle_command(text: str, settings: dict, store, cfg: dict):
     return "", None
 
 
+def run_search(cfg, store, settings, limit=5, days=7) -> str:
+    """Анализирует всё, что накоплено, и присылает лучшее прямо сейчас."""
+    stats = analyst.market_stats(store)
+    pool = store.recent(days=days)
+    ok = []
+    for l in pool:
+        try:
+            if not passes_filters(l, effective_cfg(cfg, settings)):
+                continue
+            if not passes_user_filters(l, settings) or relevance_reject(l, cfg, settings):
+                continue
+            ok.append(analyst.score_listing(l, store, cfg, stats, settings))
+        except Exception as e:
+            log.warning("оценка %s не удалась: %s", l.get("key"), e)
+    ok.sort(key=lambda x: x.get("score", 0), reverse=True)
+
+    if not ok:
+        send_telegram(cfg, f"🔍 За последние {days} дн. подходящих вариантов нет.\n"
+                           f"Просмотрено {len(pool)}. Попробуйте ослабить фильтры в /menu.")
+        return ""
+
+    head = [f"🔎 <b>Лучшее сейчас</b> — {min(limit, len(ok))} из {len(ok)} подходящих "
+            f"(просмотрено {len(pool)} за {days} дн.)"]
+    med = stats["rooms"]
+    if med:
+        head.append("📊 Медианы: " + ", ".join(
+            f"{r}-комн ${m:.0f}" for r, (m, n) in sorted(med.items())))
+    send_telegram(cfg, "\n".join(head))
+
+    for i, l in enumerate(ok[:limit], 1):
+        l["title"] = f"#{i} · {l.get('title', '')}"
+        send_listing(cfg, settings, l, likely_makler=False)
+        time.sleep(1)
+    return ""
+
+
 def handle_callback(data: str, settings: dict, store, cfg: dict):
     """Возвращает (всплывающая_подсказка, view_для_перерисовки)."""
     act, _, val = (data or "").partition(":")
@@ -1076,6 +1215,9 @@ def handle_callback(data: str, settings: dict, store, cfg: dict):
     if act == "z":
         settings["paused"] = not settings.get("paused")
         return ("Пауза" if settings["paused"] else "Продолжаю"), "M"
+    if act == "f":
+        run_search(cfg, store, settings)
+        return "Подбираю лучшее…", None
     if act == "s":
         send_telegram(cfg, status_text(cfg, settings, store))
         return "Статус отправлен", None
@@ -1216,6 +1358,7 @@ def run():
         # long-poll: команды и нажатия кнопок ловим за ~секунду, а не раз в проход
         settings = process_commands(cfg, store, long_poll=0 if once else 20)
         eff = effective_cfg(cfg, settings)
+        market = analyst.market_stats(store)
         for name, scfg in enabled.items():
             if not once and now < next_run[name]:
                 continue
@@ -1232,6 +1375,8 @@ def run():
               # одно битое объявление не должно ронять весь радар
               try:
                 if store.known(l["key"]):
+                    if not store.has_data(l["key"]):
+                        store.backfill(l)       # дозаполняем гео и характеристики
                     continue
                 seller_cnt = store.bump_seller(l.get("seller_id", ""))
 
@@ -1264,6 +1409,10 @@ def run():
                     continue
 
                 likely_makler = seller_cnt >= cfg["makler_user_threshold"]
+                try:
+                    analyst.score_listing(l, store, cfg, market, settings)
+                except Exception as e:
+                    log.warning("анализ %s не удался: %s", l.get("key"), e)
                 ok = send_listing(cfg, settings, l, likely_makler)
                 store.save(l, notified=ok)
                 if ok:
