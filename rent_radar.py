@@ -268,7 +268,15 @@ def fetch_olx(scfg: dict, cfg: dict) -> list:
                     price_currency = "USD" if ("у.е" in v["label"] or "$" in v["label"]) else "UZS"
         loc = o.get("location") or {}
         text = f'{o.get("title") or ""}\n{(o.get("description") or "")[:800]}'
+        photo_urls = []
+        for ph in (o.get("photos") or [])[:6]:
+            link = (ph or {}).get("link") or ""
+            if link:
+                photo_urls.append(
+                    link.replace("{width}x{height}", "1280x1024")
+                        .replace("{width}", "1280").replace("{height}", "1024"))
         out.append({
+            "photo_urls": photo_urls,
             "key": f'olx:{o.get("id")}',
             "source": "OLX",
             "url": o.get("url") or "",
@@ -305,7 +313,24 @@ def fetch_uybor(scfg: dict, cfg: dict) -> list:
         rooms = o.get("room") or extract_rooms(desc)
         text = desc[:900]
         title = desc.strip().split("\n")[0][:80] or "Объявление Uybor"
+        photo_urls = []
+        for m_item in (o.get("media") or [])[:6]:
+            u = None
+            if isinstance(m_item, str):
+                u = m_item
+            elif isinstance(m_item, dict):
+                for k in ("url", "link", "file", "path", "name", "filename"):
+                    v = m_item.get(k)
+                    if isinstance(v, str) and v:
+                        u = v
+                        break
+            if not u:
+                continue
+            if not u.startswith("http"):
+                u = f"https://api.uybor.uz/api/v1/media/n/{u.lstrip('/')}"
+            photo_urls.append(u)
         out.append({
+            "photo_urls": photo_urls,
             "key": f'uybor:{o.get("id")}',
             "source": "Uybor",
             "url": f'https://uybor.uz/listings/{o.get("id")}',
@@ -346,6 +371,7 @@ def fetch_birbir(scfg: dict, cfg: dict) -> list:
         title = (title_m.group(0).strip() if title_m else f"Birbir #{bid}")[:90]
         price_value, price_currency = extract_price_from_text(chunk_txt)
         out.append({
+            "photo_urls": [],
             "key": f"birbir:{bid}",
             "source": "Birbir",
             "url": url,
@@ -369,6 +395,7 @@ TG_TEXT_RE = re.compile(
     r'class="tgme_widget_message_text[^"]*"[^>]*>(.*?)</div>', re.S
 )
 TG_TIME_RE = re.compile(r'datetime="([^"]+)"')
+TG_PHOTO_RE = re.compile(r"background-image:url\('([^']+)'\)")
 
 
 def _strip_tags(fragment: str) -> str:
@@ -414,7 +441,10 @@ def fetch_telegram(scfg: dict, cfg: dict) -> list:
             created = time_m.group(1) if time_m else None
             price_value, price_currency = extract_price_from_text(text)
             title = text.split("\n")[0][:80] or f"@{channel} #{msg_id}"
+            photo_urls = [u for u in TG_PHOTO_RE.findall(block)
+                          if "cdn" in u or "telegram" in u][:6]
             out.append({
+                "photo_urls": photo_urls,
                 "key": f"tg:{channel}:{msg_id}",
                 "source": f"TG @{channel}",
                 "url": f"https://t.me/{channel}/{msg_id}",
@@ -455,6 +485,17 @@ class Store:
             phone TEXT, key TEXT, first_seen TEXT)""")
         self.conn.execute("""CREATE TABLE IF NOT EXISTS seller_counts(
             seller_id TEXT PRIMARY KEY, cnt INTEGER)""")
+        self.conn.execute("""CREATE TABLE IF NOT EXISTS kv(
+            key TEXT PRIMARY KEY, value TEXT)""")
+        self.conn.commit()
+
+    def get_kv(self, key, default=None):
+        row = self.conn.execute("SELECT value FROM kv WHERE key=?", (key,)).fetchone()
+        return json.loads(row[0]) if row else default
+
+    def set_kv(self, key, value):
+        self.conn.execute("INSERT OR REPLACE INTO kv(key, value) VALUES(?,?)",
+                          (key, json.dumps(value, ensure_ascii=False)))
         self.conn.commit()
 
     def known(self, key: str) -> bool:
@@ -581,20 +622,190 @@ def format_message(l: dict, cfg: dict, likely_makler: bool) -> str:
     return "\n".join(lines)
 
 
-def send_telegram(cfg, text: str) -> bool:
-    api = f'https://api.telegram.org/bot{cfg["telegram_bot_token"]}/sendMessage'
+def tg_call(cfg, method: str, payload: dict):
+    api = f'https://api.telegram.org/bot{cfg["telegram_bot_token"]}/{method}'
     try:
-        r = requests.post(api, json={
-            "chat_id": cfg["telegram_chat_id"], "text": text,
-            "parse_mode": "HTML", "disable_web_page_preview": False,
-        }, timeout=15)
+        r = requests.post(api, data=payload, timeout=20)
         if r.status_code != 200:
-            log.error("Telegram %s: %s", r.status_code, r.text[:200])
-            return False
-        return True
+            log.error("Telegram %s %s: %s", method, r.status_code, r.text[:200])
+            return None
+        return r.json()
     except requests.RequestException as e:
         log.error("Telegram недоступен: %s", e)
-        return False
+        return None
+
+
+def send_telegram(cfg, text: str) -> bool:
+    return tg_call(cfg, "sendMessage", {
+        "chat_id": cfg["telegram_chat_id"], "text": text,
+        "parse_mode": "HTML",
+    }) is not None
+
+
+def send_listing(cfg, settings: dict, l: dict, likely_makler: bool) -> bool:
+    """Уведомление об объявлении: альбом с фото, если они есть и включены."""
+    text = format_message(l, cfg, likely_makler)
+    photos = (l.get("photo_urls") or []) if settings.get("photos", True) else []
+    if photos:
+        media = [{"type": "photo", "media": u} for u in photos[:4]]
+        media[0]["caption"] = text[:1000]
+        media[0]["parse_mode"] = "HTML"
+        if tg_call(cfg, "sendMediaGroup", {
+            "chat_id": cfg["telegram_chat_id"],
+            "media": json.dumps(media),
+        }) is not None:
+            return True
+        log.info("Альбом не отправился, шлю текстом: %s", l["title"][:50])
+    return send_telegram(cfg, text)
+
+
+# ------------------------------------------------- настройки через бота ----
+
+HELP_TEXT = """🤖 <b>Rent Radar — команды</b>
+
+/status — текущие фильтры и статистика
+/max 800 — макс. цена, $
+/min 300 — мин. цена, $
+/rooms 2 или /rooms 2-3 — комнатность (/rooms все — сбросить)
+/district Яккасарай, Мирабад — только эти районы (/district все — сбросить)
+/districts — список районов, которые я понимаю
+/photos выкл — присылать без фото (/photos вкл — с фото)
+/pause — пауза уведомлений, /resume — продолжить
+
+⏱ Отвечаю при ближайшей проверке (раз в 5–15 минут), не мгновенно."""
+
+ON_WORDS = {"on", "вкл", "да", "yes", "1"}
+OFF_WORDS = {"off", "выкл", "нет", "no", "0"}
+RESET_WORDS = {"все", "всё", "любые", "любая", "сброс", "all", "any", "reset"}
+
+
+def default_settings() -> dict:
+    return {"photos": True, "paused": False, "districts": [],
+            "rooms_min": None, "rooms_max": None,
+            "max_price_usd": None, "min_price_usd": None}
+
+
+def effective_cfg(cfg: dict, settings: dict) -> dict:
+    eff = dict(cfg)
+    if settings.get("max_price_usd") is not None:
+        eff["max_price_usd"] = settings["max_price_usd"]
+    if settings.get("min_price_usd") is not None:
+        eff["min_price_usd"] = settings["min_price_usd"]
+    return eff
+
+
+def handle_command(text: str, settings: dict, store, cfg: dict) -> str:
+    """Обрабатывает команду, меняет settings (in place). Возвращает ответ."""
+    t = (text or "").strip()
+    low = t.lower()
+    cmd, _, arg = low.partition(" ")
+    arg = arg.strip()
+    raw_arg = t.partition(" ")[2].strip()
+
+    if cmd in ("/start", "/help"):
+        return HELP_TEXT
+
+    if cmd == "/status":
+        total, dups = store.counts()
+        d = ", ".join(settings.get("districts") or []) or "все"
+        rmin, rmax = settings.get("rooms_min"), settings.get("rooms_max")
+        rooms = "любая" if rmin is None else (f"{rmin}" if rmin == rmax else f"{rmin}–{rmax}")
+        eff = effective_cfg(cfg, settings)
+        return (f"📊 <b>Статус Rent Radar</b>\n"
+                f"💰 Цена: {eff['min_price_usd'] or 0}–{eff['max_price_usd']}$\n"
+                f"🛏 Комнаты: {rooms}\n📍 Районы: {d}\n"
+                f"🖼 Фото: {'вкл' if settings.get('photos', True) else 'выкл'}\n"
+                f"▶️ Уведомления: {'на паузе ⏸' if settings.get('paused') else 'работают'}\n"
+                f"🗂 В базе: {total} объявлений (из них дублей: {dups})")
+
+    if cmd == "/max" or cmd == "/min":
+        n = re.sub(r"[^\d]", "", arg)
+        if not n:
+            return f"Укажите число, например: {cmd} 800"
+        settings["max_price_usd" if cmd == "/max" else "min_price_usd"] = int(n)
+        return f"✅ {'Макс' if cmd == '/max' else 'Мин'}. цена: ${n}"
+
+    if cmd == "/rooms":
+        if arg in RESET_WORDS:
+            settings["rooms_min"] = settings["rooms_max"] = None
+            return "✅ Фильтр комнат снят"
+        m = re.match(r"^(\d)\s*[-–]\s*(\d)$", arg) or re.match(r"^(\d)$", arg)
+        if not m:
+            return "Формат: /rooms 2 или /rooms 2-3 (или /rooms все)"
+        a = int(m.group(1))
+        b = int(m.group(2)) if m.lastindex and m.lastindex > 1 else a
+        settings["rooms_min"], settings["rooms_max"] = min(a, b), max(a, b)
+        return f"✅ Комнаты: {min(a, b)}–{max(a, b)}" if a != b else f"✅ Комнаты: {a}"
+
+    if cmd == "/districts":
+        return "📍 Районы, которые я распознаю:\n" + ", ".join(sorted(DISTRICTS))
+
+    if cmd == "/district":
+        if arg in RESET_WORDS:
+            settings["districts"] = []
+            return "✅ Фильтр районов снят — слежу за всем Ташкентом"
+        chosen, unknown = [], []
+        for part in re.split(r"[,;]+", raw_arg):
+            p = part.strip().lower()
+            if not p:
+                continue
+            hit = next((name for name, vs in DISTRICTS.items()
+                        if p in [v.lower() for v in vs] + [name.lower()]
+                        or any(v in p for v in vs)), None)
+            (chosen if hit else unknown).append(hit or part.strip())
+        if not chosen:
+            return ("Не узнал районы: " + ", ".join(unknown) +
+                    "\nСписок — /districts")
+        settings["districts"] = sorted(set(chosen))
+        reply = "✅ Районы: " + ", ".join(settings["districts"])
+        reply += "\n(объявления без указанного района тоже присылаю, чтобы ничего не упустить)"
+        if unknown:
+            reply += "\n⚠️ Не узнал: " + ", ".join(unknown)
+        return reply
+
+    if cmd == "/photos":
+        if arg in OFF_WORDS:
+            settings["photos"] = False
+            return "✅ Фото выключены — только текст"
+        settings["photos"] = True
+        return "✅ Фото включены"
+
+    if cmd == "/pause":
+        settings["paused"] = True
+        return "⏸ Уведомления на паузе. Вернуть — /resume"
+
+    if cmd == "/resume":
+        settings["paused"] = False
+        return "▶️ Уведомления снова работают"
+
+    if t.startswith("/"):
+        return "Не знаю такую команду. Список — /help"
+    return ""  # обычный текст молча пропускаем
+
+
+def process_commands(cfg: dict, store) -> dict:
+    """Читает новые сообщения боту, применяет команды, отвечает."""
+    settings = {**default_settings(), **(store.get_kv("settings") or {})}
+    offset = store.get_kv("tg_offset", 0)
+    resp = tg_call(cfg, "getUpdates", {"offset": offset + 1, "timeout": 0})
+    if not resp:
+        return settings
+    changed = False
+    for upd in resp.get("result", []):
+        offset = max(offset, upd.get("update_id", 0))
+        msg = upd.get("message") or upd.get("edited_message") or {}
+        chat_id = str((msg.get("chat") or {}).get("id") or "")
+        if chat_id != str(cfg["telegram_chat_id"]):
+            continue  # игнорируем чужих
+        reply = handle_command(msg.get("text") or "", settings, store, cfg)
+        if reply:
+            send_telegram(cfg, reply)
+            changed = True
+            log.info("Команда: %s", (msg.get("text") or "")[:50])
+    store.set_kv("tg_offset", offset)
+    if changed:
+        store.set_kv("settings", settings)
+    return settings
 
 
 # ------------------------------------------------------------------ main ----
@@ -610,6 +821,17 @@ def passes_filters(l: dict, cfg: dict) -> bool:
     a = age_days(l.get("created_at") or "")
     if a is not None and cfg["notify_max_age_days"] and a > cfg["notify_max_age_days"]:
         return False
+    return True
+
+
+def passes_user_filters(l: dict, settings: dict) -> bool:
+    """Фильтры, заданные командами бота. Неизвестные комнаты/район — пропускаем."""
+    if settings.get("rooms_min") is not None and l.get("rooms"):
+        if not settings["rooms_min"] <= l["rooms"] <= settings["rooms_max"]:
+            return False
+    if settings.get("districts") and l.get("district"):
+        if l["district"] in DISTRICTS and l["district"] not in settings["districts"]:
+            return False
     return True
 
 
@@ -637,6 +859,8 @@ def run():
 
     while not stop["flag"]:
         now = time.time()
+        settings = process_commands(cfg, store)
+        eff = effective_cfg(cfg, settings)
         for name, scfg in enabled.items():
             if not once and now < next_run[name]:
                 continue
@@ -658,7 +882,7 @@ def run():
                     store.save(l, notified=False)
                     continue
 
-                if not passes_filters(l, cfg):
+                if not passes_filters(l, eff) or not passes_user_filters(l, settings):
                     store.save(l, notified=False)
                     continue
 
@@ -672,8 +896,12 @@ def run():
                                            f'<a href="{l["url"]}">{escape_html(l["title"][:60])}</a>')
                     continue
 
+                if settings.get("paused"):
+                    store.save(l, notified=False)
+                    continue
+
                 likely_makler = seller_cnt >= cfg["makler_user_threshold"]
-                ok = send_telegram(cfg, format_message(l, cfg, likely_makler))
+                ok = send_listing(cfg, settings, l, likely_makler)
                 store.save(l, notified=ok)
                 if ok:
                     fresh += 1
