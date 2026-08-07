@@ -642,6 +642,26 @@ def send_telegram(cfg, text: str) -> bool:
     }) is not None
 
 
+def send_photo_upload(cfg, photo_url: str, caption: str) -> bool:
+    """Скачивает фото и загружает напрямую (для CDN-ссылок, которые
+    Telegram отказывается пересылать по URL — WEBPAGE_MEDIA_EMPTY)."""
+    try:
+        img = requests.get(photo_url, headers=HEADERS, timeout=20)
+        if img.status_code != 200 or len(img.content) < 1000:
+            return False
+        api = f'https://api.telegram.org/bot{cfg["telegram_bot_token"]}/sendPhoto'
+        r = requests.post(
+            api,
+            data={"chat_id": cfg["telegram_chat_id"],
+                  "caption": caption[:1000], "parse_mode": "HTML"},
+            files={"photo": ("photo.jpg", img.content)},
+            timeout=30)
+        return r.status_code == 200
+    except requests.RequestException as e:
+        log.warning("Загрузка фото не удалась: %s", e)
+        return False
+
+
 def send_listing(cfg, settings: dict, l: dict, likely_makler: bool) -> bool:
     """Уведомление об объявлении: альбом с фото, если они есть и включены."""
     text = format_message(l, cfg, likely_makler)
@@ -655,7 +675,9 @@ def send_listing(cfg, settings: dict, l: dict, likely_makler: bool) -> bool:
             "media": json.dumps(media),
         }) is not None:
             return True
-        log.info("Альбом не отправился, шлю текстом: %s", l["title"][:50])
+        if send_photo_upload(cfg, photos[0], text):
+            return True
+        log.info("Фото не отправились, шлю текстом: %s", l["title"][:50])
     return send_telegram(cfg, text)
 
 
