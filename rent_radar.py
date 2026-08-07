@@ -163,6 +163,18 @@ def extract_phones(text: str) -> list:
     return phones
 
 
+def as_int(v):
+    """Аккуратно приводит к int: API источников иногда отдают числа строками."""
+    if isinstance(v, bool) or v is None:
+        return None
+    if isinstance(v, int):
+        return v
+    try:
+        return int(str(v).strip())
+    except (TypeError, ValueError):
+        return None
+
+
 def extract_rooms(text: str):
     for rx in ROOMS_RE:
         m = rx.search(text or "")
@@ -310,7 +322,8 @@ def fetch_uybor(scfg: dict, cfg: dict) -> list:
     for o in r.json().get("results", []):
         desc = o.get("description") or ""
         price_value, price_currency = o.get("price"), (o.get("priceCurrency") or "").upper()
-        rooms = o.get("room") or extract_rooms(desc)
+        rooms = as_int(o.get("room")) or extract_rooms(desc)
+        price_value = as_int(price_value) if price_value is not None else None
         text = desc[:900]
         title = desc.strip().split("\n")[0][:80] or "Объявление Uybor"
         photo_urls = []
@@ -622,12 +635,13 @@ def format_message(l: dict, cfg: dict, likely_makler: bool) -> str:
     return "\n".join(lines)
 
 
-def tg_call(cfg, method: str, payload: dict, timeout: int = 20):
+def tg_call(cfg, method: str, payload: dict, timeout: int = 20, quiet: bool = False):
     api = f'https://api.telegram.org/bot{cfg["telegram_bot_token"]}/{method}'
     try:
         r = requests.post(api, data=payload, timeout=timeout)
         if r.status_code != 200:
-            log.error("Telegram %s %s: %s", method, r.status_code, r.text[:200])
+            if not quiet:
+                log.error("Telegram %s %s: %s", method, r.status_code, r.text[:200])
             return None
         return r.json()
     except requests.RequestException as e:
@@ -1000,8 +1014,9 @@ def process_commands(cfg: dict, store, long_poll: int = 0) -> dict:
             if str((msg.get("chat") or {}).get("id") or "") != str(cfg["telegram_chat_id"]):
                 continue
             toast, view = handle_callback(cb.get("data") or "", settings, store, cfg)
+            # подсказка-«всплывашка»; для старых нажатий Telegram её отклоняет — это нормально
             tg_call(cfg, "answerCallbackQuery",
-                    {"callback_query_id": cb.get("id"), "text": toast})
+                    {"callback_query_id": cb.get("id"), "text": toast}, quiet=True)
             if view:
                 render_view(cfg, settings, view, msg.get("message_id"))
             changed = True
@@ -1044,8 +1059,10 @@ def passes_filters(l: dict, cfg: dict) -> bool:
 
 def passes_user_filters(l: dict, settings: dict) -> bool:
     """Фильтры, заданные командами бота. Неизвестные комнаты/район — пропускаем."""
-    if settings.get("rooms_min") is not None and l.get("rooms"):
-        if not settings["rooms_min"] <= l["rooms"] <= settings["rooms_max"]:
+    rmin, rmax = as_int(settings.get("rooms_min")), as_int(settings.get("rooms_max"))
+    rooms = as_int(l.get("rooms"))
+    if rmin is not None and rooms is not None:
+        if not rmin <= rooms <= (rmax if rmax is not None else rmin):
             return False
     if settings.get("districts") and l.get("district"):
         if l["district"] in DISTRICTS and l["district"] not in settings["districts"]:
@@ -1100,6 +1117,8 @@ def run():
 
             fresh = 0
             for l in listings:
+              # одно битое объявление не должно ронять весь радар
+              try:
                 if store.known(l["key"]):
                     continue
                 seller_cnt = store.bump_seller(l.get("seller_id", ""))
@@ -1133,6 +1152,13 @@ def run():
                     fresh += 1
                     log.info("[%s] уведомление: %s", name, l["title"][:60])
                 time.sleep(1)
+              except Exception as e:
+                log.warning("[%s] объявление %s пропущено из-за ошибки: %s",
+                            name, l.get("key"), e)
+                try:
+                    store.save(l, notified=False)   # чтобы не спотыкаться о него снова
+                except Exception:
+                    pass
 
             if fresh:
                 log.info("[%s] новых: %d", name, fresh)
