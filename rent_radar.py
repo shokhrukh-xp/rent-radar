@@ -154,6 +154,15 @@ DISTRICTS = {
 }
 
 
+# districtId у Uybor → район. Выведено статистически по 600 объявлениям
+# (id 202 намеренно пропущен: голоса разделились, лучше определить по тексту).
+UYBOR_DISTRICT_IDS = {
+    196: "Мирзо-Улугбек", 197: "Юнусабад", 198: "Шайхантахур",
+    203: "Чиланзар", 204: "Мирабад", 205: "Яккасарай", 206: "Сергели",
+    1332: "Янгихаёт", 671085: "Алмазар", 674731: "Яшнабад",
+}
+
+
 def extract_phones(text: str) -> list:
     phones = []
     for m in PHONE_RE.finditer(text or ""):
@@ -209,6 +218,33 @@ def extract_district(text: str):
         if any(v in low for v in variants):
             return name
     return None
+
+
+def canon_district(*candidates):
+    """Приводит район к каноническому виду: «Яккасарайский район» → «Яккасарай».
+    Источники пишут по-разному, а фильтр сравнивает по каноническому имени."""
+    for c in candidates:
+        if c:
+            hit = extract_district(str(c))
+            if hit:
+                return hit
+    return None
+
+
+# OLX помечает доллары кодом UYE (у.е.), Uybor — usd; всё это одна валюта.
+CURRENCY_ALIASES = {
+    "USD": "USD", "UYE": "USD", "УЕ": "USD", "У.Е.": "USD", "У.Е": "USD",
+    "$": "USD", "YE": "USD", "Y.E.": "USD", "CU": "USD",
+    "UZS": "UZS", "СУМ": "UZS", "СУМ.": "UZS", "SUM": "UZS", "SO'M": "UZS",
+    "SOM": "UZS", "SOʻM": "UZS", "SO`M": "UZS",
+}
+
+
+def canon_currency(c):
+    """Возвращает 'USD' / 'UZS' / None (неизвестную валюту лучше не угадывать)."""
+    if not c:
+        return None
+    return CURRENCY_ALIASES.get(str(c).strip().upper().replace(" ", ""))
 
 
 def to_usd(value, currency, cfg):
@@ -295,9 +331,10 @@ def fetch_olx(scfg: dict, cfg: dict) -> list:
             "title": o.get("title") or "Без названия",
             "text": text,
             "price_value": price_value,
-            "price_currency": (price_currency or "").upper() or None,
+            "price_currency": canon_currency(price_currency),
             "rooms": extract_rooms(text),
-            "district": (loc.get("district") or {}).get("name") or extract_district(text),
+            "district": canon_district((loc.get("district") or {}).get("name"), text),
+            "district_raw": (loc.get("district") or {}).get("name"),
             "phones": extract_phones(text),
             "created_at": o.get("created_time"),
             "seller": (o.get("user") or {}).get("name") or "",
@@ -321,7 +358,7 @@ def fetch_uybor(scfg: dict, cfg: dict) -> list:
     out = []
     for o in r.json().get("results", []):
         desc = o.get("description") or ""
-        price_value, price_currency = o.get("price"), (o.get("priceCurrency") or "").upper()
+        price_value, price_currency = o.get("price"), canon_currency(o.get("priceCurrency"))
         rooms = as_int(o.get("room")) or extract_rooms(desc)
         price_value = as_int(price_value) if price_value is not None else None
         text = desc[:900]
@@ -350,9 +387,11 @@ def fetch_uybor(scfg: dict, cfg: dict) -> list:
             "title": title,
             "text": text,
             "price_value": price_value,
-            "price_currency": price_currency or None,
+            "price_currency": price_currency,
             "rooms": rooms,
-            "district": extract_district(text) or (o.get("address") or None),
+            "district": (UYBOR_DISTRICT_IDS.get(o.get("districtId"))
+                         or canon_district(text, o.get("address"))),
+            "district_raw": o.get("address") or None,
             "phones": extract_phones(text),
             "created_at": o.get("createdAt"),
             "seller": "",
@@ -393,7 +432,8 @@ def fetch_birbir(scfg: dict, cfg: dict) -> list:
             "price_value": price_value,
             "price_currency": price_currency,
             "rooms": extract_rooms(chunk_txt),
-            "district": extract_district(chunk_txt),
+            "district": canon_district(chunk_txt),
+            "district_raw": None,
             "phones": extract_phones(chunk_txt),
             "created_at": None,
             "seller": "",
@@ -466,7 +506,8 @@ def fetch_telegram(scfg: dict, cfg: dict) -> list:
                 "price_value": price_value,
                 "price_currency": price_currency,
                 "rooms": extract_rooms(text),
-                "district": extract_district(text),
+                "district": canon_district(text),
+                "district_raw": None,
                 "phones": extract_phones(text),
                 "created_at": created,
                 "seller": "",
@@ -601,18 +642,21 @@ def fmt_phone(p: str) -> str:
 
 def format_message(l: dict, cfg: dict, likely_makler: bool) -> str:
     lines = [f'🏠 <b>[{escape_html(l["source"])}]</b> {escape_html(l["title"])}']
-    if l.get("price_value"):
-        p = f'{l["price_value"]:,}'.replace(",", " ")
-        cur = "$" if l.get("price_currency") == "USD" else "сум"
-        extra = ""
-        if l.get("price_usd") and l.get("price_currency") == "UZS":
-            extra = f' (~${l["price_usd"]:.0f})'
-        lines.append(f"💰 {p} {cur}{extra}")
+    val, cur = l.get("price_value"), l.get("price_currency")
+    if val:
+        num = f"{val:,}".replace(",", " ")
+        if cur == "USD":
+            lines.append(f"💰 ${num}")
+        elif cur == "UZS":
+            usd = l.get("price_usd") or to_usd(val, "UZS", cfg)
+            lines.append(f"💰 {num} сум" + (f" (~${usd:.0f})" if usd else ""))
+        else:
+            lines.append(f"💰 {num} (валюта не указана)")
     details = []
     if l.get("rooms"):
         details.append(f'🛏 {l["rooms"]}-комн')
-    if l.get("district"):
-        details.append(f'📍 {escape_html(str(l["district"]))}')
+    place = l.get("district") or l.get("district_raw")
+    details.append(f'📍 {escape_html(str(place))}' if place else "📍 район не указан")
     if details:
         lines.append(" · ".join(details))
     if l.get("seller") or l.get("is_business") is not None:
@@ -723,6 +767,7 @@ RESET_WORDS = {"все", "всё", "любые", "любая", "сброс", "al
 
 def default_settings() -> dict:
     return {"photos": True, "paused": False, "districts": [],
+            "strict_district": False,
             "rooms_min": None, "rooms_max": None,
             "max_price_usd": None, "min_price_usd": None}
 
@@ -818,6 +863,9 @@ def kb_districts(cfg: dict, settings: dict) -> dict:
         rows.append([_btn(("✅ " if n in ds else "▫️ ") + n, f"d:{DISTRICT_LIST.index(n)}")
                      for n in DISTRICT_LIST[i:i + 2]])
     rows.append([_btn(("✅ " if not ds else "") + "Весь Ташкент", "da")])
+    if ds:
+        rows.append([_btn("🔒 Строго: только выбранные" if settings.get("strict_district")
+                          else "🔓 Плюс объявления без района", "ds")])
     rows.append([_btn("← Меню", "v:M")])
     return {"inline_keyboard": rows}
 
@@ -829,8 +877,11 @@ VIEWS = {
     "R": (lambda cfg, s: f"🛏 <b>Комнатность</b>\nСейчас: {rooms_label(s)}", kb_rooms),
     "D": (lambda cfg, s: ("📍 <b>Районы</b>\nНажмите, чтобы включить или убрать. "
                           f"Сейчас: {districts_label(s)}\n\n"
-                          "<i>Объявления без указанного района присылаю всегда — "
-                          "чтобы ничего не упустить.</i>"), kb_districts),
+                          + ("<i>Строгий режим: объявления без указанного района "
+                             "не присылаю.</i>" if s.get("strict_district")
+                             else "<i>Объявления, где район не указан, присылаю тоже — "
+                                  "чтобы не упустить вариант от хозяина. "
+                                  "Переключается кнопкой ниже.</i>")), kb_districts),
 }
 
 
@@ -980,6 +1031,10 @@ def handle_callback(data: str, settings: dict, store, cfg: dict):
     if act == "da":
         settings["districts"] = []
         return "Слежу за всем Ташкентом", "D"
+    if act == "ds":
+        settings["strict_district"] = not settings.get("strict_district")
+        return ("Только выбранные районы" if settings["strict_district"]
+                else "Плюс объявления без указанного района"), "D"
     if act == "p":
         settings["photos"] = not settings.get("photos", True)
         return ("Фото включены" if settings["photos"] else "Фото выключены"), "M"
@@ -1064,8 +1119,14 @@ def passes_user_filters(l: dict, settings: dict) -> bool:
     if rmin is not None and rooms is not None:
         if not rmin <= rooms <= (rmax if rmax is not None else rmin):
             return False
-    if settings.get("districts") and l.get("district"):
-        if l["district"] in DISTRICTS and l["district"] not in settings["districts"]:
+    if settings.get("districts"):
+        d = l.get("district")
+        if d is None:
+            # район не распознан: по умолчанию присылаем (чтобы не потерять
+            # объявление от хозяина), в строгом режиме — отсекаем
+            if settings.get("strict_district"):
+                return False
+        elif d not in settings["districts"]:
             return False
     return True
 
