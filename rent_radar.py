@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Rent Radar — мульти-источниковый монитор аренды квартир в Ташкенте.
+Амина — ассистент по поиску жилья (ядро: сбор данных и работа с маклерами).
 
 Источники: OLX.uz (API), Uybor.uz (API), Birbir.uz (HTML),
 Telegram-каналы (публичные веб-превью t.me/s/..., без логина).
@@ -60,6 +60,9 @@ DEFAULT_CONFIG = {
         "хозяин", "от хозяина", "собственник", "egasidan", "uy egasi",
         "посредникам не беспокоить",
     ],
+    "assistant_name": "Амина",     # как ассистент представляется маклерам
+    "owner_name": "Шохрух",        # от чьего имени ведётся поиск
+    "bot_username": "",            # определяется автоматически через getMe
     "makler_user_threshold": 3,
     # Отсев нерелевантного: подселение/койко-места вместо целой квартиры
     "min_sane_price_usd": 150,        # дешевле — это комната/подселение, не квартира
@@ -963,6 +966,16 @@ def format_message(l: dict, cfg: dict, likely_makler: bool) -> str:
     return "\n".join(lines)
 
 
+def detect_bot_username(cfg) -> str:
+    """Спрашиваем у Telegram, как бот называется сейчас.
+    Так переименование в BotFather подхватывается само, без правок кода."""
+    r = tg_call(cfg, "getMe", {}, quiet=True)
+    name = ((r or {}).get("result") or {}).get("username") or ""
+    if name:
+        cfg["bot_username"] = name
+    return name
+
+
 def tg_call(cfg, method: str, payload: dict, timeout: int = 20, quiet: bool = False):
     api = f'https://api.telegram.org/bot{cfg["telegram_bot_token"]}/{method}'
     try:
@@ -1025,7 +1038,7 @@ def send_listing(cfg, settings: dict, l: dict, likely_makler: bool) -> bool:
 
 # ------------------------------------------------- настройки через бота ----
 
-HELP_TEXT = """🤖 <b>Rent Radar</b>
+HELP_TEXT = """🏠 <b>Амина</b> — ваш ассистент по поиску жилья
 
 <b>/find</b> — подобрать лучшее прямо сейчас: агент оценит всё накопленное,
 сравнит с рынком, посчитает метро и отдаст топ-5 с разбором.
@@ -1615,8 +1628,13 @@ def handle_callback(data: str, settings: dict, store, cfg: dict, message_id=None
     return "", None
 
 
-BROKER_ACK = ("Спасибо! Передал варианты. Если подойдёт — вернусь с уточнениями. "
-              "Присылайте ещё, если появится что-то по параметрам.")
+def broker_ack(cfg) -> str:
+    """Имя клиента маклерам не раскрываем — и незачем, и склонения ломаются."""
+    a = cfg.get("assistant_name", "Амина")
+    return (f"Здравствуйте! Я {a}, ИИ-ассистент — веду поиск жилья для клиента "
+            f"и передаю ему варианты.\n"
+            f"Спасибо, получила! Если подойдёт, вернусь с уточнениями. "
+            f"Присылайте ещё, что есть по параметрам.")
 
 
 def handle_broker_message(cfg, store, msg):
@@ -1654,7 +1672,7 @@ def handle_broker_message(cfg, store, msg):
 
     log.info("вариант #%s от %s (%s)", oid, name, "новый" if is_new else "доп. фото")
     if is_new:
-        tg_call(cfg, "sendMessage", {"chat_id": chat_id, "text": BROKER_ACK})
+        tg_call(cfg, "sendMessage", {"chat_id": chat_id, "text": broker_ack(cfg)})
         store.set_kv("pending_offer", {"oid": oid, "at": time.time()})
 
 
@@ -1816,6 +1834,7 @@ def run():
     signal.signal(signal.SIGINT, lambda *_: stop.update(flag=True))
     signal.signal(signal.SIGTERM, lambda *_: stop.update(flag=True))
 
+    detect_bot_username(cfg)
     enabled = {name: s for name, s in cfg["sources"].items() if s.get("enabled")}
     next_run = {name: 0.0 for name in enabled}
     mode = " (разовый проход)" if once else (f" на {minutes:.0f} мин" if minutes else "")
