@@ -1,5 +1,5 @@
 """
-Rent Radar — консьерж-контур: работа через маклеров.
+Амина — консьерж-контур: работа через маклеров.
 
 Анкета → текст запроса → рассылка → приём вариантов от маклеров прямо в бота →
 быстрый триаж по одному → сессия по шортлисту с автозапросом деталей.
@@ -252,10 +252,14 @@ def compose_request(cfg, store, username=None):
                  "Сразу уточните размер комиссии.")
 
     who = ans.get("contact", "bot")
-    bot_un = cfg.get("bot_username", "rentradarxp_bot")
+    bot_un = cfg.get("bot_username") or "amina_home_bot"
+    assistant = cfg.get("assistant_name", "Амина")
     if who in ("bot", "both"):
-        parts.append(f"Варианты удобнее присылать моему помощнику: @{bot_un} "
-                     "— я там всё смотрю.")
+        # Письмо идёт от лица владельца, поэтому Амина здесь — «моя помощница»
+        # Имя оставляем в именительном падеже — иначе при подстановке
+        # получается «помощнице Амина».
+        parts.append(f"Варианты присылайте, пожалуйста, моей помощнице: "
+                     f"{assistant}, @{bot_un}. Она сразу передаёт их мне.")
     if who in ("me", "both") and username:
         parts.append(f"Либо мне напрямую: @{username}")
     parts.append("Спасибо!")
@@ -485,8 +489,11 @@ def notify_offer(cfg, store, oid):
             "parse_mode": "HTML", "reply_markup": kb})
 
 
-DECLINE = ("Спасибо! Этот вариант не подходит. "
-           "Если появится что-то ближе к моим параметрам — присылайте.")
+def decline_text(cfg):
+    a = cfg.get("assistant_name", "Амина")
+    return (f"Спасибо! Этот вариант клиенту не подошёл. "
+            f"Если появится что-то ближе к параметрам — присылайте, посмотрю. "
+            f"({a})")
 
 
 def handle_triage_cb(data, cfg, store):
@@ -504,7 +511,8 @@ def handle_triage_cb(data, cfg, store):
         set_offer_status(store, oid, "later")
         return "Отложено", True
     set_offer_status(store, oid, "rejected")
-    rr.tg_call(cfg, "sendMessage", {"chat_id": o["broker_chat"], "text": DECLINE})
+    rr.tg_call(cfg, "sendMessage",
+               {"chat_id": o["broker_chat"], "text": decline_text(cfg)})
     return "Отказ отправлен маклеру", True
 
 
@@ -579,8 +587,11 @@ def show_shortlist(cfg, store, message_id=None):
     rr.tg_call(cfg, "sendMessage", payload)
 
 
-def details_question(o):
-    q = ["Здравствуйте! По варианту, который вы присылали"]
+def details_question(o, cfg=None):
+    cfg = cfg or {}
+    a = cfg.get("assistant_name", "Амина")
+    q = [f"Здравствуйте! Это {a}, ассистент по поиску жилья.",
+         "По варианту, который вы присылали"]
     tag = []
     if o["rooms"]:
         tag.append(f"{o['rooms']}-комн")
@@ -589,8 +600,8 @@ def details_question(o):
     if o["price_usd"]:
         tag.append(f"${o['price_usd']:.0f}")
     if tag:
-        q[0] += f" ({', '.join(tag)})"
-    q[0] += ":"
+        q[1] += f" ({', '.join(tag)})"
+    q[1] += ":"
     items = ["Он ещё актуален?", "Точный адрес и ориентир?"]
     if not o["floor"]:
         items.append("Какой этаж и этажность?")
@@ -614,7 +625,8 @@ def request_details(cfg, store):
         if not o:
             continue
         ok = rr.tg_call(cfg, "sendMessage",
-                        {"chat_id": o["broker_chat"], "text": details_question(o)})
+                        {"chat_id": o["broker_chat"],
+                         "text": details_question(o, cfg)})
         if ok is not None:
             store.conn.execute(
                 "UPDATE broker_offers SET status='asked', asked_at=? WHERE oid=?",
@@ -688,9 +700,11 @@ def concierge_status(store):
 WEBAPP_URL = "https://shokhrukh-xp.github.io/rent-radar/"
 
 
-def webapp_url(store):
+def webapp_url(store, cfg=None):
     """Ссылка на мини-апп с предзаполнением текущими ответами."""
-    ans = get_anketa(store).get("ans", {})
+    ans = dict(get_anketa(store).get("ans", {}))
+    if cfg and cfg.get("bot_username"):
+        ans["_bot"] = cfg["bot_username"]
     if not ans:
         return WEBAPP_URL
     try:
@@ -711,7 +725,7 @@ def send_app_button(cfg, store, text=None):
     """
     rr = _rr()
     kb = {"keyboard": [[{"text": "🏠 Открыть приложение",
-                         "web_app": {"url": webapp_url(store)}}]],
+                         "web_app": {"url": webapp_url(store, cfg)}}]],
           "resize_keyboard": True, "is_persistent": True}
     return rr.tg_call(cfg, "sendMessage", {
         "chat_id": cfg["telegram_chat_id"],
