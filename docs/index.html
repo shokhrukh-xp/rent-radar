@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Rano · поиск жилья</title>
+<title>Rano · uy-joy | поиск жилья</title>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 <style>
   :root{
@@ -23,7 +23,7 @@
     padding:12px 14px calc(96px + env(safe-area-inset-bottom));
   }
   h1{font-size:20px;margin:4px 0 2px;letter-spacing:-.02em}
-  .lead{color:var(--hint);font-size:14px;margin:0 0 18px}
+  .lead{color:var(--hint);font-size:14px;margin:0 0 14px}
   section{background:var(--sec);border-radius:14px;padding:14px;margin-bottom:12px}
   .q{font-size:15px;font-weight:600;margin-bottom:10px;display:flex;
      justify-content:space-between;align-items:baseline;gap:8px}
@@ -45,6 +45,8 @@
     border-radius:11px;padding:11px 13px;font-size:16px;min-width:0
   }
   input:focus{outline:none;border-color:var(--btn)}
+  .langbar{display:flex;gap:8px;margin:0 0 14px}
+  .langbar .chip{flex:1;justify-content:center;font-size:14px;padding:8px 6px}
   .preview{
     background:var(--bg);border:1px solid var(--line);border-radius:11px;
     padding:13px;font-size:14px;white-space:pre-wrap;color:var(--ink);
@@ -58,164 +60,395 @@
 </head>
 <body>
 
-<h1>Параметры поиска</h1>
-<p class="lead">Заполните — Рано соберёт запрос и разошлёт маклерам.</p>
+<div class="langbar" id="langbar"></div>
+<h1 id="title"></h1>
+<p class="lead" id="lead"></p>
 
 <div id="form"></div>
 
 <section>
-  <div class="q">Запрос маклерам <em>обновляется сам</em></div>
+  <div class="q"><span id="pv-title"></span><em id="pv-note"></em></div>
   <div class="preview" id="preview"></div>
-  <div class="muted">Текст можно отредактировать в боте перед отправкой.</div>
+  <div class="muted" id="pv-hint"></div>
 </section>
 
-<button class="fallback" id="fallback">Сохранить и продолжить</button>
+<button class="fallback" id="fallback"></button>
 
 <script>
 const tg = window.Telegram?.WebApp;
-const DISTRICTS = ["Алмазар","Бектемир","Мирабад","Мирзо-Улугбек","Сергели","Учтепа",
-                   "Чиланзар","Шайхантахур","Юнусабад","Яккасарай","Янгихаёт","Яшнабад"];
+
+const DISTRICTS_RU = ["Алмазар","Бектемир","Мирабад","Мирзо-Улугбек","Сергели","Учтепа",
+                      "Чиланзар","Шайхантахур","Юнусабад","Яккасарай","Янгихаёт","Яшнабад"];
+const DISTRICTS_UZ = ["Olmazor","Bektemir","Mirobod","Mirzo Ulug'bek","Sergeli","Uchtepa",
+                      "Chilonzor","Shayxontohur","Yunusobod","Yakkasaroy","Yangihayot","Yashnobod"];
+
+// ---------------------------------------------------------------- i18n ---
+const T = {
+ru: {
+  title:"Параметры поиска", lead:"Заполните — Рано соберёт запрос и разошлёт маклерам.",
+  pv:"Запрос маклерам", pv_note:"обновляется сам",
+  pv_hint:"Текст можно отредактировать в боте перед отправкой.",
+  pv_hint_en:"", submit:"Сохранить и продолжить", multi:"можно несколько",
+  any:"Любой", exact:"или точная сумма, $", from:"от этажа", to:"до этажа",
+  q:{deal:"Что ищем", object:"Тип жилья", city:"Где ищем", city_other:"Какой город",
+     districts:"Районы Ташкента", rooms:"Комнат", budget:"Бюджет",
+     class:"Класс жилья", furniture:"Мебель и техника", floor:"Этаж",
+     term:"Срок", movein:"Когда заезжать", who:"Кто будет жить",
+     pets:"Животные", parking:"Парковка", contact:"Куда маклерам слать варианты"},
+  o:{rent:"🔑 Аренда", daily:"🌙 Посуточно", buy:"🏦 Покупка",
+     flat:"🏢 Квартира", house:"🏠 Дом", dacha:"🌲 Дача", land:"🌍 Участок",
+     tashkent:"Ташкент", charvak:"Чарвак / Чимган", region:"Ташкентская обл.", other:"Другой город",
+     cls_any:"Любой", cls_new:"Новостройка / ЖК", cls_premium:"ЖК + дизайнерский ремонт",
+     cls_reno:"Вторичка с хорошим ремонтом", cls_biz:"Бизнес / премиум-класс",
+     f_yes:"Нужна", f_no:"Не нужна", f_any:"Неважно",
+     nf:"Не первый", nl:"Не последний", fl_any:"Неважно",
+     t12:"От года", t6:"6–12 мес", t3:"3–6 мес", tflex:"Гибко",
+     d13:"1–3 дня", d47:"4–7 дней", d730:"1–4 недели",
+     now:"Сейчас", month:"В течение месяца", flex:"Гибко",
+     single:"Один / одна", couple:"Пара", family_kids:"Семья с детьми",
+     family:"Семья без детей", big:"Большая семья", group:"Друзья / коллеги",
+     p_no:"Нет", p_cat:"Кошка", p_dog:"Собака", p_other:"Другое",
+     yes:"Нужна", anyv:"Неважно",
+     c_bot:"🤖 Помощнику-боту", c_me:"👤 Мне лично", c_both:"Оба контакта"}
+},
+uz: {
+  title:"Qidiruv parametrlari", lead:"To'ldiring — Rano so'rov tuzib, maklerlarga yuboradi.",
+  pv:"Maklerlarga so'rov", pv_note:"o'zi yangilanadi",
+  pv_hint:"Matnni yuborishdan oldin botda tahrirlash mumkin.",
+  pv_hint_en:"", submit:"Saqlash va davom etish", multi:"bir nechtasini tanlang",
+  any:"Farqi yo'q", exact:"yoki aniq summa, $", from:"qavatdan", to:"qavatgacha",
+  q:{deal:"Nima qidiramiz", object:"Uy-joy turi", city:"Qayerda", city_other:"Qaysi shahar",
+     districts:"Toshkent tumanlari", rooms:"Xonalar", budget:"Byudjet",
+     class:"Uy-joy toifasi", furniture:"Mebel va texnika", floor:"Qavat",
+     term:"Muddat", movein:"Qachon kirasiz", who:"Kim yashaydi",
+     pets:"Hayvonlar", parking:"Avtoturargoh", contact:"Maklerlar qayerga yuborsin"},
+  o:{rent:"🔑 Ijara", daily:"🌙 Kunlik", buy:"🏦 Sotib olish",
+     flat:"🏢 Kvartira", house:"🏠 Hovli uy", dacha:"🌲 Dala hovli", land:"🌍 Yer",
+     tashkent:"Toshkent", charvak:"Chorvoq / Chimyon", region:"Toshkent viloyati", other:"Boshqa shahar",
+     cls_any:"Farqi yo'q", cls_new:"Yangi qurilish / TJM", cls_premium:"TJM + dizayner ta'miri",
+     cls_reno:"Yaxshi ta'mirli ikkilamchi", cls_biz:"Biznes / premium",
+     f_yes:"Kerak", f_no:"Kerak emas", f_any:"Farqi yo'q",
+     nf:"1-qavat emas", nl:"Oxirgisi emas", fl_any:"Farqi yo'q",
+     t12:"1 yildan", t6:"6–12 oy", t3:"3–6 oy", tflex:"Kelishamiz",
+     d13:"1–3 kun", d47:"4–7 kun", d730:"1–4 hafta",
+     now:"Hozir", month:"Bir oy ichida", flex:"Moslashuvchan",
+     single:"Bir kishi", couple:"Juftlik", family_kids:"Bolali oila",
+     family:"Bolasiz oila", big:"Katta oila", group:"Do'stlar / hamkasblar",
+     p_no:"Yo'q", p_cat:"Mushuk", p_dog:"It", p_other:"Boshqa",
+     yes:"Kerak", anyv:"Farqi yo'q",
+     c_bot:"🤖 Yordamchi-botga", c_me:"👤 Menga shaxsan", c_both:"Ikkalasiga"}
+},
+en: {
+  title:"Search parameters", lead:"Fill in — Rano will compose a request and send it to agents.",
+  pv:"Request to agents", pv_note:"updates live",
+  pv_hint:"You can edit the text in the bot before sending.",
+  pv_hint_en:"Agents in Tashkent read Russian or Uzbek, so the request is composed in Russian. Rano talks to you in English.",
+  submit:"Save and continue", multi:"multiple allowed",
+  any:"Any", exact:"or exact amount, $", from:"floor from", to:"floor to",
+  q:{deal:"Looking for", object:"Property type", city:"Where", city_other:"Which city",
+     districts:"Tashkent districts", rooms:"Rooms", budget:"Budget",
+     class:"Property class", furniture:"Furniture & appliances", floor:"Floor",
+     term:"Duration", movein:"Move-in", who:"Who will live",
+     pets:"Pets", parking:"Parking", contact:"Where agents send options"},
+  o:{rent:"🔑 Rent", daily:"🌙 Short stay", buy:"🏦 Buy",
+     flat:"🏢 Apartment", house:"🏠 House", dacha:"🌲 Country house", land:"🌍 Land",
+     tashkent:"Tashkent", charvak:"Charvak / Chimgan", region:"Tashkent region", other:"Other city",
+     cls_any:"Any", cls_new:"New building", cls_premium:"New + designer finish",
+     cls_reno:"Renovated resale", cls_biz:"Business / premium",
+     f_yes:"Needed", f_no:"Not needed", f_any:"Any",
+     nf:"Not ground floor", nl:"Not top floor", fl_any:"Any",
+     t12:"1 year +", t6:"6–12 mo", t3:"3–6 mo", tflex:"Flexible",
+     d13:"1–3 days", d47:"4–7 days", d730:"1–4 weeks",
+     now:"Now", month:"Within a month", flex:"Flexible",
+     single:"Just me", couple:"Couple", family_kids:"Family with kids",
+     family:"Family, no kids", big:"Large family", group:"Friends / colleagues",
+     p_no:"No", p_cat:"Cat", p_dog:"Dog", p_other:"Other",
+     yes:"Needed", anyv:"Any",
+     c_bot:"🤖 To the assistant bot", c_me:"👤 To me directly", c_both:"Both"}
+}
+};
+
+// -------------------------------------------------------------- поля -----
+const BUDGET_CHIPS = {
+  rent:  [["500","≤ $500"],["800","$500–800"],["1200","$800–1200"],["1800","$1200–1800"],["3000","$1800+"]],
+  daily: [["50","≤ $50"],["80","$50–80"],["120","$80–120"],["250","$120+"]],
+  buy:   [["50000","≤ $50k"],["80000","$50–80k"],["120000","$80–120k"],["200000","$120–200k"],["400000","$200k+"]],
+};
 
 const FIELDS = [
-  {k:"deal", q:"Что ищем", o:[["rent","🔑 Аренда"],["buy","🏦 Покупка"]], cols:2},
-  {k:"rooms", q:"Комнат", multi:true, cols:3,
-   o:[["1","1"],["2","2"],["3","3"],["4","4+"],["any","Любое"]]},
-  {k:"budget", q:"Бюджет, $ в месяц", num:"budget_max", cols:2,
-   o:[["500","до 500"],["800","500–800"],["1200","800–1200"],["1800","1200–1800"],["3000","выше 1800"]]},
-  {k:"districts", q:"Районы", multi:true, cols:3, districts:true},
-  {k:"class", q:"Класс жилья", cols:1,
-   o:[["any","Любой"],["new","Новостройка / ЖК"],["premium","ЖК + дизайнерский ремонт"]]},
-  {k:"furniture", q:"Мебель и техника", cols:3,
-   o:[["yes","Нужна"],["no","Не нужна"],["any","Неважно"]]},
-  {k:"floor", q:"Этаж", cols:2,
-   o:[["mid","Не первый и не последний"],["any","Неважно"]]},
-  {k:"term", q:"Срок", cols:3,
-   o:[["12","От года"],["6","6–12 мес"],["3","До полугода"]]},
-  {k:"movein", q:"Когда заезжать", cols:3,
-   o:[["now","Сейчас"],["month","В течение месяца"],["flex","Гибко"]]},
-  {k:"who", q:"Кто будет жить", cols:3,
-   o:[["single","Один / одна"],["couple","Пара"],["family","Семья с детьми"]]},
-  {k:"pets", q:"Животные", cols:2, o:[["no","Нет"],["yes","Есть"]]},
-  {k:"parking", q:"Парковка", cols:2, o:[["yes","Нужна"],["any","Неважно"]]},
-  {k:"contact", q:"Куда маклерам слать варианты", cols:1,
-   o:[["bot","🤖 Помощнику-боту"],["me","👤 Мне лично"],["both","Оба контакта"]]},
+  {k:"deal", cols:3, o:[["rent","rent"],["daily","daily"],["buy","buy"]]},
+  {k:"object", cols:2, o:[["flat","flat"],["house","house"],["dacha","dacha"],["land","land"]]},
+  {k:"city", cols:2, o:[["tashkent","tashkent"],["charvak","charvak"],["region","region"],["other","other"]]},
+  {k:"city_other", text:true, when:A=>A.city==="other"},
+  {k:"districts", multi:true, cols:3, districts:true, when:A=>A.city==="tashkent"},
+  {k:"rooms", multi:true, cols:3, when:A=>A.object!=="land", raw:true,
+   o:[["1","1"],["2","2"],["3","3"],["4","4+"],["any","any"]]},
+  {k:"budget", budget:true, cols:2},
+  {k:"class", cols:1, when:A=>A.object!=="land",
+   o:[["any","cls_any"],["new","cls_new"],["premium","cls_premium"],["reno","cls_reno"],["biz","cls_biz"]]},
+  {k:"furniture", cols:3, when:A=>A.deal!=="buy"&&A.object!=="land",
+   o:[["yes","f_yes"],["no","f_no"],["any","f_any"]]},
+  {k:"floor", floor:true, when:A=>A.object==="flat"},
+  {k:"term", cols:2, when:A=>A.deal!=="buy",
+   o:A=>A.deal==="daily" ? [["d1_3","d13"],["d4_7","d47"],["d7_30","d730"],["dflex","tflex"]]
+                         : [["12","t12"],["6_12","t6"],["3_6","t3"],["flex","tflex"]]},
+  {k:"movein", cols:3, when:A=>A.deal!=="buy",
+   o:[["now","now"],["month","month"],["flex","flex"]]},
+  {k:"who", cols:2, when:A=>A.deal!=="buy",
+   o:[["single","single"],["couple","couple"],["family_kids","family_kids"],
+      ["family","family"],["big","big"],["group","group"]]},
+  {k:"pets", cols:2, when:A=>A.deal!=="buy",
+   o:[["no","p_no"],["cat","p_cat"],["dog","p_dog"],["pet_other","p_other"]]},
+  {k:"parking", cols:2, o:[["yes","yes"],["any","anyv"]]},
+  {k:"contact", cols:1, o:[["bot","c_bot"],["me","c_me"],["both","c_both"]]},
 ];
 
-let A = {deal:"rent", rooms:[], budget:"1200", districts:[], class:"any",
-         furniture:"any", floor:"any", term:"12", movein:"flex", who:"single",
-         pets:"no", parking:"any", contact:"bot", budget_max:"", _bot:"rano_smart_bot"};
+let A = {lang:"ru", deal:"rent", object:"flat", city:"tashkent", city_other:"",
+         districts:[], rooms:[], budget:"1200", budget_max:"",
+         class:"any", furniture:"any", floor_pref:[], floor_min:"", floor_max:"",
+         term:"12", movein:"flex", who:"single", pets:"no", parking:"any",
+         contact:"bot", _bot:"rano_smart_bot"};
 
 try {                                   // предзаполнение из бота
   const h = location.hash.slice(1);
   if (h) Object.assign(A, JSON.parse(decodeURIComponent(escape(atob(h)))));
 } catch (e) {}
+const nav = (navigator.language || "").slice(0,2);
+if (!location.hash && (nav === "uz" || nav === "en")) A.lang = nav;
 
-function opts(f){
-  return f.districts ? DISTRICTS.map((d,i)=>[String(i),d]).concat([["any","Любой"]]) : f.o;
+const L = () => T[A.lang] || T.ru;
+
+// ------------------------------------------------------------- рендер ----
+function fieldOptions(f){
+  if (f.districts){
+    const names = A.lang==="ru" ? DISTRICTS_RU : DISTRICTS_UZ;
+    return names.map((d,i)=>[String(i),d]).concat([["any",L().any]]);
+  }
+  if (f.budget) return BUDGET_CHIPS[A.deal] || BUDGET_CHIPS.rent;
+  let o = typeof f.o === "function" ? f.o(A) : f.o;
+  return o.map(([v,key])=>[v, f.raw ? key : (L().o[key] ?? key)]);
+}
+
+function isOn(f, val){
+  if (f.floor) return (A.floor_pref||[]).includes(val) || (val==="any" && !(A.floor_pref||[]).length);
+  return f.multi ? (A[f.k]||[]).includes(val) : A[f.k]===val;
+}
+
+function pick(f, val){
+  if (f.floor){
+    let cur = A.floor_pref || [];
+    if (val==="any") cur = [];
+    else cur = cur.includes(val) ? cur.filter(x=>x!==val) : cur.filter(x=>x!=="any").concat([val]);
+    A.floor_pref = cur;
+  } else if (f.multi){
+    let cur = A[f.k] || [];
+    if (val==="any") cur = ["any"];
+    else {
+      cur = cur.filter(x=>x!=="any");
+      cur = cur.includes(val) ? cur.filter(x=>x!==val) : cur.concat([val]);
+    }
+    A[f.k] = cur;
+  } else {
+    A[f.k] = val;
+    if (f.k==="deal"){          // пресеты бюджета и срока — под тип сделки
+      A.budget = {rent:"1200", daily:"80", buy:"120000"}[val] || "1200";
+      if (val!=="daily" && String(A.term).startsWith("d")) A.term = "12";
+      if (val==="daily" && !String(A.term).startsWith("d")) A.term = "d1_3";
+    }
+  }
+  render();
 }
 
 function render(){
+  const lb = document.getElementById("langbar");
+  lb.innerHTML = "";
+  for (const [code,label] of [["ru","Русский"],["uz","O'zbekcha"],["en","English"]]){
+    const b = document.createElement("div");
+    b.className = "chip" + (A.lang===code ? " on" : "");
+    b.textContent = label;
+    b.onclick = ()=>{ A.lang=code; tg?.HapticFeedback?.selectionChanged(); render(); };
+    lb.appendChild(b);
+  }
+  document.getElementById("title").textContent = L().title;
+  document.getElementById("lead").textContent = L().lead;
+  document.getElementById("pv-title").textContent = L().pv;
+  document.getElementById("pv-note").textContent = L().pv_note;
+  document.getElementById("fallback").textContent = L().submit;
+  tg?.MainButton?.setText(L().submit);
+
   const root = document.getElementById("form");
   root.innerHTML = "";
   for (const f of FIELDS){
+    if (f.when && !f.when(A)) continue;
     const s = document.createElement("section");
-    const hint = f.multi ? "можно несколько" : "";
-    s.innerHTML = `<div class="q"><span>${f.q}</span><em>${hint}</em></div>`;
+    const label = f.floor ? L().q.floor : L().q[f.k];
+    const hint = (f.multi || f.floor) ? L().multi : "";
+    s.innerHTML = `<div class="q"><span>${label}</span><em>${hint}</em></div>`;
+
+    if (f.text){
+      const row = document.createElement("div");
+      row.className = "row"; row.style.marginTop = "0";
+      row.innerHTML = `<input type="text" value="${(A[f.k]||"").replace(/"/g,"&quot;")}">`;
+      s.appendChild(row);
+      row.querySelector("input").oninput = e=>{ A[f.k]=e.target.value; preview(); };
+      root.appendChild(s); continue;
+    }
+
     const box = document.createElement("div");
     box.className = "chips grid" + (f.cols || 2);
-    for (const [val, label] of opts(f)){
+    const opts = f.floor
+      ? [["nf",L().o.nf],["nl",L().o.nl],["any",L().o.fl_any]]
+      : fieldOptions(f);
+    for (const [val,text] of opts){
       const b = document.createElement("div");
-      b.className = "chip" + (isOn(f, val) ? " on" : "");
-      b.textContent = label;
-      b.onclick = () => { pick(f, val); tg?.HapticFeedback?.selectionChanged(); };
+      b.className = "chip" + (isOn(f,val) ? " on" : "");
+      b.textContent = text;
+      b.onclick = ()=>{ pick(f,val); tg?.HapticFeedback?.selectionChanged(); };
       box.appendChild(b);
     }
     s.appendChild(box);
-    if (f.num){
+
+    if (f.budget){
       const row = document.createElement("div");
       row.className = "row";
-      row.innerHTML = `<input type="number" inputmode="numeric" placeholder="или точная сумма, $"
-                        value="${A.budget_max || ""}" id="bmax">`;
+      row.innerHTML = `<input type="number" inputmode="numeric" placeholder="${L().exact}"
+                        value="${A.budget_max||""}" id="bmax">`;
       s.appendChild(row);
-      row.querySelector("#bmax").oninput = e => { A.budget_max = e.target.value; preview(); };
+      row.querySelector("#bmax").oninput = e=>{ A.budget_max=e.target.value; preview(); };
+    }
+    if (f.floor){
+      const row = document.createElement("div");
+      row.className = "row";
+      row.innerHTML = `<input type="number" inputmode="numeric" placeholder="${L().from}"
+                        value="${A.floor_min||""}" id="fmin">
+                       <input type="number" inputmode="numeric" placeholder="${L().to}"
+                        value="${A.floor_max||""}" id="fmax">`;
+      s.appendChild(row);
+      row.querySelector("#fmin").oninput = e=>{ A.floor_min=e.target.value; preview(); };
+      row.querySelector("#fmax").oninput = e=>{ A.floor_max=e.target.value; preview(); };
     }
     root.appendChild(s);
   }
   preview();
 }
 
-function isOn(f, val){
-  return f.multi ? (A[f.k] || []).includes(val) : A[f.k] === val;
-}
+// -------------------------------------------- предпросмотр письма --------
+// Письмо маклеру — всегда по-русски или по-узбекски: английский они не читают.
+// Итоговый текст всё равно собирает бот на сервере; здесь — живой предпросмотр.
+function money(v){ return "$" + String(v).replace(/\B(?=(\d{3})+(?!\d))/g," "); }
 
-function pick(f, val){
-  if (f.multi){
-    let cur = A[f.k] || [];
-    if (val === "any") cur = ["any"];
-    else {
-      cur = cur.filter(x => x !== "any");
-      cur = cur.includes(val) ? cur.filter(x => x !== val) : cur.concat([val]);
-    }
-    A[f.k] = cur;
+function letter(){
+  const uz = A.lang==="uz";
+  const p = [];
+  const OBJ = uz ? {flat:"kvartira",house:"hovli uy",dacha:"dala hovli",land:"yer uchastkasi"}
+                 : {flat:"квартиру",house:"дом",dacha:"дачу",land:"участок"};
+  const PLACE = uz ? {tashkent:"Toshkentda",charvak:"Chorvoq / Chimyonda",region:"Toshkent viloyatida"}
+                   : {tashkent:"в Ташкенте",charvak:"на Чарваке / Чимгане",region:"в Ташкентской области"};
+  let place = PLACE[A.city] || "";
+  if (A.city==="other" && A.city_other.trim())
+    place = uz ? A.city_other.trim()+" shahrida" : "в "+A.city_other.trim();
+  if (uz){
+    const verb = {rent:"ijaraga olmoqchiman",daily:"kunlik ijaraga olmoqchiman",buy:"sotib olmoqchiman"}[A.deal];
+    p.push(`Assalomu alaykum! ${[place,OBJ[A.object],verb].filter(Boolean).join(" ")}.`);
   } else {
-    A[f.k] = val;
+    const verb = {rent:"снять",daily:"снять посуточно",buy:"купить"}[A.deal];
+    p.push(`Здравствуйте! Хочу ${verb} ${OBJ[A.object]}${place?" "+place:""}.`);
   }
-  render();
-}
 
-function budgetText(){
-  if (A.budget_max) return `бюджет до $${A.budget_max}/мес`;
-  const m = {"500":"до $500","800":"до $800","1200":"до $1200",
-             "1800":"до $1800","3000":"выше $1800"}[A.budget];
-  return "бюджет " + (m || "до $1200") + "/мес";
+  const req = [];
+  if (A.object!=="land"){
+    const rooms = (A.rooms||[]).filter(x=>x!=="any").sort();
+    if (rooms.length) req.push((uz?"xonalar: ":"комнат: ") + rooms.join("–") + (rooms.includes("4")?"+":""));
+  }
+  if (A.city==="tashkent"){
+    const names = uz ? DISTRICTS_UZ : DISTRICTS_RU;
+    const ds = (A.districts||[]).filter(x=>x!=="any").map(i=>names[+i]);
+    if (ds.length) req.push((uz?"tumanlar: ":"районы: ") + ds.join(", "));
+  }
+  const b = A.budget_max || A.budget;
+  if (b){
+    const unit = A.deal==="daily" ? (uz?" kuniga":"/сутки") : A.deal==="buy" ? "" : (uz?" oyiga":"/мес");
+    req.push(uz ? `byudjet${unit} ${money(b)} gacha` : `бюджет до ${money(b)}${unit}`);
+  }
+  if (req.length) p.push((uz?"Parametrlar: ":"Параметры: ") + req.join("; ") + ".");
+
+  const w = [];
+  const CLS = uz ? {new:"yangi qurilgan uy yoki TJM bo'lsa yaxshi",
+                    premium:"dizayner ta'miri bilan yangi TJM qiziqtiradi",
+                    reno:"yaxshi ta'mirlangan ikkilamchi uy ham bo'ladi",
+                    biz:"biznes / premium toifa qiziqtiradi"}
+                 : {new:"желательно новостройка или ЖК",
+                    premium:"интересует новый ЖК с хорошим (авторским) ремонтом",
+                    reno:"рассмотрю вторичку с хорошим ремонтом",
+                    biz:"интересует бизнес / премиум-класс"};
+  if (A.object!=="land" && CLS[A.class]) w.push(CLS[A.class]);
+  if (A.deal!=="buy"){
+    if (A.furniture==="yes" && A.object!=="land") w.push(uz?"mebel va texnika bilan":"с мебелью и техникой");
+    if (A.object==="flat"){
+      const fp = A.floor_pref||[];
+      if (fp.includes("nf")) w.push(uz?"birinchi qavat emas":"не первый этаж");
+      if (fp.includes("nl")) w.push(uz?"oxirgi qavat emas":"не последний этаж");
+      const lo=String(A.floor_min||"").trim(), hi=String(A.floor_max||"").trim();
+      if (lo&&hi) w.push(uz?`qavat: ${lo}–${hi}`:`этаж ${lo}–${hi}`);
+      else if (lo) w.push(uz?`${lo}-qavatdan yuqori`:`этаж от ${lo}`);
+      else if (hi) w.push(uz?`${hi}-qavatgacha`:`этаж до ${hi}`);
+    }
+    const TERM = uz ? {"12":"uzoq muddatga, 1 yildan","6_12":"6–12 oyga","3_6":"3–6 oyga",
+                       d1_3:"1–3 kunga",d4_7:"4–7 kunga",d7_30:"1–4 haftaga"}
+                    : {"12":"на длительный срок, от года","6_12":"на 6–12 месяцев","3_6":"на 3–6 месяцев",
+                       d1_3:"на 1–3 дня",d4_7:"на 4–7 дней",d7_30:"на 1–4 недели"};
+    if (TERM[A.term]) w.push(TERM[A.term]);
+    const WHO = uz ? {single:"bir kishi uchun",couple:"juftlik uchun",family_kids:"bolali oila uchun",
+                      family:"bolasiz oila uchun",big:"katta oila uchun",group:"do'stlar uchun"}
+                   : {single:"для одного",couple:"для пары",family_kids:"для семьи с детьми",
+                      family:"для семьи без детей",big:"для большой семьи",group:"для друзей / коллег"};
+    if (WHO[A.who]) w.push(WHO[A.who]);
+    const PETS = uz ? {cat:"mushuk bilan",dog:"it bilan",pet_other:"uy hayvoni bilan"}
+                    : {cat:"с кошкой",dog:"с собакой",pet_other:"с домашним животным"};
+    if (PETS[A.pets]) w.push(PETS[A.pets]);
+  }
+  if (A.parking==="yes") w.push(uz?"avtoturargoh kerak":"нужна парковка");
+  if (w.length) p.push((uz?"Xohishlar: ":"Пожелания: ") + w.join(", ") + ".");
+
+  if (A.deal!=="buy"){
+    const MV = uz ? {now:"Darhol kirishga tayyorman.",month:"Bir oy ichida kiraman.",
+                     flex:"Muddat bo'yicha moslashuvchanman."}
+                  : {now:"Готов заехать сразу.",month:"Заезд в течение месяца.",flex:"По срокам гибко."};
+    if (MV[A.movein]) p.push(MV[A.movein]);
+  }
+
+  p.push(A.object==="land"
+    ? (uz ? "Mos variant bo'lsa — foto, aniq manzil, maydoni va narxini yuboring. Vositachilik haqini ham yozing."
+          : "Если есть подходящие варианты — пришлите, пожалуйста, фото, точный адрес, площадь и цену. Сразу уточните размер комиссии.")
+    : (uz ? "Mos variant bo'lsa — foto, aniq manzil, qavati, maydoni va narxini yuboring. Vositachilik haqini ham yozing."
+          : "Если есть подходящие варианты — пришлите, пожалуйста, фото, точный адрес, этаж, площадь и цену. Сразу уточните размер комиссии."));
+
+  const link = `https://t.me/${A._bot || "rano_smart_bot"}`;
+  if (A.contact==="bot" || A.contact==="both")
+    p.push(uz ? `Variantlarni yordamchim Ranoga yuboring: ${link}\nHavolani bosib yozing — u menga darhol yetkazadi.`
+              : `Варианты присылайте, пожалуйста, моей помощнице — Рано: ${link}\nНажмите на ссылку и напишите ей, она сразу передаёт мне.`);
+  p.push(uz ? "Rahmat!" : "Спасибо!");
+  return p.join("\n");
 }
 
 function preview(){
-  const p = [];
-  p.push(`Здравствуйте! Хочу ${A.deal === "buy" ? "купить" : "снять"} квартиру в Ташкенте.`);
-  const req = [];
-  const rooms = (A.rooms || []).filter(x => x !== "any").sort();
-  if (rooms.length) req.push("комнат: " + rooms.join("–") + (rooms.includes("4") ? "+" : ""));
-  const ds = (A.districts || []).filter(x => x !== "any").map(i => DISTRICTS[+i]);
-  if (ds.length) req.push("районы: " + ds.join(", "));
-  req.push(budgetText());
-  p.push("Параметры: " + req.join("; ") + ".");
-
-  const w = [];
-  if (A.class === "premium") w.push("интересует новый ЖК с хорошим (авторским) ремонтом");
-  else if (A.class === "new") w.push("желательно новостройка или ЖК");
-  if (A.furniture === "yes") w.push("с мебелью и техникой");
-  if (A.floor === "mid") w.push("не первый и не последний этаж");
-  if (A.parking === "yes") w.push("нужна парковка");
-  if (A.term === "12") w.push("на длительный срок, от года");
-  if (A.who === "family") w.push("для семьи");
-  if (A.pets === "yes") w.push("с домашним животным");
-  if (w.length) p.push("Пожелания: " + w.join(", ") + ".");
-
-  const mv = {now:"Готов заехать сразу.", month:"Заезд в течение месяца.",
-              flex:"По срокам гибко."}[A.movein];
-  if (mv) p.push(mv);
-  p.push("Если есть подходящие варианты — пришлите, пожалуйста, фото, точный адрес, " +
-         "этаж, площадь и цену. Сразу уточните размер комиссии.");
-  if (A.contact === "bot" || A.contact === "both")
-    p.push("Варианты присылайте, пожалуйста, моей помощнице — Рано: " +
-           `https://t.me/${A._bot || "rano_smart_bot"}\n` +
-           "Нажмите на ссылку и напишите ей, она сразу передаёт мне.");
-  p.push("Спасибо!");
-  document.getElementById("preview").textContent = p.join("\n");
+  document.getElementById("preview").textContent = letter();
+  document.getElementById("pv-hint").textContent =
+    L().pv_hint + (A.lang==="en" ? " " + L().pv_hint_en : "");
 }
 
 function submit(){
-  const payload = JSON.stringify({v: 1, ans: A});
+  const payload = JSON.stringify({v: 2, ans: A});
   tg?.HapticFeedback?.notificationOccurred("success");
   if (tg?.sendData) tg.sendData(payload);
-  else alert("Откройте страницу через кнопку в боте");
+  else alert(A.lang==="en" ? "Open this page from the bot button"
+            : A.lang==="uz" ? "Sahifani botdagi tugma orqali oching"
+            : "Откройте страницу через кнопку в боте");
 }
 
 if (tg){
   tg.ready();
   tg.expand();
-  tg.MainButton.setText("Сохранить и продолжить");
   tg.MainButton.show();
   tg.MainButton.onClick(submit);
 } else {

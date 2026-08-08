@@ -23,42 +23,82 @@ def _rr():
 
 
 # ============================================================== АНКЕТА ====
+#
+# Анкета ветвящаяся: у шага может быть "skip" — предикат по текущим ответам.
+# Пропущенные шаги не показываются и не попадают в счётчик «шаг X из N».
 
 BUDGETS = [("до $500", 500), ("$500–800", 800), ("$800–1200", 1200),
-           ("$1200–1800", 1800), ("выше $1800", 3000)]
+           ("$1200–1800", 1800), ("выше $1800", 3000)]          # аренда, $/мес
+BUDGETS_DAILY = [("до $50", 50), ("$50–80", 80), ("$80–120", 120),
+                 ("выше $120", 250)]                             # посуточно, $/сутки
+BUDGETS_BUY = [("до $50 тыс", 50000), ("$50–80 тыс", 80000),
+               ("$80–120 тыс", 120000), ("$120–200 тыс", 200000),
+               ("выше $200 тыс", 400000)]                        # покупка, $ всего
+
+TERMS_RENT = [("От года", "12"), ("6–12 месяцев", "6_12"),
+              ("3–6 месяцев", "3_6"), ("Гибко", "flex")]
+TERMS_DAILY = [("1–3 дня", "d1_3"), ("4–7 дней", "d4_7"),
+               ("1–4 недели", "d7_30"), ("Гибко", "dflex")]
+
+
+def _is_buy(ans):
+    return ans.get("deal") == "buy"
+
+
+def _is_land(ans):
+    return ans.get("object") == "land"
+
 
 STEPS = [
     {"k": "deal", "q": "Что ищем?",
-     "o": [("🔑 Аренду", "rent"), ("🏦 Покупку", "buy")]},
-    {"k": "city", "q": "Город",
-     "o": [("Ташкент", "tashkent"), ("Другой", "other")]},
-    {"k": "rooms", "q": "Сколько комнат? (можно несколько)", "multi": True,
-     "o": [("1", "1"), ("2", "2"), ("3", "3"), ("4+", "4"), ("Любое", "any")]},
-    {"k": "budget", "q": "Бюджет в месяц",
-     "o": [(t, str(v)) for t, v in BUDGETS]},
+     "o": [("🔑 Аренду", "rent"), ("🌙 Посуточно", "daily"), ("🏦 Покупку", "buy")]},
+    {"k": "object", "q": "Тип жилья",
+     "o": [("🏢 Квартиру", "flat"), ("🏠 Дом / таунхаус", "house"),
+           ("🌲 Дачу", "dacha"), ("🌍 Участок", "land")]},
+    {"k": "city", "q": "Где ищем",
+     "o": [("Ташкент", "tashkent"), ("Чарвак / Чимган", "charvak"),
+           ("Ташкентская область", "region"), ("Другой город", "other")]},
     {"k": "districts", "q": "Районы (можно несколько, или «Любой»)", "multi": True,
-     "o": "DISTRICTS"},
+     "o": "DISTRICTS", "skip": lambda a: a.get("city") != "tashkent"},
+    {"k": "rooms", "q": "Сколько комнат? (можно несколько)", "multi": True,
+     "o": [("1", "1"), ("2", "2"), ("3", "3"), ("4+", "4"), ("Любое", "any")],
+     "skip": _is_land},
+    {"k": "budget", "q": "Бюджет", "o": "BUDGETS"},
     {"k": "class", "q": "Класс жилья",
      "o": [("Любой", "any"), ("Новостройка / ЖК", "new"),
-           ("ЖК + дизайнерский ремонт", "premium")]},
+           ("ЖК + дизайнерский ремонт", "premium"),
+           ("Вторичка с хорошим ремонтом", "reno"),
+           ("Бизнес / премиум-класс", "biz")], "skip": _is_land},
     {"k": "furniture", "q": "Мебель и техника",
-     "o": [("Нужна", "yes"), ("Не нужна", "no"), ("Неважно", "any")]},
-    {"k": "floor", "q": "Этаж",
-     "o": [("Не первый и не последний", "mid"), ("Неважно", "any")]},
-    {"k": "term", "q": "На какой срок",
-     "o": [("От года", "12"), ("6–12 месяцев", "6"), ("До полугода", "3")]},
+     "o": [("Нужна", "yes"), ("Не нужна", "no"), ("Неважно", "any")],
+     "skip": lambda a: _is_buy(a) or _is_land(a)},
+    {"k": "floor_pref", "q": "Этаж",
+     "o": [("Не первый", "nf"), ("Не последний", "nl"),
+           ("Не первый и не последний", "mid"), ("Неважно", "any")],
+     "skip": lambda a: a.get("object", "flat") != "flat"},
+    {"k": "term", "q": "На какой срок", "o": "TERMS", "skip": _is_buy},
     {"k": "movein", "q": "Когда заезжать",
-     "o": [("Сейчас", "now"), ("В течение месяца", "month"), ("Гибко", "flex")]},
+     "o": [("Сейчас", "now"), ("В течение месяца", "month"), ("Гибко", "flex")],
+     "skip": _is_buy},
     {"k": "who", "q": "Кто будет жить",
-     "o": [("Один / одна", "single"), ("Пара", "couple"), ("Семья с детьми", "family")]},
+     "o": [("Один / одна", "single"), ("Пара", "couple"),
+           ("Семья с детьми", "family_kids"), ("Семья без детей", "family"),
+           ("Большая семья", "big"), ("Друзья / коллеги", "group")],
+     "skip": _is_buy},
     {"k": "pets", "q": "Домашние животные",
-     "o": [("Нет", "no"), ("Есть", "yes")]},
+     "o": [("Нет", "no"), ("Кошка", "cat"), ("Собака", "dog"),
+           ("Другое", "pet_other")], "skip": _is_buy},
     {"k": "parking", "q": "Парковка",
      "o": [("Нужна", "yes"), ("Неважно", "any")]},
     {"k": "contact", "q": "Куда маклерам присылать варианты",
      "o": [("🤖 В бота-помощника", "bot"), ("👤 Мне лично", "me"),
            ("Оба контакта", "both")]},
 ]
+
+
+def step_skipped(idx, ans):
+    return (0 <= idx < len(STEPS) and STEPS[idx].get("skip") is not None
+            and STEPS[idx]["skip"](ans or {}))
 
 LABELS = {}
 for _s in STEPS:
@@ -70,13 +110,26 @@ def districts_options():
     return [(n, str(i)) for i, n in enumerate(_rr().DISTRICT_LIST)] + [("Любой", "any")]
 
 
-def step_options(step):
-    return districts_options() if step["o"] == "DISTRICTS" else step["o"]
+def step_options(step, ans=None):
+    ans = ans or {}
+    if step["o"] == "DISTRICTS":
+        return districts_options()
+    if step["o"] == "BUDGETS":                 # пресеты зависят от типа сделки
+        deal = ans.get("deal", "rent")
+        base = (BUDGETS_BUY if deal == "buy"
+                else BUDGETS_DAILY if deal == "daily" else BUDGETS)
+        return [(t, str(v)) for t, v in base]
+    if step["o"] == "TERMS":                   # срок в днях для посуточной
+        return TERMS_DAILY if ans.get("deal") == "daily" else TERMS_RENT
+    return step["o"]
 
 
-def label_of(step, val):
+def label_of(step, val, ans=None):
     if step["o"] == "DISTRICTS":
         return "Любой" if val == "any" else _rr().DISTRICT_LIST[int(val)]
+    for t, v in step_options(step, ans):
+        if str(v) == str(val):
+            return t
     return LABELS.get(step["k"], {}).get(val, val)
 
 
@@ -91,23 +144,29 @@ def save_anketa(store, a):
 def anketa_text(store, idx):
     step = STEPS[idx]
     a = get_anketa(store)
-    chosen = a.get("ans", {}).get(step["k"])
+    ans = a.get("ans", {})
+    chosen = ans.get(step["k"])
     line = ""
     if step.get("multi"):
-        got = ", ".join(label_of(step, v) for v in (chosen or [])) or "—"
+        got = ", ".join(label_of(step, v, ans) for v in (chosen or [])) or "—"
         line = f"\nВыбрано: {got}"
-    return (f"📋 <b>Анкета</b> · шаг {idx + 1} из {len(STEPS)}\n\n"
+    # счётчик — только по видимым шагам, пропущенные не считаем
+    visible = [i for i in range(len(STEPS)) if not step_skipped(i, ans)]
+    pos = visible.index(idx) + 1 if idx in visible else idx + 1
+    return (f"📋 <b>Анкета</b> · шаг {pos} из {len(visible)}\n\n"
             f"<b>{step['q']}</b>{line}")
 
 
 def anketa_keyboard(store, idx):
     step = STEPS[idx]
     a = get_anketa(store)
-    cur = a.get("ans", {}).get(step["k"])
+    ans = a.get("ans", {})
+    cur = ans.get(step["k"])
     cur_list = cur if isinstance(cur, list) else ([cur] if cur else [])
     rows, row = [], []
-    per_row = 3 if step["o"] == "DISTRICTS" else (2 if len(step_options(step)) > 3 else 1)
-    for text, val in step_options(step):
+    opts = step_options(step, ans)
+    per_row = 3 if step["o"] == "DISTRICTS" else (2 if len(opts) > 3 else 1)
+    for text, val in opts:
         mark = "✅ " if val in cur_list else ""
         row.append({"text": mark + text, "callback_data": f"a:{idx}:{val}"})
         if len(row) == per_row:
@@ -156,7 +215,11 @@ def handle_anketa_cb(data, cfg, store, message_id=None):
         rr.send_telegram(cfg, "Анкета отменена. Начать заново — /anketa")
         return "Отменено", True
     if rest == "back":
-        idx = max(0, idx - 1)
+        ans = a.get("ans", {})
+        idx -= 1
+        while idx > 0 and step_skipped(idx, ans):   # назад тоже мимо скрытых
+            idx -= 1
+        idx = max(0, idx)
         a["i"] = idx; save_anketa(store, a)
         render_anketa(cfg, store, idx, message_id)
         return "", True
@@ -180,14 +243,17 @@ def handle_anketa_cb(data, cfg, store, message_id=None):
         ans[step["k"]] = cur
         a["i"] = idx; save_anketa(store, a)
         render_anketa(cfg, store, idx, message_id)
-        return label_of(step, val), True
+        return label_of(step, val, ans), True
 
     ans[step["k"]] = val
     return advance(cfg, store, a, idx, message_id)
 
 
 def advance(cfg, store, a, idx, message_id):
+    ans = a.get("ans", {})
     idx += 1
+    while step_skipped(idx, ans):        # прыгаем через неприменимые шаги
+        idx += 1
     a["i"] = idx
     save_anketa(store, a)
     if idx >= len(STEPS):
@@ -199,71 +265,212 @@ def advance(cfg, store, a, idx, message_id):
 
 # ================================================== ТЕКСТ ЗАПРОСА ========
 
+# --- словари письма маклерам: русский и узбекский --------------------------
+OBJ_RU = {"flat": "квартиру", "house": "дом", "dacha": "дачу", "land": "участок"}
+OBJ_UZ = {"flat": "kvartira", "house": "hovli uy", "dacha": "dala hovli",
+          "land": "yer uchastkasi"}
+PLACE_RU = {"tashkent": "в Ташкенте", "charvak": "на Чарваке / Чимгане",
+            "region": "в Ташкентской области"}
+PLACE_UZ = {"tashkent": "Toshkentda", "charvak": "Chorvoq / Chimyonda",
+            "region": "Toshkent viloyatida"}
+WHO_RU = {"single": "для одного", "couple": "для пары",
+          "family_kids": "для семьи с детьми", "family": "для семьи без детей",
+          "big": "для большой семьи", "group": "для друзей / коллег"}
+WHO_UZ = {"single": "bir kishi uchun", "couple": "juftlik uchun",
+          "family_kids": "bolali oila uchun", "family": "bolasiz oila uchun",
+          "big": "katta oila uchun", "group": "do'stlar / hamkasblar uchun"}
+PETS_RU = {"cat": "с кошкой", "dog": "с собакой",
+           "pet_other": "с домашним животным", "yes": "с домашним животным"}
+PETS_UZ = {"cat": "mushuk bilan", "dog": "it bilan",
+           "pet_other": "uy hayvoni bilan", "yes": "uy hayvoni bilan"}
+CLASS_RU = {"new": "желательно новостройка или ЖК",
+            "premium": "интересует новый ЖК с хорошим (авторским) ремонтом",
+            "reno": "рассмотрю вторичку с хорошим ремонтом",
+            "biz": "интересует бизнес / премиум-класс"}
+CLASS_UZ = {"new": "yangi qurilgan uy yoki TJM bo'lsa yaxshi",
+            "premium": "dizayner ta'miri bilan yangi TJM qiziqtiradi",
+            "reno": "yaxshi ta'mirlangan ikkilamchi uy ham bo'ladi",
+            "biz": "biznes / premium toifa qiziqtiradi"}
+TERM_RU = {"12": "на длительный срок, от года", "6_12": "на 6–12 месяцев",
+           "6": "на 6–12 месяцев", "3_6": "на 3–6 месяцев", "3": "до полугода",
+           "d1_3": "на 1–3 дня", "d4_7": "на 4–7 дней", "d7_30": "на 1–4 недели"}
+TERM_UZ = {"12": "uzoq muddatga, 1 yildan", "6_12": "6–12 oyga",
+           "6": "6–12 oyga", "3_6": "3–6 oyga", "3": "yarim yilgacha",
+           "d1_3": "1–3 kunga", "d4_7": "4–7 kunga", "d7_30": "1–4 haftaga"}
+DISTRICT_UZ = {"Алмазар": "Olmazor", "Бектемир": "Bektemir", "Мирабад": "Mirobod",
+               "Мирзо-Улугбек": "Mirzo Ulug'bek", "Сергели": "Sergeli",
+               "Учтепа": "Uchtepa", "Чиланзар": "Chilonzor",
+               "Шайхантахур": "Shayxontohur", "Юнусабад": "Yunusobod",
+               "Яккасарай": "Yakkasaroy", "Янгихаёт": "Yangihayot",
+               "Яшнабад": "Yashnobod"}
+
+
+def _floor_wish(ans, uz=False):
+    """Этаж: флаги «не первый / не последний» плюс числовой диапазон."""
+    pref = ans.get("floor_pref") or ans.get("floor") or []
+    if isinstance(pref, str):
+        pref = [pref]
+    flags = set(pref)
+    if "mid" in flags:
+        flags |= {"nf", "nl"}
+    out = []
+    if "nf" in flags:
+        out.append("birinchi qavat emas" if uz else "не первый этаж")
+    if "nl" in flags:
+        out.append("oxirgi qavat emas" if uz else "не последний этаж")
+    lo = str(ans.get("floor_min") or "").strip()
+    hi = str(ans.get("floor_max") or "").strip()
+    if lo.isdigit() or hi.isdigit():
+        if lo.isdigit() and hi.isdigit():
+            rng = f"{lo}–{hi}"
+        elif lo.isdigit():
+            rng = (f"{lo}-qavatdan yuqori" if uz else f"от {lo}")
+            out.append(("qavat: " if uz else "этаж ") + rng)
+            return ", ".join(out)
+        else:
+            rng = (f"{hi}-qavatgacha" if uz else f"до {hi}")
+            out.append(("qavat: " if uz else "этаж ") + rng)
+            return ", ".join(out)
+        out.append((f"qavat: {rng}" if uz else f"этаж {rng}"))
+    return ", ".join(out)
+
+
+def _fmt_budget(ans, uz=False):
+    deal = ans.get("deal", "rent")
+    b = str(ans.get("budget") or "").strip()
+    if not b.isdigit():
+        return ""
+    amount = int(b)
+    pretty = f"${amount:,}".replace(",", " ")
+    if deal == "daily":
+        return (f"byudjet kuniga {pretty} gacha" if uz
+                else f"бюджет до {pretty}/сутки")
+    if deal == "buy":
+        return (f"byudjet {pretty} gacha" if uz else f"бюджет до {pretty}")
+    return (f"byudjet oyiga {pretty} gacha" if uz else f"бюджет до {pretty}/мес")
+
+
 def compose_request(cfg, store, username=None):
-    """Собирает сообщение маклеру из ответов анкеты."""
+    """Собирает сообщение маклеру из ответов анкеты.
+
+    Язык письма: узбекский, если клиент выбрал узбекский интерфейс,
+    иначе русский (в том числе для иностранцев — маклеры английский
+    не читают, переводит Рано)."""
     rr = _rr()
     ans = get_anketa(store).get("ans", {})
-    deal = "снять" if ans.get("deal", "rent") == "rent" else "купить"
-    parts = [f"Здравствуйте! Хочу {deal} квартиру в Ташкенте."]
+    uz = ans.get("lang") == "uz"
+    deal = ans.get("deal", "rent")
+    obj = ans.get("object", "flat")
+
+    place = (PLACE_UZ if uz else PLACE_RU).get(ans.get("city", "tashkent"))
+    if ans.get("city") == "other":
+        other = str(ans.get("city_other") or "").strip()[:40]
+        # «в г. Самарканд» — без склонения произвольного названия
+        place = ((other + " shahrida") if uz else ("в г. " + other)) if other else None
+
+    if uz:
+        verb = {"rent": "ijaraga olmoqchiman", "daily": "kunlik ijaraga olmoqchiman",
+                "buy": "sotib olmoqchiman"}[deal]
+        head = "Assalomu alaykum! " + " ".join(
+            x for x in [place, OBJ_UZ.get(obj, "uy-joy"), verb] if x)
+    else:
+        verb = {"rent": "снять", "daily": "снять посуточно", "buy": "купить"}[deal]
+        head = (f"Здравствуйте! Хочу {verb} {OBJ_RU.get(obj, 'жильё')}"
+                + (f" {place}" if place else ""))
+    parts = [head + "."]
 
     req = []
-    rooms = [r for r in (ans.get("rooms") or []) if r != "any"]
-    if rooms:
-        rooms_sorted = sorted(rooms)
-        req.append(f"комнат: {'–'.join(rooms_sorted) if len(rooms_sorted) > 1 else rooms_sorted[0]}"
-                   + ("+" if "4" in rooms_sorted else ""))
-    ds = [d for d in (ans.get("districts") or []) if d != "any"]
-    if ds:
-        names = [rr.DISTRICT_LIST[int(d)] for d in ds]
-        req.append("районы: " + ", ".join(names))
-    b = ans.get("budget")
-    if b:
-        req.append(f"бюджет до ${b}/мес")
+    if obj != "land":
+        rooms = [r for r in (ans.get("rooms") or []) if r != "any"]
+        if rooms:
+            rs = sorted(rooms)
+            label = "–".join(rs) if len(rs) > 1 else rs[0]
+            req.append(("xonalar: " if uz else "комнат: ") + label
+                       + ("+" if "4" in rs else ""))
+    if ans.get("city", "tashkent") == "tashkent":
+        ds = [d for d in (ans.get("districts") or []) if d != "any"]
+        if ds:
+            names = [rr.DISTRICT_LIST[int(d)] for d in ds]
+            if uz:
+                names = [DISTRICT_UZ.get(n, n) for n in names]
+            req.append(("tumanlar: " if uz else "районы: ") + ", ".join(names))
+    fb = _fmt_budget(ans, uz)
+    if fb:
+        req.append(fb)
     if req:
-        parts.append("Параметры: " + "; ".join(req) + ".")
+        parts.append(("Parametrlar: " if uz else "Параметры: ")
+                     + "; ".join(req) + ".")
 
     extra = []
-    if ans.get("class") == "premium":
-        extra.append("интересует новый ЖК с хорошим (авторским) ремонтом")
-    elif ans.get("class") == "new":
-        extra.append("желательно новостройка или ЖК")
-    if ans.get("furniture") == "yes":
-        extra.append("с мебелью и техникой")
-    if ans.get("floor") == "mid":
-        extra.append("не первый и не последний этаж")
+    if obj != "land":
+        c = (CLASS_UZ if uz else CLASS_RU).get(ans.get("class"))
+        if c:
+            extra.append(c)
+    if deal != "buy":
+        if ans.get("furniture") == "yes":
+            extra.append("mebel va texnika bilan" if uz else "с мебелью и техникой")
+        fw = _floor_wish(ans, uz) if obj == "flat" else ""
+        if fw:
+            extra.append(fw)
+        t = (TERM_UZ if uz else TERM_RU).get(ans.get("term"))
+        if t:
+            extra.append(t)
+        w = (WHO_UZ if uz else WHO_RU).get(ans.get("who"))
+        if w:
+            extra.append(w)
+        pt = (PETS_UZ if uz else PETS_RU).get(ans.get("pets"))
+        if pt:
+            extra.append(pt)
     if ans.get("parking") == "yes":
-        extra.append("нужна парковка")
-    if ans.get("term") == "12":
-        extra.append("на длительный срок, от года")
-    if ans.get("who") == "family":
-        extra.append("для семьи")
-    if ans.get("pets") == "yes":
-        extra.append("с домашним животным")
+        extra.append("avtoturargoh kerak" if uz else "нужна парковка")
     if extra:
-        parts.append("Пожелания: " + ", ".join(extra) + ".")
+        parts.append(("Xohishlar: " if uz else "Пожелания: ")
+                     + ", ".join(extra) + ".")
 
-    movein = {"now": "готов заехать сразу", "month": "заезд в течение месяца",
-              "flex": "по срокам гибко"}.get(ans.get("movein"))
-    if movein:
-        parts.append(movein.capitalize() + ".")
+    if deal != "buy":
+        movein = ({"now": "darhol kirishga tayyorman",
+                   "month": "bir oy ichida kiraman",
+                   "flex": "muddat bo'yicha moslashuvchanman"} if uz else
+                  {"now": "готов заехать сразу",
+                   "month": "заезд в течение месяца",
+                   "flex": "по срокам гибко"}).get(ans.get("movein"))
+        if movein:
+            parts.append(movein[0].upper() + movein[1:] + ".")
 
-    parts.append("Если есть подходящие варианты — пришлите, пожалуйста, "
-                 "фото, точный адрес, этаж, площадь и цену. "
-                 "Сразу уточните размер комиссии.")
+    if obj == "flat":                        # этаж спрашиваем только у квартир
+        ask = ("Mos variant bo'lsa — foto, aniq manzil, qavati, maydoni va "
+               "narxini yuboring. Vositachilik haqini ham yozing." if uz else
+               "Если есть подходящие варианты — пришлите, пожалуйста, фото, "
+               "точный адрес, этаж, площадь и цену. "
+               "Сразу уточните размер комиссии.")
+    else:
+        ask = ("Mos variant bo'lsa — foto, aniq manzil, maydoni va narxini "
+               "yuboring. Vositachilik haqini ham yozing." if uz else
+               "Если есть подходящие варианты — пришлите, пожалуйста, фото, "
+               "точный адрес, площадь и цену. Сразу уточните размер комиссии.")
+    parts.append(ask)
 
     who = ans.get("contact", "bot")
     bot_un = cfg.get("bot_username") or "rano_smart_bot"
     assistant = cfg.get("assistant_name", "Рано")
+    # в латинском письме имя тоже латиницей, иначе выходит «Раноga»
+    assistant_lat = {"Рано": "Rano", "Амина": "Amina"}.get(assistant, assistant)
     if who in ("bot", "both"):
         # Даём кликабельную ссылку, а не @упоминание: маклер, который ищет бота
         # по имени, легко попадает к чужому боту с похожим юзернеймом.
         # Имя оставляем в именительном падеже — иначе выходит «помощнице Рано».
-        parts.append(f"Варианты присылайте, пожалуйста, моей помощнице — "
-                     f"{assistant}: https://t.me/{bot_un}\n"
-                     f"Нажмите на ссылку и напишите ей, она сразу передаёт мне.")
+        if uz:
+            parts.append(f"Variantlarni yordamchim {assistant_lat}ga yuboring: "
+                         f"https://t.me/{bot_un}\n"
+                         f"Havolani bosib yozing — u menga darhol yetkazadi.")
+        else:
+            parts.append(f"Варианты присылайте, пожалуйста, моей помощнице — "
+                         f"{assistant}: https://t.me/{bot_un}\n"
+                         f"Нажмите на ссылку и напишите ей, она сразу передаёт мне.")
     if who in ("me", "both") and username:
-        parts.append(f"Либо мне напрямую: @{username}")
-    parts.append("Спасибо!")
+        parts.append(("Yoki to'g'ridan-to'g'ri menga: @" if uz
+                      else "Либо мне напрямую: @") + username)
+    parts.append("Rahmat!" if uz else "Спасибо!")
     return "\n".join(parts)
 
 
@@ -735,7 +942,8 @@ def send_app_button(cfg, store, text=None):
         "reply_markup": json.dumps(kb, ensure_ascii=False)})
 
 
-ALLOWED = {f["k"] for f in STEPS} | {"budget_max"}
+ALLOWED = {f["k"] for f in STEPS} | {
+    "budget_max", "floor_min", "floor_max", "city_other", "lang"}
 
 
 def apply_webapp_data(cfg, store, raw):
@@ -756,6 +964,22 @@ def apply_webapp_data(cfg, store, raw):
     if bmax.isdigit():
         ans["budget"] = bmax
     ans.setdefault("city", "tashkent")
+    # данные приходят из webview — чистим руками
+    if ans.get("lang") not in ("ru", "uz", "en"):
+        ans.pop("lang", None)
+    for k in ("floor_min", "floor_max"):
+        v = str(ans.get(k) or "").strip()
+        if not (v.isdigit() and 1 <= int(v) <= 60):
+            ans.pop(k, None)
+        else:
+            ans[k] = v
+    if "city_other" in ans:
+        ans["city_other"] = str(ans["city_other"])[:40].strip()
+    fp = ans.get("floor_pref")
+    if isinstance(fp, str):
+        fp = [fp]
+    if isinstance(fp, list):
+        ans["floor_pref"] = [x for x in fp if x in ("nf", "nl", "mid", "any")]
 
     a = get_anketa(store)
     a["ans"] = {**a.get("ans", {}), **ans}
