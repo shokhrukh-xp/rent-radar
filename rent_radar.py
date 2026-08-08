@@ -1629,12 +1629,17 @@ def handle_callback(data: str, settings: dict, store, cfg: dict, message_id=None
 
 
 def broker_ack(cfg) -> str:
-    """Имя клиента маклерам не раскрываем — и незачем, и склонения ломаются."""
+    """Имя клиента маклерам не раскрываем — и незачем, и склонения ломаются.
+
+    Двуязычно (ру + уз): часть маклеров пишет только на узбекском."""
     a = cfg.get("assistant_name", "Рано")
     return (f"Здравствуйте! Я {a}, ИИ-ассистент — веду поиск жилья для клиента "
             f"и передаю ему варианты.\n"
             f"Спасибо, получила! Если подойдёт, вернусь с уточнениями. "
-            f"Присылайте ещё, что есть по параметрам.")
+            f"Присылайте ещё, что есть по параметрам.\n\n"
+            f"Assalomu alaykum! Men {a}, AI-yordamchiman — mijoz uchun uy-joy "
+            f"qidiryapman. Rahmat, qabul qilindi! Mos kelsa, aniqlik kiritish "
+            f"uchun yozaman. Parametrlarga mos variantlar bo'lsa, yuboravering.")
 
 
 def handle_broker_message(cfg, store, msg):
