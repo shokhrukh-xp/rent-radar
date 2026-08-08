@@ -252,7 +252,7 @@ def compose_request(cfg, store, username=None):
                  "Сразу уточните размер комиссии.")
 
     who = ans.get("contact", "bot")
-    bot_un = cfg.get("bot_username") or "amina_home_bot"
+    bot_un = cfg.get("bot_username") or "assistant_amina_bot"
     assistant = cfg.get("assistant_name", "Амина")
     if who in ("bot", "both"):
         # Письмо идёт от лица владельца, поэтому Амина здесь — «моя помощница»
