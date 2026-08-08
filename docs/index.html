@@ -103,7 +103,7 @@ const FIELDS = [
 
 let A = {deal:"rent", rooms:[], budget:"1200", districts:[], class:"any",
          furniture:"any", floor:"any", term:"12", movein:"flex", who:"single",
-         pets:"no", parking:"any", contact:"bot", budget_max:"", _bot:"amina_home_bot"};
+         pets:"no", parking:"any", contact:"bot", budget_max:"", _bot:"assistant_amina_bot"};
 
 try {                                   // предзаполнение из бота
   const h = location.hash.slice(1);
@@ -199,7 +199,7 @@ function preview(){
          "этаж, площадь и цену. Сразу уточните размер комиссии.");
   if (A.contact === "bot" || A.contact === "both")
     p.push("Варианты присылайте, пожалуйста, моей помощнице: Амина, " +
-           `@${A._bot || "amina_home_bot"}. Она сразу передаёт их мне.`);
+           `@${A._bot || "assistant_amina_bot"}. Она сразу передаёт их мне.`);
   p.push("Спасибо!");
   document.getElementById("preview").textContent = p.join("\n");
 }
