@@ -1,5 +1,5 @@
 """
-Амина — консьерж-контур: работа через маклеров.
+Рано — консьерж-контур: работа через маклеров.
 
 Анкета → текст запроса → рассылка → приём вариантов от маклеров прямо в бота →
 быстрый триаж по одному → сессия по шортлисту с автозапросом деталей.
@@ -252,14 +252,15 @@ def compose_request(cfg, store, username=None):
                  "Сразу уточните размер комиссии.")
 
     who = ans.get("contact", "bot")
-    bot_un = cfg.get("bot_username") or "assistant_amina_bot"
-    assistant = cfg.get("assistant_name", "Амина")
+    bot_un = cfg.get("bot_username") or "rano_smart_bot"
+    assistant = cfg.get("assistant_name", "Рано")
     if who in ("bot", "both"):
-        # Письмо идёт от лица владельца, поэтому Амина здесь — «моя помощница»
-        # Имя оставляем в именительном падеже — иначе при подстановке
-        # получается «помощнице Амина».
-        parts.append(f"Варианты присылайте, пожалуйста, моей помощнице: "
-                     f"{assistant}, @{bot_un}. Она сразу передаёт их мне.")
+        # Даём кликабельную ссылку, а не @упоминание: маклер, который ищет бота
+        # по имени, легко попадает к чужому боту с похожим юзернеймом.
+        # Имя оставляем в именительном падеже — иначе выходит «помощнице Рано».
+        parts.append(f"Варианты присылайте, пожалуйста, моей помощнице — "
+                     f"{assistant}: https://t.me/{bot_un}\n"
+                     f"Нажмите на ссылку и напишите ей, она сразу передаёт мне.")
     if who in ("me", "both") and username:
         parts.append(f"Либо мне напрямую: @{username}")
     parts.append("Спасибо!")
@@ -490,7 +491,7 @@ def notify_offer(cfg, store, oid):
 
 
 def decline_text(cfg):
-    a = cfg.get("assistant_name", "Амина")
+    a = cfg.get("assistant_name", "Рано")
     return (f"Спасибо! Этот вариант клиенту не подошёл. "
             f"Если появится что-то ближе к параметрам — присылайте, посмотрю. "
             f"({a})")
@@ -589,7 +590,7 @@ def show_shortlist(cfg, store, message_id=None):
 
 def details_question(o, cfg=None):
     cfg = cfg or {}
-    a = cfg.get("assistant_name", "Амина")
+    a = cfg.get("assistant_name", "Рано")
     q = [f"Здравствуйте! Это {a}, ассистент по поиску жилья.",
          "По варианту, который вы присылали"]
     tag = []
