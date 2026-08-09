@@ -687,10 +687,15 @@ def price_note(offer, idx):
 
 # ------------------------------------------------- карточка и триаж -----
 
-def offer_card(store, cfg, o, idx=None, prefix=""):
+def offer_card(store, cfg, o, idx=None, prefix="", pos=None, total=None):
     rr = _rr()
     idx = idx if idx is not None else price_index(store)
-    head = [f"{prefix}🏠 <b>Вариант #{o['oid']}</b>"]
+    # Прогресс «N из M» ориентирует и создаёт ощущение конечного набора
+    # (эффект Зейгарник + закон Миллера: видно, сколько осталось).
+    if pos and total:
+        head = [f"{prefix}🏠 <b>Вариант {pos} из {total}</b>"]
+    else:
+        head = [f"{prefix}🏠 <b>Вариант #{o['oid']}</b>"]
     facts = []
     if o["rooms"]:
         facts.append(f"{o['rooms']}-комн")
@@ -727,12 +732,12 @@ def triage_keyboard(oid):
     ]]}
 
 
-def notify_offer(cfg, store, oid):
+def notify_offer(cfg, store, oid, pos=None, total=None):
     rr = _rr()
     o = get_offer(store, oid)
     if not o:
         return
-    text = offer_card(store, cfg, o)
+    text = offer_card(store, cfg, o, pos=pos, total=total)
     kb = json.dumps(triage_keyboard(oid), ensure_ascii=False)
     if o["photos"]:
         media = [{"type": "photo", "media": f} for f in o["photos"][:4]]
@@ -748,6 +753,45 @@ def notify_offer(cfg, store, oid):
         rr.tg_call(cfg, "sendMessage", {
             "chat_id": cfg["telegram_chat_id"], "text": text,
             "parse_mode": "HTML", "reply_markup": kb})
+
+
+def show_offers(cfg, store, batch=None):
+    """Показ новых вариантов с «моментом ценности».
+
+    Сначала отдаём N проверенных вариантов бесплатно (принцип взаимности:
+    сначала польза, потом просьба), затем — честная подводка к остальным.
+    Никаких тёмных паттернов: счётчик реальный, ничего не заблокировано."""
+    rr = _rr()
+    batch = batch if batch is not None else cfg.get("free_offers", 2)
+    pool = offers_by_status(store, "new") + offers_by_status(store, "later")
+    total = len(pool)
+    if not total:
+        rr.send_telegram(cfg, "Пока маклеры ничего не прислали по вашим параметрам. "
+                              "Разослать запрос — кнопка «Написать маклерам».")
+        return 0
+    for i, o in enumerate(pool[:batch]):
+        notify_offer(cfg, store, o["oid"], pos=i + 1, total=total)
+    remaining = total - min(batch, total)
+    if remaining > 0:
+        _more_teaser(cfg, remaining)
+    return min(batch, total)
+
+
+def _more_teaser(cfg, remaining):
+    """Подводка к остальным вариантам. Пик радости (первые бесплатно) +
+    честная подсказка, что есть ещё — без давления и фальшивого дефицита."""
+    rr = _rr()
+    word = ("вариант" if remaining % 10 == 1 and remaining % 100 != 11
+            else "варианта" if 2 <= remaining % 10 <= 4 and not (10 <= remaining % 100 < 20)
+            else "вариантов")
+    kb = {"inline_keyboard": [[
+        {"text": f"Показать ещё {remaining} →", "callback_data": "off2"}]]}
+    rr.tg_call(cfg, "sendMessage", {
+        "chat_id": cfg["telegram_chat_id"],
+        "text": (f"✅ Это проверенные варианты, ближе всего к вашим параметрам.\n\n"
+                 f"Маклеры прислали ещё <b>{remaining} {word}</b> — показать?"),
+        "parse_mode": "HTML",
+        "reply_markup": json.dumps(kb, ensure_ascii=False)})
 
 
 def decline_text(cfg):

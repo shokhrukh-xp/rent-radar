@@ -109,6 +109,15 @@ def cmd(text, s):
 
 s = rr.default_settings()
 assert "Ra'no" in cmd("/help", s)[0]
+# /start — тёплое приветствие с кнопкой приложения, а не стена команд
+import unittest.mock as _m
+with _m.patch.object(rr, "tg_call", lambda *a,**k: {"ok":True,"result":{"message_id":1}}) as _p:
+    import concierge as _cg
+    _sent=[]
+    with _m.patch.object(rr,"tg_call",lambda c,meth,pl,**k:(_sent.append((meth,pl)),{"ok":True,"result":{"message_id":1}})[1]):
+        r=cmd("/start", s)
+    assert r==("",None)
+    assert any("Ra'no" in pl.get("text","") and "reply_markup" in pl for _,pl in _sent), "нет приветствия с кнопкой"
 
 # ГЛАВНОЕ: голая команда из меню Telegram должна открывать экран с кнопками
 assert cmd("/max", s) == ("", "P"), cmd("/max", s)
@@ -807,6 +816,25 @@ for i, (txt, ph) in enumerate([("Яккасарай 2 комн 70 кв.м 800 у
                                ("Мирабад 3 комн 100 кв.м 1100 у.е.", "b"),
                                ("Юнусабад 2 комн 60 кв.м 600 у.е.", "c")]):
     cg.save_offer(cs, cfg, 600 + i, f"Маклер{i}", txt, [ph])
+
+# --- показ вариантов: первые бесплатно + честная подводка к остальным ---
+with mock.patch.object(rr, "tg_call", fake_tg):
+    SENT.clear()
+    shown = cg.show_offers(cfg, cs, batch=2)
+    assert shown == 2, shown
+    # прогресс «N из M» в карточках (текст в подписи к фото — в media)
+    cards = [pl.get("text", "") + pl.get("caption", "") + pl.get("media", "")
+             for _, pl in SENT]
+    assert any("из" in c for c in cards), "нет прогресса N из M"
+    # подводка к остальным вариантам (их 4 → показали 2 → осталось 2)
+    teaser = [pl for m, pl in SENT if "прислали ещё" in pl.get("text", "")]
+    assert teaser and "2" in teaser[0]["text"]
+    kb = json.loads(teaser[0]["reply_markup"])
+    assert kb["inline_keyboard"][0][0]["callback_data"] == "off2"
+
+# карточка одиночно (без прогресса) не падает
+_c = cg.offer_card(cs, cfg, cg.get_offer(cs, oid1))
+assert "Вариант" in _c
 
 # --- ценовой индекс строится ТОЛЬКО по данным маклеров ---
 idx = cg.price_index(cs, min_sample=1)

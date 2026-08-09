@@ -1038,6 +1038,16 @@ def send_listing(cfg, settings: dict, l: dict, likely_makler: bool) -> bool:
 
 # ------------------------------------------------- настройки через бота ----
 
+WELCOME_TEXT = (
+    "👋 Здравствуйте! Я <b>Ra'no</b> — ваш ассистент по поиску жилья в Ташкенте.\n\n"
+    "Как я работаю:\n"
+    "1. Вы отмечаете параметры — это минута в приложении.\n"
+    "2. Я составляю запрос и рассылаю его проверенным маклерам.\n"
+    "3. Присылаю подходящие варианты по одному — вы жмёте «да» или «нет», "
+    "я уточняю детали и веду переписку за вас.\n\n"
+    "🎁 Первые проверенные варианты — бесплатно.\n\n"
+    "Начнём? Нажмите <b>«Открыть приложение»</b> ниже 👇")
+
 HELP_TEXT = """🏠 <b>Ra'no</b> — ваш ассистент по поиску жилья
 
 <b>/find</b> — подобрать лучшее прямо сейчас: агент оценит всё накопленное,
@@ -1246,7 +1256,12 @@ def handle_command(text: str, settings: dict, store, cfg: dict):
     arg = arg.strip()
     raw_arg = t.partition(" ")[2].strip()
 
-    if cmd in ("/start", "/help"):
+    if cmd == "/start":
+        # Первое касание: тёплое знакомство, одно понятное действие, честное
+        # ожидание. Стена команд отпугивает — её показываем только по /help.
+        concierge.send_app_button(cfg, store, WELCOME_TEXT)
+        return "", None
+    if cmd == "/help":
         return HELP_TEXT, None
     if cmd == "/menu":
         return "", "M"
@@ -1309,12 +1324,7 @@ def handle_command(text: str, settings: dict, store, cfg: dict):
         concierge.show_shortlist(cfg, store)
         return "", None
     if cmd in ("/offers", "/varianty"):
-        pool = concierge.offers_by_status(store, "new") + \
-               concierge.offers_by_status(store, "later")
-        if not pool:
-            return "Пока маклеры ничего не прислали. Разослать запрос — /brokers", None
-        for o in pool[:8]:
-            concierge.notify_offer(cfg, store, o["oid"])
+        concierge.show_offers(cfg, store)
         return "", None
     if cmd in ("/prices", "/index"):
         return concierge.concierge_status(store), None
@@ -1607,11 +1617,11 @@ def handle_callback(data: str, settings: dict, store, cfg: dict, message_id=None
         concierge.show_shortlist(cfg, store)
         return "Шортлист", None
     if act == "off":
-        pool = concierge.offers_by_status(store, "new") + \
-               concierge.offers_by_status(store, "later")
-        for o in pool[:8]:
-            concierge.notify_offer(cfg, store, o["oid"])
-        return (f"Показываю {len(pool[:8])}" if pool else "Новых вариантов нет"), None
+        shown = concierge.show_offers(cfg, store)
+        return (f"Показываю {shown}" if shown else "Новых вариантов нет"), None
+    if act == "off2":                       # «показать ещё» — остальные варианты
+        concierge.show_offers(cfg, store, batch=99)
+        return "Показываю остальные", None
     if act == "b":
         send_broker_cards(cfg, store, settings)
         return "Готовлю рассылку…", None
