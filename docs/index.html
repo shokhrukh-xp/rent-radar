@@ -59,6 +59,25 @@
     border-radius:10px;padding:9px 12px;font-size:16px;min-width:0
   }
   input:focus{outline:none;border-color:var(--btn)}
+
+  /* инлайн-календарь */
+  .cal{padding-top:10px}
+  .calhead{display:flex;justify-content:space-between;align-items:center;margin-bottom:7px}
+  .calhead b{font-size:14.5px;font-weight:600}
+  .calnav{width:34px;height:34px;border:1.5px solid var(--line);border-radius:9px;
+          display:flex;align-items:center;justify-content:center;cursor:pointer;
+          font-size:18px;line-height:1;color:var(--ink)}
+  .calnav:active{transform:scale(.93)}
+  .calgrid{display:grid;grid-template-columns:repeat(7,1fr);gap:3px}
+  .caldow{text-align:center;font-size:11px;color:var(--hint);padding:1px 0 3px}
+  .calday{aspect-ratio:1/1;display:flex;align-items:center;justify-content:center;
+          font-size:13.5px;border-radius:9px;cursor:pointer;user-select:none;color:var(--ink)}
+  .calday.mut{opacity:.3;cursor:default}
+  .calday.rng{background:color-mix(in srgb,var(--btn) 20%,transparent);border-radius:0}
+  .calday.sel{background:var(--btn);color:var(--btn-ink);font-weight:700;border-radius:9px}
+  .calday.today:not(.sel){box-shadow:inset 0 0 0 1.5px var(--btn)}
+  .calnote{color:var(--hint);font-size:12.5px;margin-top:8px;text-align:center}
+  .calnote b{color:var(--btn)}
   .preview{
     background:var(--bg);border:1px solid var(--line);border-radius:10px;
     padding:12px;font-size:13.5px;white-space:pre-wrap;color:var(--ink);
@@ -111,10 +130,16 @@ ru: {
   any:"Любое", all:"Все", mo:"/мес", day:"/сутки",
   nf_s:"не 1-й", nl_s:"не посл.",
   exact:"или точная сумма, $", from:"от этажа", to:"до этажа",
+  monF:["Январь","Февраль","Март","Апрель","Май","Июнь","Июль","Август","Сентябрь","Октябрь","Ноябрь","Декабрь"],
+  monS:["янв","фев","мар","апр","мая","июн","июл","авг","сен","окт","ноя","дек"],
+  monG:["января","февраля","марта","апреля","мая","июня","июля","августа","сентября","октября","ноября","декабря"],
+  dow:["Пн","Вт","Ср","Чт","Пт","Сб","Вс"],
+  nights:n=>n+" "+(n%10===1&&n%100!==11?"ночь":n%10>=2&&n%10<=4&&(n%100<10||n%100>=20)?"ночи":"ночей"),
+  pick_dates:"Выберите заезд и выезд", pick_date:"Выберите дату", chosen:"Заезд с",
   q:{deal:"Что ищем", object:"Тип жилья", city:"Где ищем", city_other:"Какой город",
      districts:"Районы Ташкента", rooms:"Комнат", budget:"Бюджет",
      class:"Класс жилья", furniture:"Мебель и техника", floor:"Этаж",
-     term:"Срок", movein:"Когда заезжать", who:"Кто будет жить",
+     dates:"Даты", term:"Срок аренды", movein:"Когда заезжать", who:"Кто будет жить",
      pets:"Животные", parking:"Парковка", contact:"Куда маклерам слать варианты"},
   o:{rent:"🔑 Аренда", daily:"🌙 Посуточно", buy:"🏦 Покупка",
      flat:"🏢 Квартира", house:"🏠 Дом", dacha:"🌲 Дача", land:"🌍 Участок",
@@ -125,7 +150,7 @@ ru: {
      nf:"Не первый", nl:"Не последний", fl_any:"Неважно",
      t12:"От года", t6:"6–12 мес", t3:"3–6 мес", tflex:"Гибко",
      d13:"1–3 дня", d47:"4–7 дней", d730:"1–4 недели",
-     now:"Сейчас", month:"В течение месяца", flex:"Гибко",
+     now:"Сейчас", month:"В течение месяца", flex:"Гибко", pick:"📅 Дата",
      single:"Один / одна", couple:"Пара", family_kids:"Семья с детьми",
      family:"Семья без детей", big:"Большая семья", group:"Друзья / коллеги",
      p_no:"Нет", p_cat:"Кошка", p_dog:"Собака", p_other:"Другое",
@@ -140,10 +165,16 @@ uz: {
   any:"Farqi yo'q", all:"Hammasi", mo:"/oy", day:"/kun",
   nf_s:"1-q. emas", nl_s:"oxirgisi emas",
   exact:"yoki aniq summa, $", from:"qavatdan", to:"qavatgacha",
+  monF:["Yanvar","Fevral","Mart","Aprel","May","Iyun","Iyul","Avgust","Sentabr","Oktabr","Noyabr","Dekabr"],
+  monS:["yan","fev","mar","apr","may","iyn","iyl","avg","sen","okt","noy","dek"],
+  monG:["yanvar","fevral","mart","aprel","may","iyun","iyul","avgust","sentabr","oktabr","noyabr","dekabr"],
+  dow:["Du","Se","Ch","Pa","Ju","Sh","Ya"],
+  nights:n=>n+" kecha",
+  pick_dates:"Kirish va chiqishni tanlang", pick_date:"Sanani tanlang", chosen:"Kirish",
   q:{deal:"Nima qidiramiz", object:"Uy-joy turi", city:"Qayerda", city_other:"Qaysi shahar",
      districts:"Toshkent tumanlari", rooms:"Xonalar", budget:"Byudjet",
      class:"Uy-joy toifasi", furniture:"Mebel va texnika", floor:"Qavat",
-     term:"Muddat", movein:"Qachon kirasiz", who:"Kim yashaydi",
+     dates:"Sanalar", term:"Ijara muddati", movein:"Qachon kirasiz", who:"Kim yashaydi",
      pets:"Hayvonlar", parking:"Avtoturargoh", contact:"Maklerlar qayerga yuborsin"},
   o:{rent:"🔑 Ijara", daily:"🌙 Kunlik", buy:"🏦 Sotib olish",
      flat:"🏢 Kvartira", house:"🏠 Hovli uy", dacha:"🌲 Dala hovli", land:"🌍 Yer",
@@ -154,7 +185,7 @@ uz: {
      nf:"1-qavat emas", nl:"Oxirgisi emas", fl_any:"Farqi yo'q",
      t12:"1 yildan", t6:"6–12 oy", t3:"3–6 oy", tflex:"Kelishamiz",
      d13:"1–3 kun", d47:"4–7 kun", d730:"1–4 hafta",
-     now:"Hozir", month:"Bir oy ichida", flex:"Moslashuvchan",
+     now:"Hozir", month:"Bir oy ichida", flex:"Moslashuvchan", pick:"📅 Sana",
      single:"Bir kishi", couple:"Juftlik", family_kids:"Bolali oila",
      family:"Bolasiz oila", big:"Katta oila", group:"Do'stlar / hamkasblar",
      p_no:"Yo'q", p_cat:"Mushuk", p_dog:"It", p_other:"Boshqa",
@@ -170,10 +201,16 @@ en: {
   any:"Any", all:"All", mo:"/mo", day:"/day",
   nf_s:"not 1st", nl_s:"not top",
   exact:"or exact amount, $", from:"floor from", to:"floor to",
+  monF:["January","February","March","April","May","June","July","August","September","October","November","December"],
+  monS:["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"],
+  monG:["January","February","March","April","May","June","July","August","September","October","November","December"],
+  dow:["Mo","Tu","We","Th","Fr","Sa","Su"],
+  nights:n=>n+(n===1?" night":" nights"),
+  pick_dates:"Pick check-in and check-out", pick_date:"Pick a date", chosen:"Move in from",
   q:{deal:"Looking for", object:"Property type", city:"Where", city_other:"Which city",
      districts:"Tashkent districts", rooms:"Rooms", budget:"Budget",
      class:"Property class", furniture:"Furniture & appliances", floor:"Floor",
-     term:"Duration", movein:"Move-in", who:"Who will live",
+     dates:"Dates", term:"Rental term", movein:"Move-in", who:"Who will live",
      pets:"Pets", parking:"Parking", contact:"Where agents send options"},
   o:{rent:"🔑 Rent", daily:"🌙 Short stay", buy:"🏦 Buy",
      flat:"🏢 Apartment", house:"🏠 House", dacha:"🌲 Country house", land:"🌍 Land",
@@ -184,7 +221,7 @@ en: {
      nf:"Not ground floor", nl:"Not top floor", fl_any:"Any",
      t12:"1 year +", t6:"6–12 mo", t3:"3–6 mo", tflex:"Flexible",
      d13:"1–3 days", d47:"4–7 days", d730:"1–4 weeks",
-     now:"Now", month:"Within a month", flex:"Flexible",
+     now:"Now", month:"Within a month", flex:"Flexible", pick:"📅 Date",
      single:"Just me", couple:"Couple", family_kids:"Family with kids",
      family:"Family, no kids", big:"Large family", group:"Friends / colleagues",
      p_no:"No", p_cat:"Cat", p_dog:"Dog", p_other:"Other",
@@ -214,11 +251,11 @@ const FIELDS = [
   {k:"furniture", cols:3, when:A=>A.deal!=="buy"&&A.object!=="land",
    o:[["yes","f_yes"],["no","f_no"],["any","f_any"]]},
   {k:"floor", floor:true, when:A=>A.object==="flat"},
-  {k:"term", cols:2, when:A=>A.deal!=="buy",
-   o:A=>A.deal==="daily" ? [["d1_3","d13"],["d4_7","d47"],["d7_30","d730"],["dflex","tflex"]]
-                         : [["12","t12"],["6_12","t6"],["3_6","t3"],["flex","tflex"]]},
-  {k:"movein", cols:3, when:A=>A.deal!=="buy",
-   o:[["now","now"],["month","month"],["flex","flex"]]},
+  {k:"dates", cal:"range", when:A=>A.deal==="daily"},   // посуточно → календарь заезд/выезд
+  {k:"term", cols:2, when:A=>A.deal==="rent",           // длительная → срок аренды
+   o:[["12","t12"],["6_12","t6"],["3_6","t3"],["flex","tflex"]]},
+  {k:"movein", cols:2, calopt:true, when:A=>A.deal==="rent",   // + опция «конкретная дата»
+   o:[["now","now"],["month","month"],["flex","flex"],["date","pick"]]},
   {k:"who", cols:2, when:A=>A.deal!=="buy",
    o:[["single","single"],["couple","couple"],["family_kids","family_kids"],
       ["family","family"],["big","big"],["group","group"]]},
@@ -231,7 +268,8 @@ const FIELDS = [
 let A = {lang:"ru", deal:"rent", object:"flat", city:"tashkent", city_other:"",
          districts:[], rooms:[], budget:"1200", budget_max:"",
          class:"any", furniture:"any", floor_pref:[], floor_min:"", floor_max:"",
-         term:"12", movein:"flex", who:"single", pets:"no", parking:"any",
+         term:"12", movein:"flex", movein_date:"", date_from:"", date_to:"",
+         who:"single", pets:"no", parking:"any",
          contact:"bot", _bot:"rano_smart_bot"};
 
 try {                                   // предзаполнение из бота
@@ -242,6 +280,92 @@ const nav = (navigator.language || "").slice(0,2);
 if (!location.hash && (nav === "uz" || nav === "en")) A.lang = nav;
 
 const L = () => T[A.lang] || T.ru;
+
+// ------------------------------------------------- даты и календарь ------
+function today0(){ const d=new Date(); d.setHours(0,0,0,0); return d; }
+function isoOf(d){ return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+
+                          "-"+String(d.getDate()).padStart(2,"0"); }
+function fromIso(s){ if(!s) return null; const p=String(s).split("-").map(Number);
+  if(p.length!==3||!p[0]) return null; const d=new Date(p[0],p[1]-1,p[2]); d.setHours(0,0,0,0); return d; }
+function nights(a,b){ const x=fromIso(a), y=fromIso(b);
+  return x&&y ? Math.round((y-x)/86400000) : 0; }
+// «15 авг» — для сводки; «15 августа» / «15-avgust» / «August 15» — для письма
+function dShort(iso){ const d=fromIso(iso); return d ? d.getDate()+" "+L().monS[d.getMonth()] : ""; }
+function dLong(iso, lang){ const d=fromIso(iso); if(!d) return "";
+  const t=T[lang]||T.ru, day=d.getDate(), m=d.getMonth();
+  if(lang==="uz") return day+"-"+t.monG[m];
+  if(lang==="en") return t.monG[m]+" "+day;
+  return day+" "+t.monG[m]; }
+
+let calView = null;   // {y,m} показанный месяц (сбрасывается при закрытии строки)
+
+function buildCalendar(mode){   // mode: "range" (date_from/date_to) | "single" (movein_date)
+  const wrap = document.createElement("div"); wrap.className = "cal";
+  const t = today0();
+  if(!calView){
+    const base = fromIso(mode==="range" ? A.date_from : A.movein_date) || t;
+    calView = {y:base.getFullYear(), m:base.getMonth()};
+  }
+  function draw(){
+    wrap.innerHTML = "";
+    const head = document.createElement("div"); head.className = "calhead";
+    const prev = document.createElement("div"); prev.className = "calnav"; prev.textContent = "‹";
+    prev.onclick = e=>{ e.stopPropagation();
+      if(calView.y>t.getFullYear() || calView.m>t.getMonth() || calView.y>t.getFullYear()){
+        calView.m--; if(calView.m<0){calView.m=11; calView.y--;} draw();
+      }};
+    // не листаем в прошлое дальше текущего месяца
+    const canPrev = (calView.y>t.getFullYear()) || (calView.y===t.getFullYear() && calView.m>t.getMonth());
+    if(!canPrev) prev.style.opacity = ".3";
+    const nxt = document.createElement("div"); nxt.className = "calnav"; nxt.textContent = "›";
+    nxt.onclick = e=>{ e.stopPropagation(); calView.m++; if(calView.m>11){calView.m=0; calView.y++;} draw(); };
+    const title = document.createElement("b"); title.textContent = L().monF[calView.m]+" "+calView.y;
+    head.append(prev, title, nxt); wrap.appendChild(head);
+
+    const grid = document.createElement("div"); grid.className = "calgrid";
+    for(const w of L().dow){ const c=document.createElement("div"); c.className="caldow"; c.textContent=w; grid.appendChild(c); }
+    const first = new Date(calView.y, calView.m, 1);
+    const lead = (first.getDay()+6)%7;               // неделя с понедельника
+    for(let i=0;i<lead;i++) grid.appendChild(document.createElement("div"));
+    const dim = new Date(calView.y, calView.m+1, 0).getDate();
+    const from = fromIso(A.date_from), to = fromIso(A.date_to), one = fromIso(A.movein_date);
+    for(let d=1; d<=dim; d++){
+      const cell = new Date(calView.y, calView.m, d); cell.setHours(0,0,0,0);
+      const el = document.createElement("div"); el.className = "calday"; el.textContent = d;
+      if(cell.getTime()===t.getTime()) el.classList.add("today");
+      if(cell < t){ el.classList.add("mut"); grid.appendChild(el); continue; }
+      if(mode==="single"){
+        if(one && cell.getTime()===one.getTime()) el.classList.add("sel");
+        el.onclick = e=>{ e.stopPropagation(); A.movein_date=isoOf(cell); A.movein="date";
+                          tg?.HapticFeedback?.selectionChanged(); refresh(); draw(); };
+      } else {
+        if(from && cell.getTime()===from.getTime()) el.classList.add("sel");
+        if(to && cell.getTime()===to.getTime()) el.classList.add("sel");
+        if(from && to && cell>from && cell<to) el.classList.add("rng");
+        el.onclick = e=>{ e.stopPropagation();
+          if(!A.date_from || (A.date_from && A.date_to)){ A.date_from=isoOf(cell); A.date_to=""; }
+          else if(cell > from){ A.date_to=isoOf(cell); }
+          else { A.date_from=isoOf(cell); A.date_to=""; }
+          tg?.HapticFeedback?.selectionChanged(); refresh(); draw(); };
+      }
+      grid.appendChild(el);
+    }
+    wrap.appendChild(grid);
+
+    const note = document.createElement("div"); note.className = "calnote";
+    if(mode==="range"){
+      const n = nights(A.date_from, A.date_to);
+      note.innerHTML = (A.date_from && A.date_to)
+        ? dShort(A.date_from)+" – "+dShort(A.date_to)+" · <b>"+L().nights(n)+"</b>"
+        : L().pick_dates;
+    } else {
+      note.innerHTML = A.movein_date ? "<b>"+dShort(A.movein_date)+"</b>" : L().pick_date;
+    }
+    wrap.appendChild(note);
+  }
+  draw();
+  return wrap;
+}
 
 // ---------------------------------------- рендер: строки-сводки ----------
 // Каждый параметр — одна строка «название → текущее значение»; тап
@@ -278,16 +402,22 @@ function pick(f, val){
       cur = cur.includes(val) ? cur.filter(x=>x!==val) : cur.concat([val]);
     }
     A[f.k] = cur;
+  } else if (f.k==="movein"){
+    A.movein = val;
+    if (val!=="date") A.movein_date = "";   // быстрый вариант отменяет дату
+    // «📅 Дата» оставляем строку открытой — снизу появится календарь
+    if (val!=="date") open = null;
   } else {
     A[f.k] = val;
-    if (f.k==="deal"){          // пресеты бюджета и срока — под тип сделки
+    if (f.k==="deal"){          // пресеты бюджета под тип сделки
       A.budget = {rent:"1200", daily:"80", buy:"120000"}[val] || "1200";
-      if (val!=="daily" && String(A.term).startsWith("d")) A.term = "12";
-      if (val==="daily" && !String(A.term).startsWith("d")) A.term = "d1_3";
+      if (val==="daily"){ A.movein_date=""; A.movein="flex"; }   // даты берём из календаря
+      else { A.date_from=""; A.date_to=""; }                     // календарь — только посуточно
     }
     // одиночный выбор закрывает строку; «другой город» открывает поле ввода
     open = (f.k==="city" && val==="other") ? "city_other" : null;
   }
+  calView = null;
   render();
 }
 
@@ -319,6 +449,17 @@ function summary(f){
     else if (hi) parts.push("≤ "+hi);
     return parts.length ? parts.join(", ") : o.fl_any;
   }
+  if (f.cal){                         // диапазон дат: «15–18 авг · 3 ночи»
+    if (!A.date_from) return "—";
+    if (!A.date_to)   return dShort(A.date_from)+" …";
+    const a = fromIso(A.date_from), b = fromIso(A.date_to);
+    const span = a.getMonth()===b.getMonth()          // тот же месяц → «15–18 авг»
+      ? a.getDate()+"–"+b.getDate()+" "+L().monS[b.getMonth()]
+      : dShort(A.date_from)+"–"+dShort(A.date_to);
+    return span+" · "+L().nights(nights(A.date_from,A.date_to));
+  }
+  if (f.k==="movein" && A.movein==="date")   // конкретная дата заезда
+    return A.movein_date ? dShort(A.movein_date) : o.pick;
   const opts = typeof f.o==="function" ? f.o(A) : f.o;
   const m = (opts||[]).find(x=>x[0]===A[f.k]);
   return m ? (f.raw ? m[1] : (o[m[1]] ?? m[1])) : "—";
@@ -362,7 +503,7 @@ function render(){
     rvv.className = "rvv"; rvv.dataset.k = f.k; rvv.textContent = summary(f);
     const ch = document.createElement("span"); ch.className = "chev"; ch.textContent = "›";
     rv.append(rvv, ch); r.append(rl, rv);
-    r.onclick = ()=>{ open = open===f.k ? null : f.k;
+    r.onclick = ()=>{ open = open===f.k ? null : f.k; calView = null;
                       tg?.HapticFeedback?.selectionChanged(); render(); };
     root.appendChild(r);
     if (open !== f.k) continue;
@@ -378,6 +519,11 @@ function render(){
       row.appendChild(inp); ex.appendChild(row);
       root.appendChild(ex);
       setTimeout(()=>inp.focus(), 50);
+      continue;
+    }
+    if (f.cal){                       // посуточно: сразу календарь-диапазон
+      ex.appendChild(buildCalendar("range"));
+      root.appendChild(ex);
       continue;
     }
     const box = document.createElement("div");
@@ -413,6 +559,8 @@ function render(){
       }
       ex.appendChild(row);
     }
+    if (f.calopt && A.movein==="date")   // «📅 Дата» → одиночный календарь под чипами
+      ex.appendChild(buildCalendar("single"));
     root.appendChild(ex);
   }
   preview();
@@ -479,11 +627,11 @@ function letter(){
       else if (lo) w.push(uz?`${lo}-qavatdan yuqori`:`этаж от ${lo}`);
       else if (hi) w.push(uz?`${hi}-qavatgacha`:`этаж до ${hi}`);
     }
-    const TERM = uz ? {"12":"uzoq muddatga, 1 yildan","6_12":"6–12 oyga","3_6":"3–6 oyga",
-                       d1_3:"1–3 kunga",d4_7:"4–7 kunga",d7_30:"1–4 haftaga"}
-                    : {"12":"на длительный срок, от года","6_12":"на 6–12 месяцев","3_6":"на 3–6 месяцев",
-                       d1_3:"на 1–3 дня",d4_7:"на 4–7 дней",d7_30:"на 1–4 недели"};
-    if (TERM[A.term]) w.push(TERM[A.term]);
+    if (A.deal==="rent"){          // срок аренды — только у длительной
+      const TERM = uz ? {"12":"uzoq muddatga, 1 yildan","6_12":"6–12 oyga","3_6":"3–6 oyga"}
+                      : {"12":"на длительный срок, от года","6_12":"на 6–12 месяцев","3_6":"на 3–6 месяцев"};
+      if (TERM[A.term]) w.push(TERM[A.term]);
+    }
     const WHO = uz ? {single:"bir kishi uchun",couple:"juftlik uchun",family_kids:"bolali oila uchun",
                       family:"bolasiz oila uchun",big:"katta oila uchun",group:"do'stlar uchun"}
                    : {single:"для одного",couple:"для пары",family_kids:"для семьи с детьми",
@@ -496,18 +644,29 @@ function letter(){
   if (A.parking==="yes") w.push(uz?"avtoturargoh kerak":"нужна парковка");
   if (w.length) p.push((uz?"Xohishlar: ":"Пожелания: ") + w.join(", ") + ".");
 
-  if (A.deal!=="buy"){
-    const MV = uz ? {now:"Darhol kirishga tayyorman.",month:"Bir oy ichida kiraman.",
-                     flex:"Muddat bo'yicha moslashuvchanman."}
-                  : {now:"Готов заехать сразу.",month:"Заезд в течение месяца.",flex:"По срокам гибко."};
-    if (MV[A.movein]) p.push(MV[A.movein]);
+  if (A.deal==="daily" && A.date_from && A.date_to){        // посуточно — конкретные даты
+    const n = nights(A.date_from, A.date_to);
+    const nl = uz ? n+" kecha" : L().nights(n);
+    p.push(uz
+      ? `Sanalar: ${dLong(A.date_from,"uz")}dan ${dLong(A.date_to,"uz")}gacha — ${nl}.`
+      : `Даты: заезд ${dLong(A.date_from,"ru")}, выезд ${dLong(A.date_to,"ru")} — ${nl}.`);
+  } else if (A.deal==="rent"){
+    if (A.movein==="date" && A.movein_date){               // длительная — точная дата заезда
+      p.push(uz ? `${dLong(A.movein_date,"uz")}dan kirishni rejalashtiryapman.`
+                : `Заезд планирую с ${dLong(A.movein_date,"ru")}.`);
+    } else {
+      const MV = uz ? {now:"Darhol kirishga tayyorman.",month:"Bir oy ichida kiraman.",
+                       flex:"Muddat bo'yicha moslashuvchanman."}
+                    : {now:"Готов заехать сразу.",month:"Заезд в течение месяца.",flex:"По срокам гибко."};
+      if (MV[A.movein]) p.push(MV[A.movein]);
+    }
   }
 
-  p.push(A.object==="land"
-    ? (uz ? "Mos variant bo'lsa — foto, aniq manzil, maydoni va narxini yuboring. Vositachilik haqini ham yozing."
-          : "Если есть подходящие варианты — пришлите, пожалуйста, фото, точный адрес, площадь и цену. Сразу уточните размер комиссии.")
-    : (uz ? "Mos variant bo'lsa — foto, aniq manzil, qavati, maydoni va narxini yuboring. Vositachilik haqini ham yozing."
-          : "Если есть подходящие варианты — пришлите, пожалуйста, фото, точный адрес, этаж, площадь и цену. Сразу уточните размер комиссии."));
+  p.push(A.object==="flat"       // этаж уместен только для квартиры
+    ? (uz ? "Mos variant bo'lsa — foto, aniq manzil, qavati, maydoni va narxini yuboring. Vositachilik haqini ham yozing."
+          : "Если есть подходящие варианты — пришлите, пожалуйста, фото, точный адрес, этаж, площадь и цену. Сразу уточните размер комиссии.")
+    : (uz ? "Mos variant bo'lsa — foto, aniq manzil, maydoni va narxini yuboring. Vositachilik haqini ham yozing."
+          : "Если есть подходящие варианты — пришлите, пожалуйста, фото, точный адрес, площадь и цену. Сразу уточните размер комиссии."));
 
   const link = `https://t.me/${A._bot || "rano_smart_bot"}`;
   if (A.contact==="bot" || A.contact==="both")
