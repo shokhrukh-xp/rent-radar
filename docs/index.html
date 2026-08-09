@@ -14,63 +14,82 @@
     --link: var(--tg-theme-link-color, #007aff);
     --btn: var(--tg-theme-button-color, #007aff);
     --btn-ink: var(--tg-theme-button-text-color, #ffffff);
-    --line: color-mix(in srgb, var(--hint) 25%, transparent);
+    --line: color-mix(in srgb, var(--hint) 22%, transparent);
   }
   *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
   body{
     margin:0;background:var(--bg);color:var(--ink);
-    font:16px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
-    padding:12px 14px calc(96px + env(safe-area-inset-bottom));
+    font:15px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+    padding:10px 12px calc(92px + env(safe-area-inset-bottom));
   }
-  h1{font-size:20px;margin:4px 0 2px;letter-spacing:-.02em}
-  .lead{color:var(--hint);font-size:14px;margin:0 0 14px}
-  section{background:var(--sec);border-radius:14px;padding:14px;margin-bottom:12px}
-  .q{font-size:15px;font-weight:600;margin-bottom:10px;display:flex;
-     justify-content:space-between;align-items:baseline;gap:8px}
-  .q em{font-style:normal;font-weight:500;color:var(--hint);font-size:13px}
-  .chips{display:flex;flex-wrap:wrap;gap:8px}
+  .top{display:flex;justify-content:space-between;align-items:center;gap:10px;margin:2px 2px 10px}
+  h1{font-size:18px;margin:0;letter-spacing:-.02em}
+  .lead{color:var(--hint);font-size:12.5px;margin:2px 2px 10px}
+  .seg{display:flex;border:1.5px solid var(--line);border-radius:9px;overflow:hidden;flex:0 0 auto}
+  .seg div{padding:5px 10px;font-size:12.5px;font-weight:600;cursor:pointer;color:var(--hint)}
+  .seg div.on{background:var(--btn);color:var(--btn-ink)}
+
+  .card{background:var(--sec);border-radius:14px;margin-bottom:12px;overflow:hidden}
+  .card > * + *{border-top:1px solid var(--line)}
+  .rowi{display:flex;justify-content:space-between;align-items:center;gap:12px;
+        padding:11px 14px;min-height:44px;cursor:pointer;user-select:none}
+  .rowi:active{background:color-mix(in srgb, var(--hint) 8%, var(--sec))}
+  .rl{font-weight:600;white-space:nowrap;font-size:14.5px}
+  .rv{color:var(--btn);font-weight:600;font-size:14px;text-align:right;
+      overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:58%}
+  .rv .chev{color:var(--hint);font-weight:400;margin-left:5px;display:inline-block;
+            transition:transform .15s ease}
+  .rowi.open .chev{transform:rotate(90deg)}
+  .exp{padding:2px 14px 13px;background:color-mix(in srgb, var(--bg) 35%, var(--sec))}
+
+  .chips{display:flex;flex-wrap:wrap;gap:7px;padding-top:9px}
   .chip{
     border:1.5px solid var(--line);background:var(--bg);color:var(--ink);
-    border-radius:11px;padding:9px 14px;font-size:14.5px;cursor:pointer;
-    transition:transform .06s ease, background .12s ease, border-color .12s ease;
-    user-select:none;min-height:40px;display:flex;align-items:center
+    border-radius:10px;padding:7px 12px;font-size:13.5px;cursor:pointer;
+    user-select:none;min-height:34px;display:flex;align-items:center;
+    transition:transform .06s ease
   }
-  .chip:active{transform:scale(.96)}
+  .chip:active{transform:scale(.95)}
   .chip.on{background:var(--btn);border-color:var(--btn);color:var(--btn-ink);font-weight:600}
-  .grid3 .chip{flex:1 1 calc(33.333% - 6px);justify-content:center;text-align:center}
+  .grid3 .chip{flex:1 1 calc(33.333% - 5px);justify-content:center;text-align:center}
   .grid2 .chip{flex:1 1 calc(50% - 4px);justify-content:center;text-align:center}
-  .row{display:flex;gap:10px;align-items:center;margin-top:10px}
+  .row{display:flex;gap:8px;align-items:center;margin-top:9px}
   input[type=number],input[type=text]{
     flex:1;background:var(--bg);color:var(--ink);border:1.5px solid var(--line);
-    border-radius:11px;padding:11px 13px;font-size:16px;min-width:0
+    border-radius:10px;padding:9px 12px;font-size:16px;min-width:0
   }
   input:focus{outline:none;border-color:var(--btn)}
-  .langbar{display:flex;gap:8px;margin:0 0 14px}
-  .langbar .chip{flex:1;justify-content:center;font-size:14px;padding:8px 6px}
   .preview{
-    background:var(--bg);border:1px solid var(--line);border-radius:11px;
-    padding:13px;font-size:14px;white-space:pre-wrap;color:var(--ink);
-    max-height:230px;overflow:auto
+    background:var(--bg);border:1px solid var(--line);border-radius:10px;
+    padding:12px;font-size:13.5px;white-space:pre-wrap;color:var(--ink);
+    margin-top:9px;max-height:240px;overflow:auto
   }
-  .muted{color:var(--hint);font-size:13px;margin-top:8px}
-  .fallback{position:fixed;left:14px;right:14px;bottom:calc(14px + env(safe-area-inset-bottom));
+  .muted{color:var(--hint);font-size:12.5px;margin-top:7px}
+  .fallback{position:fixed;left:12px;right:12px;bottom:calc(12px + env(safe-area-inset-bottom));
     background:var(--btn);color:var(--btn-ink);border:0;border-radius:13px;
-    padding:16px;font-size:16px;font-weight:600;width:calc(100% - 28px);display:none}
+    padding:15px;font-size:16px;font-weight:600;width:calc(100% - 24px);display:none}
 </style>
 </head>
 <body>
 
-<div class="langbar" id="langbar"></div>
-<h1 id="title"></h1>
+<div class="top">
+  <h1 id="title"></h1>
+  <div class="seg" id="langseg"></div>
+</div>
 <p class="lead" id="lead"></p>
 
-<div id="form"></div>
+<div class="card" id="form"></div>
 
-<section>
-  <div class="q"><span id="pv-title"></span><em id="pv-note"></em></div>
-  <div class="preview" id="preview"></div>
-  <div class="muted" id="pv-hint"></div>
-</section>
+<div class="card">
+  <div class="rowi" id="pv-row">
+    <span class="rl" id="pv-title"></span>
+    <span class="rv"><span id="pv-digest"></span><span class="chev">›</span></span>
+  </div>
+  <div class="exp" id="pv-box" style="display:none">
+    <div class="preview" id="preview"></div>
+    <div class="muted" id="pv-hint"></div>
+  </div>
+</div>
 
 <button class="fallback" id="fallback"></button>
 
@@ -85,11 +104,13 @@ const DISTRICTS_UZ = ["Olmazor","Bektemir","Mirobod","Mirzo Ulug'bek","Sergeli",
 // ---------------------------------------------------------------- i18n ---
 const T = {
 ru: {
-  title:"Параметры поиска", lead:"Заполните — Рано соберёт запрос и разошлёт маклерам.",
+  title:"Параметры поиска", lead:"Тап по строке — изменить. Внизу — готовый текст запроса.",
   pv:"Запрос маклерам", pv_note:"обновляется сам",
   pv_hint:"Текст можно отредактировать в боте перед отправкой.",
   pv_hint_en:"", submit:"Сохранить и продолжить", multi:"можно несколько",
-  any:"Любой", exact:"или точная сумма, $", from:"от этажа", to:"до этажа",
+  any:"Любое", all:"Все", mo:"/мес", day:"/сутки",
+  nf_s:"не 1-й", nl_s:"не посл.",
+  exact:"или точная сумма, $", from:"от этажа", to:"до этажа",
   q:{deal:"Что ищем", object:"Тип жилья", city:"Где ищем", city_other:"Какой город",
      districts:"Районы Ташкента", rooms:"Комнат", budget:"Бюджет",
      class:"Класс жилья", furniture:"Мебель и техника", floor:"Этаж",
@@ -112,11 +133,13 @@ ru: {
      c_bot:"🤖 Помощнику-боту", c_me:"👤 Мне лично", c_both:"Оба контакта"}
 },
 uz: {
-  title:"Qidiruv parametrlari", lead:"To'ldiring — Rano so'rov tuzib, maklerlarga yuboradi.",
+  title:"Qidiruv parametrlari", lead:"Qatorni bosing — o'zgartiring. Pastda — tayyor so'rov matni.",
   pv:"Maklerlarga so'rov", pv_note:"o'zi yangilanadi",
   pv_hint:"Matnni yuborishdan oldin botda tahrirlash mumkin.",
   pv_hint_en:"", submit:"Saqlash va davom etish", multi:"bir nechtasini tanlang",
-  any:"Farqi yo'q", exact:"yoki aniq summa, $", from:"qavatdan", to:"qavatgacha",
+  any:"Farqi yo'q", all:"Hammasi", mo:"/oy", day:"/kun",
+  nf_s:"1-q. emas", nl_s:"oxirgisi emas",
+  exact:"yoki aniq summa, $", from:"qavatdan", to:"qavatgacha",
   q:{deal:"Nima qidiramiz", object:"Uy-joy turi", city:"Qayerda", city_other:"Qaysi shahar",
      districts:"Toshkent tumanlari", rooms:"Xonalar", budget:"Byudjet",
      class:"Uy-joy toifasi", furniture:"Mebel va texnika", floor:"Qavat",
@@ -139,12 +162,14 @@ uz: {
      c_bot:"🤖 Yordamchi-botga", c_me:"👤 Menga shaxsan", c_both:"Ikkalasiga"}
 },
 en: {
-  title:"Search parameters", lead:"Fill in — Rano will compose a request and send it to agents.",
+  title:"Search parameters", lead:"Tap a row to edit. The final request text is below.",
   pv:"Request to agents", pv_note:"updates live",
   pv_hint:"You can edit the text in the bot before sending.",
   pv_hint_en:"Agents in Tashkent read Russian or Uzbek, so the request is composed in Russian. Rano talks to you in English.",
   submit:"Save and continue", multi:"multiple allowed",
-  any:"Any", exact:"or exact amount, $", from:"floor from", to:"floor to",
+  any:"Any", all:"All", mo:"/mo", day:"/day",
+  nf_s:"not 1st", nl_s:"not top",
+  exact:"or exact amount, $", from:"floor from", to:"floor to",
   q:{deal:"Looking for", object:"Property type", city:"Where", city_other:"Which city",
      districts:"Tashkent districts", rooms:"Rooms", budget:"Budget",
      class:"Property class", furniture:"Furniture & appliances", floor:"Floor",
@@ -218,11 +243,16 @@ if (!location.hash && (nav === "uz" || nav === "en")) A.lang = nav;
 
 const L = () => T[A.lang] || T.ru;
 
-// ------------------------------------------------------------- рендер ----
+// ---------------------------------------- рендер: строки-сводки ----------
+// Каждый параметр — одна строка «название → текущее значение»; тап
+// раскрывает варианты под строкой. Вся анкета видна одним экраном.
+let open = null;      // ключ раскрытой строки
+let pvOpen = false;   // раскрыт ли текст запроса
+
 function fieldOptions(f){
   if (f.districts){
     const names = A.lang==="ru" ? DISTRICTS_RU : DISTRICTS_UZ;
-    return names.map((d,i)=>[String(i),d]).concat([["any",L().any]]);
+    return names.map((d,i)=>[String(i),d]).concat([["any",L().all]]);
   }
   if (f.budget) return BUDGET_CHIPS[A.deal] || BUDGET_CHIPS.rent;
   let o = typeof f.o === "function" ? f.o(A) : f.o;
@@ -255,24 +285,66 @@ function pick(f, val){
       if (val!=="daily" && String(A.term).startsWith("d")) A.term = "12";
       if (val==="daily" && !String(A.term).startsWith("d")) A.term = "d1_3";
     }
+    // одиночный выбор закрывает строку; «другой город» открывает поле ввода
+    open = (f.k==="city" && val==="other") ? "city_other" : null;
   }
   render();
 }
 
+function summary(f){
+  const o = L().o;
+  if (f.text) return (A[f.k]||"").trim() || "—";
+  if (f.districts){
+    const names = A.lang==="ru" ? DISTRICTS_RU : DISTRICTS_UZ;
+    const ds = (A.districts||[]).filter(x=>x!=="any").map(i=>names[+i]);
+    if (!ds.length) return L().all;
+    return ds.length<=2 ? ds.join(", ") : ds.slice(0,2).join(", ")+" +"+(ds.length-2);
+  }
+  if (f.k==="rooms"){
+    const r = (A.rooms||[]).filter(x=>x!=="any").sort().map(x=>x==="4"?"4+":x);
+    return r.length ? r.join(", ") : L().any;
+  }
+  if (f.budget){
+    const b = A.budget_max || A.budget;
+    const unit = A.deal==="daily" ? L().day : A.deal==="buy" ? "" : L().mo;
+    return b ? money(b)+unit : "—";
+  }
+  if (f.floor){
+    const fp = A.floor_pref||[]; const parts = [];
+    if (fp.includes("nf")) parts.push(L().nf_s);
+    if (fp.includes("nl")) parts.push(L().nl_s);
+    const lo = String(A.floor_min||"").trim(), hi = String(A.floor_max||"").trim();
+    if (lo&&hi) parts.push(lo+"–"+hi);
+    else if (lo) parts.push("≥ "+lo);
+    else if (hi) parts.push("≤ "+hi);
+    return parts.length ? parts.join(", ") : o.fl_any;
+  }
+  const opts = typeof f.o==="function" ? f.o(A) : f.o;
+  const m = (opts||[]).find(x=>x[0]===A[f.k]);
+  return m ? (f.raw ? m[1] : (o[m[1]] ?? m[1])) : "—";
+}
+
+function refresh(){   // лёгкое обновление без пересборки DOM — не сбивает фокус ввода
+  document.querySelectorAll(".rvv").forEach(el=>{
+    const f = FIELDS.find(x=>x.k===el.dataset.k);
+    if (f) el.textContent = summary(f);
+  });
+  preview();
+}
+
 function render(){
-  const lb = document.getElementById("langbar");
-  lb.innerHTML = "";
-  for (const [code,label] of [["ru","Русский"],["uz","O'zbekcha"],["en","English"]]){
+  const seg = document.getElementById("langseg");
+  seg.innerHTML = "";
+  for (const [code,label] of [["ru","RU"],["uz","UZ"],["en","EN"]]){
     const b = document.createElement("div");
-    b.className = "chip" + (A.lang===code ? " on" : "");
+    b.className = A.lang===code ? "on" : "";
     b.textContent = label;
     b.onclick = ()=>{ A.lang=code; tg?.HapticFeedback?.selectionChanged(); render(); };
-    lb.appendChild(b);
+    seg.appendChild(b);
   }
   document.getElementById("title").textContent = L().title;
   document.getElementById("lead").textContent = L().lead;
   document.getElementById("pv-title").textContent = L().pv;
-  document.getElementById("pv-note").textContent = L().pv_note;
   document.getElementById("fallback").textContent = L().submit;
   tg?.MainButton?.setText(L().submit);
 
@@ -280,20 +352,34 @@ function render(){
   root.innerHTML = "";
   for (const f of FIELDS){
     if (f.when && !f.when(A)) continue;
-    const s = document.createElement("section");
-    const label = f.floor ? L().q.floor : L().q[f.k];
-    const hint = (f.multi || f.floor) ? L().multi : "";
-    s.innerHTML = `<div class="q"><span>${label}</span><em>${hint}</em></div>`;
+    const key = f.floor ? "floor" : f.k;
+    const r = document.createElement("div");
+    r.className = "rowi" + (open===f.k ? " open" : "");
+    const rl = document.createElement("span");
+    rl.className = "rl"; rl.textContent = L().q[key];
+    const rv = document.createElement("span"); rv.className = "rv";
+    const rvv = document.createElement("span");
+    rvv.className = "rvv"; rvv.dataset.k = f.k; rvv.textContent = summary(f);
+    const ch = document.createElement("span"); ch.className = "chev"; ch.textContent = "›";
+    rv.append(rvv, ch); r.append(rl, rv);
+    r.onclick = ()=>{ open = open===f.k ? null : f.k;
+                      tg?.HapticFeedback?.selectionChanged(); render(); };
+    root.appendChild(r);
+    if (open !== f.k) continue;
 
+    const ex = document.createElement("div");
+    ex.className = "exp";
+    ex.onclick = ev=>ev.stopPropagation();
     if (f.text){
-      const row = document.createElement("div");
-      row.className = "row"; row.style.marginTop = "0";
-      row.innerHTML = `<input type="text" value="${(A[f.k]||"").replace(/"/g,"&quot;")}">`;
-      s.appendChild(row);
-      row.querySelector("input").oninput = e=>{ A[f.k]=e.target.value; preview(); };
-      root.appendChild(s); continue;
+      const row = document.createElement("div"); row.className = "row";
+      const inp = document.createElement("input");
+      inp.type = "text"; inp.value = A[f.k]||"";
+      inp.oninput = e=>{ A[f.k]=e.target.value; refresh(); };
+      row.appendChild(inp); ex.appendChild(row);
+      root.appendChild(ex);
+      setTimeout(()=>inp.focus(), 50);
+      continue;
     }
-
     const box = document.createElement("div");
     box.className = "chips grid" + (f.cols || 2);
     const opts = f.floor
@@ -303,31 +389,31 @@ function render(){
       const b = document.createElement("div");
       b.className = "chip" + (isOn(f,val) ? " on" : "");
       b.textContent = text;
-      b.onclick = ()=>{ pick(f,val); tg?.HapticFeedback?.selectionChanged(); };
+      b.onclick = ev=>{ ev.stopPropagation(); pick(f,val);
+                        tg?.HapticFeedback?.selectionChanged(); };
       box.appendChild(b);
     }
-    s.appendChild(box);
-
+    ex.appendChild(box);
     if (f.budget){
-      const row = document.createElement("div");
-      row.className = "row";
-      row.innerHTML = `<input type="number" inputmode="numeric" placeholder="${L().exact}"
-                        value="${A.budget_max||""}" id="bmax">`;
-      s.appendChild(row);
-      row.querySelector("#bmax").oninput = e=>{ A.budget_max=e.target.value; preview(); };
+      const row = document.createElement("div"); row.className = "row";
+      const inp = document.createElement("input");
+      inp.type = "number"; inp.inputMode = "numeric";
+      inp.placeholder = L().exact; inp.value = A.budget_max||"";
+      inp.oninput = e=>{ A.budget_max=e.target.value; refresh(); };
+      row.appendChild(inp); ex.appendChild(row);
     }
     if (f.floor){
-      const row = document.createElement("div");
-      row.className = "row";
-      row.innerHTML = `<input type="number" inputmode="numeric" placeholder="${L().from}"
-                        value="${A.floor_min||""}" id="fmin">
-                       <input type="number" inputmode="numeric" placeholder="${L().to}"
-                        value="${A.floor_max||""}" id="fmax">`;
-      s.appendChild(row);
-      row.querySelector("#fmin").oninput = e=>{ A.floor_min=e.target.value; preview(); };
-      row.querySelector("#fmax").oninput = e=>{ A.floor_max=e.target.value; preview(); };
+      const row = document.createElement("div"); row.className = "row";
+      for (const [kk, ph] of [["floor_min",L().from],["floor_max",L().to]]){
+        const inp = document.createElement("input");
+        inp.type = "number"; inp.inputMode = "numeric";
+        inp.placeholder = ph; inp.value = A[kk]||"";
+        inp.oninput = e=>{ A[kk]=e.target.value; refresh(); };
+        row.appendChild(inp);
+      }
+      ex.appendChild(row);
     }
-    root.appendChild(s);
+    root.appendChild(ex);
   }
   preview();
 }
@@ -435,7 +521,12 @@ function preview(){
   document.getElementById("preview").textContent = letter();
   document.getElementById("pv-hint").textContent =
     L().pv_hint + (A.lang==="en" ? " " + L().pv_hint_en : "");
+  document.getElementById("pv-box").style.display = pvOpen ? "" : "none";
+  document.getElementById("pv-row").classList.toggle("open", pvOpen);
 }
+document.getElementById("pv-row").onclick = ()=>{
+  pvOpen = !pvOpen; tg?.HapticFeedback?.selectionChanged(); preview();
+};
 
 function submit(){
   const payload = JSON.stringify({v: 2, ans: A});
