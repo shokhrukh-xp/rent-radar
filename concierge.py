@@ -304,6 +304,42 @@ DISTRICT_UZ = {"Алмазар": "Olmazor", "Бектемир": "Bektemir", "М�
                "Яккасарай": "Yakkasaroy", "Янгихаёт": "Yangihayot",
                "Яшнабад": "Yashnobod"}
 
+MON_GEN_RU = ["января", "февраля", "марта", "апреля", "мая", "июня", "июля",
+              "августа", "сентября", "октября", "ноября", "декабря"]
+MON_UZ = ["yanvar", "fevral", "mart", "aprel", "may", "iyun", "iyul",
+          "avgust", "sentabr", "oktabr", "noyabr", "dekabr"]
+_DATE_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})$")
+
+
+def _fmt_date(iso, uz=False):
+    """'2026-08-15' → '15 августа' / '15-avgust'. Кривой ввод → ''."""
+    m = _DATE_RE.match(str(iso or ""))
+    if not m:
+        return ""
+    y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
+    if not (1 <= mo <= 12 and 1 <= d <= 31):
+        return ""
+    return f"{d}-{MON_UZ[mo - 1]}" if uz else f"{d} {MON_GEN_RU[mo - 1]}"
+
+
+def _nights_ru(n):
+    if n % 10 == 1 and n % 100 != 11:
+        return f"{n} ночь"
+    if 2 <= n % 10 <= 4 and not (10 <= n % 100 < 20):
+        return f"{n} ночи"
+    return f"{n} ночей"
+
+
+def _date_span(ans):
+    """Число ночей между date_from и date_to (0, если данных нет/битые)."""
+    a, b = ans.get("date_from"), ans.get("date_to")
+    if not (_DATE_RE.match(str(a or "")) and _DATE_RE.match(str(b or ""))):
+        return 0
+    from datetime import date
+    da = date(*[int(x) for x in a.split("-")])
+    db = date(*[int(x) for x in b.split("-")])
+    return (db - da).days
+
 
 def _floor_wish(ans, uz=False):
     """Этаж: флаги «не первый / не последний» плюс числовой диапазон."""
@@ -412,9 +448,10 @@ def compose_request(cfg, store, username=None):
         fw = _floor_wish(ans, uz) if obj == "flat" else ""
         if fw:
             extra.append(fw)
-        t = (TERM_UZ if uz else TERM_RU).get(ans.get("term"))
-        if t:
-            extra.append(t)
+        if deal == "rent":                        # срок аренды — только у длительной
+            t = (TERM_UZ if uz else TERM_RU).get(ans.get("term"))
+            if t:
+                extra.append(t)
         w = (WHO_UZ if uz else WHO_RU).get(ans.get("who"))
         if w:
             extra.append(w)
@@ -427,15 +464,31 @@ def compose_request(cfg, store, username=None):
         parts.append(("Xohishlar: " if uz else "Пожелания: ")
                      + ", ".join(extra) + ".")
 
-    if deal != "buy":
-        movein = ({"now": "darhol kirishga tayyorman",
-                   "month": "bir oy ichida kiraman",
-                   "flex": "muddat bo'yicha moslashuvchanman"} if uz else
-                  {"now": "готов заехать сразу",
-                   "month": "заезд в течение месяца",
-                   "flex": "по срокам гибко"}).get(ans.get("movein"))
-        if movein:
-            parts.append(movein[0].upper() + movein[1:] + ".")
+    span = _date_span(ans)
+    if deal == "daily" and span > 0:              # посуточно — конкретные даты
+        df, dt = _fmt_date(ans["date_from"], uz), _fmt_date(ans["date_to"], uz)
+        if uz:
+            parts.append(f"Sanalar: {df}dan {dt}gacha — {span} kecha.")
+        else:
+            parts.append(f"Даты: заезд {df}, выезд {dt} — {_nights_ru(span)}.")
+    elif deal == "daily":                         # чат-фолбэк без календаря — срок чипом
+        t = (TERM_UZ if uz else TERM_RU).get(ans.get("term"))
+        if t:
+            parts.append((t[0].upper() + t[1:] + ".") if not uz else (t + "."))
+    elif deal == "rent":
+        md = _fmt_date(ans.get("movein_date"), uz) if ans.get("movein") == "date" else ""
+        if md:                                    # длительная — точная дата заезда
+            parts.append(f"{md}dan kirishni rejalashtiryapman."
+                         if uz else f"Заезд планирую с {md}.")
+        else:
+            movein = ({"now": "darhol kirishga tayyorman",
+                       "month": "bir oy ichida kiraman",
+                       "flex": "muddat bo'yicha moslashuvchanman"} if uz else
+                      {"now": "готов заехать сразу",
+                       "month": "заезд в течение месяца",
+                       "flex": "по срокам гибко"}).get(ans.get("movein"))
+            if movein:
+                parts.append(movein[0].upper() + movein[1:] + ".")
 
     if obj == "flat":                        # этаж спрашиваем только у квартир
         ask = ("Mos variant bo'lsa — foto, aniq manzil, qavati, maydoni va "
@@ -943,7 +996,8 @@ def send_app_button(cfg, store, text=None):
 
 
 ALLOWED = {f["k"] for f in STEPS} | {
-    "budget_max", "floor_min", "floor_max", "city_other", "lang"}
+    "budget_max", "floor_min", "floor_max", "city_other", "lang",
+    "date_from", "date_to", "movein_date"}
 
 
 def apply_webapp_data(cfg, store, raw):
@@ -975,6 +1029,9 @@ def apply_webapp_data(cfg, store, raw):
             ans[k] = v
     if "city_other" in ans:
         ans["city_other"] = str(ans["city_other"])[:40].strip()
+    for k in ("date_from", "date_to", "movein_date"):   # только валидные yyyy-mm-dd
+        if k in ans and not _DATE_RE.match(str(ans.get(k) or "")):
+            ans.pop(k, None)
     fp = ans.get("floor_pref")
     if isinstance(fp, str):
         fp = [fp]
