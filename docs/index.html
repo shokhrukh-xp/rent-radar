@@ -3,37 +3,39 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Rano · uy-joy | поиск жилья</title>
+<title>Ra'no · поиск жилья</title>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,700;12..96,800&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700&display=swap" rel="stylesheet">
 <style>
   :root{
-    --bg:#FAF6F0; --card:#FFFFFF; --ink:#241F19; --muted:#948A7C;
-    --line:#EFE8DD; --accent:#E85A34; --accent-weak:rgba(232,90,52,.10);
-    --accent-ink:#FFFFFF;
-    --shadow:0 1px 2px rgba(70,45,20,.05), 0 6px 22px rgba(70,45,20,.06);
-    --dawn:linear-gradient(135deg,#FBBF5B 0%,#F0703C 52%,#E4472B 100%);
+    --bg:#FCF5F1; --card:#FFFFFF; --ink:#2B1D22; --muted:#9A828A;
+    --line:#F1E5DF; --accent:#C21F45; --accent-weak:rgba(194,31,69,.085);
+    --accent-ink:#FFFFFF; --gold:#C69A3E;
+    --shadow:0 1px 2px rgba(90,30,45,.05), 0 7px 22px rgba(90,30,45,.06);
+    --bloom:linear-gradient(140deg,#E64B6A 0%,#C21F45 48%,#C69A3E 118%);
   }
   body.dark{
-    --bg:#161210; --card:#211B16; --ink:#F2EADF; --muted:#9C9184;
-    --line:#312820; --accent:#F5754E; --accent-weak:rgba(245,117,78,.16);
+    --bg:#16100F; --card:#221619; --ink:#F3E7E9; --muted:#A88E95;
+    --line:#33232A; --accent:#E24A69; --accent-weak:rgba(226,74,105,.16);
+    --gold:#D4AC55;
     --shadow:0 1px 2px rgba(0,0,0,.3), 0 8px 26px rgba(0,0,0,.30);
   }
   *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
   body{margin:0;background:var(--bg);color:var(--ink);
     font:15px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
     padding:0 0 calc(94px + env(safe-area-inset-bottom))}
-  .disp{font-family:"Bricolage Grotesque",-apple-system,system-ui,sans-serif;letter-spacing:-.015em}
+  .disp{font-family:"Fraunces","Times New Roman",Georgia,serif;letter-spacing:-.005em}
 
   .hero{position:relative;padding:16px 16px 12px;overflow:hidden}
   .hero .glow{position:absolute;top:-70px;right:-50px;width:190px;height:190px;
-    background:var(--dawn);filter:blur(46px);opacity:.30;border-radius:50%;pointer-events:none}
+    background:var(--bloom);filter:blur(46px);opacity:.26;border-radius:50%;pointer-events:none}
   .hrow{display:flex;align-items:center;gap:11px;position:relative}
-  .mono{width:40px;height:40px;border-radius:13px;background:var(--dawn);flex:0 0 auto;
-    display:flex;align-items:center;justify-content:center;color:#fff;font-weight:800;font-size:20px;
-    box-shadow:0 5px 14px rgba(228,71,43,.38)}
+  .mono{width:42px;height:42px;border-radius:14px;background:var(--bloom);flex:0 0 auto;
+    display:flex;align-items:center;justify-content:center;
+    box-shadow:0 5px 14px rgba(194,31,69,.34)}
+  .mono svg{width:25px;height:25px}
   .hname{font-size:18px;font-weight:800;line-height:1.05}
   .hsub{font-size:12px;color:var(--muted);margin-top:2px}
   .seg{margin-left:auto;display:flex;background:var(--card);border:1px solid var(--line);
@@ -101,7 +103,7 @@
   .fab{position:fixed;left:12px;right:12px;bottom:calc(12px + env(safe-area-inset-bottom));
     background:var(--accent);color:var(--accent-ink);border:0;border-radius:15px;padding:16px;
     font-size:16px;font-weight:700;width:calc(100% - 24px);display:none;
-    box-shadow:0 8px 20px rgba(228,71,43,.36)}
+    box-shadow:0 8px 20px rgba(194,31,69,.34)}
 </style>
 </head>
 <body>
@@ -109,7 +111,7 @@
 <div class="hero">
   <div class="glow"></div>
   <div class="hrow">
-    <div class="mono disp" id="mono">Р</div>
+    <div class="mono" id="mono"><svg viewBox="0 0 40 40" fill="#fff" aria-hidden="true"><g opacity=".96"><ellipse cx="20" cy="12" rx="4.8" ry="8"/><ellipse cx="20" cy="12" rx="4.8" ry="8" transform="rotate(72 20 20)"/><ellipse cx="20" cy="12" rx="4.8" ry="8" transform="rotate(144 20 20)"/><ellipse cx="20" cy="12" rx="4.8" ry="8" transform="rotate(216 20 20)"/><ellipse cx="20" cy="12" rx="4.8" ry="8" transform="rotate(288 20 20)"/></g><circle cx="20" cy="20" r="3.4" fill="#C21F45"/></svg></div>
     <div>
       <div class="hname disp" id="hname"></div>
       <div class="hsub" id="hsub"></div>
@@ -219,7 +221,7 @@ en: {
   title:"Search parameters", lead:"Tap a row to edit. The final request text is below.",
   pv:"Request to agents", pv_note:"updates live",
   pv_hint:"You can edit the text in the bot before sending.",
-  pv_hint_en:"Agents in Tashkent read Russian or Uzbek, so the request is composed in Russian. Rano talks to you in English.",
+  pv_hint_en:"Agents in Tashkent read Russian or Uzbek, so the request is composed in Russian. Ra'no talks to you in English.",
   submit:"Save and continue", multi:"multiple allowed",
   any:"Any", all:"All", mo:"/mo", day:"/day",
   nf_s:"not 1st", nl_s:"not top",
@@ -492,7 +494,7 @@ function brief(){
     const txt = uz?(money(bud)+unit+" gacha"):en?(money(bud)+unit):("до "+money(bud)+unit);
     segs.push('<span class="hl">'+txt+'</span>');
   }
-  const pre = uz?"Rano qidiryapti:":en?"Rano is looking for:":"Рано ищет:";
+  const pre = uz?"Ra'no qidiryapti:":en?"Ra'no is looking for:":"Ra'no ищет:";
   return pre+" "+segs.join(" · ");
 }
 
@@ -542,8 +544,7 @@ function control(f){
 }
 
 function render(){
-  document.getElementById("mono").textContent = A.lang==="ru" ? "Р" : "R";
-  document.getElementById("hname").textContent = A.lang==="ru" ? "Рано" : "Rano";
+  document.getElementById("hname").textContent = "Ra'no";
   document.getElementById("hsub").textContent = L().title;
   const seg=document.getElementById("seg"); seg.innerHTML="";
   for (const [c,l] of [["ru","RU"],["uz","UZ"],["en","EN"]]){
@@ -675,8 +676,8 @@ function letter(){
 
   const link = `https://t.me/${A._bot || "rano_smart_bot"}`;
   if (A.contact==="bot" || A.contact==="both")
-    p.push(uz ? `Variantlarni yordamchim Ranoga yuboring: ${link}\nHavolani bosib yozing — u menga darhol yetkazadi.`
-              : `Варианты присылайте, пожалуйста, моей помощнице — Рано: ${link}\nНажмите на ссылку и напишите ей, она сразу передаёт мне.`);
+    p.push(uz ? `Variantlarni yordamchim Ra'noga yuboring: ${link}\nHavolani bosib yozing — u menga darhol yetkazadi.`
+              : `Варианты присылайте, пожалуйста, моей помощнице — Ra'no: ${link}\nНажмите на ссылку и напишите ей, она сразу передаёт мне.`);
   p.push(uz ? "Rahmat!" : "Спасибо!");
   return p.join("\n");
 }
@@ -707,7 +708,7 @@ if (tg){
     }catch(e){}
   };
   applyScheme();
-  try{ tg.MainButton.setParams({text:L().submit, color:"#E85A34", text_color:"#ffffff"}); }catch(e){}
+  try{ tg.MainButton.setParams({text:L().submit, color:"#C21F45", text_color:"#ffffff"}); }catch(e){}
   tg.MainButton.show(); tg.MainButton.onClick(submit);
   if (tg.onEvent) tg.onEvent("themeChanged", ()=>{ applyScheme(); render(); });
 } else {

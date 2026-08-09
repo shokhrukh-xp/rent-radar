@@ -505,7 +505,7 @@ def compose_request(cfg, store, username=None):
 
     who = ans.get("contact", "bot")
     bot_un = cfg.get("bot_username") or "rano_smart_bot"
-    assistant = cfg.get("assistant_name", "Рано")
+    assistant = cfg.get("assistant_name", "Ra'no")
     # в латинском письме имя тоже латиницей, иначе выходит «Раноga»
     assistant_lat = {"Рано": "Rano", "Амина": "Amina"}.get(assistant, assistant)
     if who in ("bot", "both"):
@@ -751,7 +751,7 @@ def notify_offer(cfg, store, oid):
 
 
 def decline_text(cfg):
-    a = cfg.get("assistant_name", "Рано")
+    a = cfg.get("assistant_name", "Ra'no")
     return (f"Спасибо! Этот вариант клиенту не подошёл. "
             f"Если появится что-то ближе к параметрам — присылайте, посмотрю. "
             f"({a})")
@@ -850,7 +850,7 @@ def show_shortlist(cfg, store, message_id=None):
 
 def details_question(o, cfg=None):
     cfg = cfg or {}
-    a = cfg.get("assistant_name", "Рано")
+    a = cfg.get("assistant_name", "Ra'no")
     q = [f"Здравствуйте! Это {a}, ассистент по поиску жилья.",
          "По варианту, который вы присылали"]
     tag = []
