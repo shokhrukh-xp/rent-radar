@@ -5,112 +5,135 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Rano · uy-joy | поиск жилья</title>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,700;12..96,800&display=swap" rel="stylesheet">
 <style>
   :root{
-    --bg: var(--tg-theme-bg-color, #ffffff);
-    --sec: var(--tg-theme-secondary-bg-color, #f2f2f7);
-    --ink: var(--tg-theme-text-color, #000000);
-    --hint: var(--tg-theme-hint-color, #8e8e93);
-    --link: var(--tg-theme-link-color, #007aff);
-    --btn: var(--tg-theme-button-color, #007aff);
-    --btn-ink: var(--tg-theme-button-text-color, #ffffff);
-    --line: color-mix(in srgb, var(--hint) 22%, transparent);
+    --bg:#FAF6F0; --card:#FFFFFF; --ink:#241F19; --muted:#948A7C;
+    --line:#EFE8DD; --accent:#E85A34; --accent-weak:rgba(232,90,52,.10);
+    --accent-ink:#FFFFFF;
+    --shadow:0 1px 2px rgba(70,45,20,.05), 0 6px 22px rgba(70,45,20,.06);
+    --dawn:linear-gradient(135deg,#FBBF5B 0%,#F0703C 52%,#E4472B 100%);
+  }
+  body.dark{
+    --bg:#161210; --card:#211B16; --ink:#F2EADF; --muted:#9C9184;
+    --line:#312820; --accent:#F5754E; --accent-weak:rgba(245,117,78,.16);
+    --shadow:0 1px 2px rgba(0,0,0,.3), 0 8px 26px rgba(0,0,0,.30);
   }
   *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
-  body{
-    margin:0;background:var(--bg);color:var(--ink);
-    font:15px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
-    padding:10px 12px calc(92px + env(safe-area-inset-bottom));
-  }
-  .top{display:flex;justify-content:space-between;align-items:center;gap:10px;margin:2px 2px 10px}
-  h1{font-size:18px;margin:0;letter-spacing:-.02em}
-  .lead{color:var(--hint);font-size:12.5px;margin:2px 2px 10px}
-  .seg{display:flex;border:1.5px solid var(--line);border-radius:9px;overflow:hidden;flex:0 0 auto}
-  .seg div{padding:5px 10px;font-size:12.5px;font-weight:600;cursor:pointer;color:var(--hint)}
-  .seg div.on{background:var(--btn);color:var(--btn-ink)}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font:15px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+    padding:0 0 calc(94px + env(safe-area-inset-bottom))}
+  .disp{font-family:"Bricolage Grotesque",-apple-system,system-ui,sans-serif;letter-spacing:-.015em}
 
-  .card{background:var(--sec);border-radius:14px;margin-bottom:12px;overflow:hidden}
-  .card > * + *{border-top:1px solid var(--line)}
-  .rowi{display:flex;justify-content:space-between;align-items:center;gap:12px;
-        padding:11px 14px;min-height:44px;cursor:pointer;user-select:none}
-  .rowi:active{background:color-mix(in srgb, var(--hint) 8%, var(--sec))}
-  .rl{font-weight:600;white-space:nowrap;font-size:14.5px}
-  .rv{color:var(--btn);font-weight:600;font-size:14px;text-align:right;
-      overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:58%}
-  .rv .chev{color:var(--hint);font-weight:400;margin-left:5px;display:inline-block;
-            transition:transform .15s ease}
-  .rowi.open .chev{transform:rotate(90deg)}
-  .exp{padding:2px 14px 13px;background:color-mix(in srgb, var(--bg) 35%, var(--sec))}
+  .hero{position:relative;padding:16px 16px 12px;overflow:hidden}
+  .hero .glow{position:absolute;top:-70px;right:-50px;width:190px;height:190px;
+    background:var(--dawn);filter:blur(46px);opacity:.30;border-radius:50%;pointer-events:none}
+  .hrow{display:flex;align-items:center;gap:11px;position:relative}
+  .mono{width:40px;height:40px;border-radius:13px;background:var(--dawn);flex:0 0 auto;
+    display:flex;align-items:center;justify-content:center;color:#fff;font-weight:800;font-size:20px;
+    box-shadow:0 5px 14px rgba(228,71,43,.38)}
+  .hname{font-size:18px;font-weight:800;line-height:1.05}
+  .hsub{font-size:12px;color:var(--muted);margin-top:2px}
+  .seg{margin-left:auto;display:flex;background:var(--card);border:1px solid var(--line);
+    border-radius:11px;overflow:hidden;box-shadow:var(--shadow)}
+  .seg div{padding:7px 10px;font-size:12px;font-weight:700;color:var(--muted);cursor:pointer}
+  .seg div.on{background:var(--accent);color:var(--accent-ink)}
+  .brief{position:relative;margin:15px 4px 2px;font-size:16.5px;line-height:1.34;font-weight:700}
+  .brief .hl{color:var(--accent)}
 
-  .chips{display:flex;flex-wrap:wrap;gap:7px;padding-top:9px}
-  .chip{
-    border:1.5px solid var(--line);background:var(--bg);color:var(--ink);
-    border-radius:10px;padding:7px 12px;font-size:13.5px;cursor:pointer;
-    user-select:none;min-height:34px;display:flex;align-items:center;
-    transition:transform .06s ease
-  }
+  .wrap{padding:8px 12px 0}
+  .sec{background:var(--card);border:1px solid var(--line);border-radius:20px;
+    padding:16px 16px 4px;margin-bottom:13px;box-shadow:var(--shadow)}
+  .sechd{display:flex;align-items:center;gap:9px;margin-bottom:13px}
+  .sechd .ic{width:27px;height:27px;border-radius:9px;background:var(--accent-weak);flex:0 0 auto;
+    display:flex;align-items:center;justify-content:center;color:var(--accent)}
+  .sechd .ic svg{width:15px;height:15px}
+  .sechd b{font-size:14.5px;font-weight:800;letter-spacing:.005em}
+  .field{margin-bottom:15px}
+  .flabel{font-size:10.5px;font-weight:700;letter-spacing:.055em;text-transform:uppercase;
+    color:var(--muted);margin-bottom:8px}
+  .chips{display:flex;flex-wrap:wrap;gap:7px}
+  .chip{border:1.5px solid var(--line);background:transparent;color:var(--ink);
+    border-radius:11px;padding:8px 13px;font-size:13.5px;font-weight:500;cursor:pointer;
+    min-height:38px;display:flex;align-items:center;transition:transform .06s ease,border-color .12s,background .12s}
   .chip:active{transform:scale(.95)}
-  .chip.on{background:var(--btn);border-color:var(--btn);color:var(--btn-ink);font-weight:600}
+  .chip.on{background:var(--accent);border-color:var(--accent);color:var(--accent-ink);font-weight:600}
   .grid3 .chip{flex:1 1 calc(33.333% - 5px);justify-content:center;text-align:center}
   .grid2 .chip{flex:1 1 calc(50% - 4px);justify-content:center;text-align:center}
-  .row{display:flex;gap:8px;align-items:center;margin-top:9px}
-  input[type=number],input[type=text]{
-    flex:1;background:var(--bg);color:var(--ink);border:1.5px solid var(--line);
-    border-radius:10px;padding:9px 12px;font-size:16px;min-width:0
-  }
-  input:focus{outline:none;border-color:var(--btn)}
+  .row{display:flex;gap:8px;margin-top:9px}
+  input[type=number],input[type=text]{flex:1;background:var(--bg);color:var(--ink);
+    border:1.5px solid var(--line);border-radius:11px;padding:10px 13px;font-size:16px;min-width:0}
+  input:focus{outline:none;border-color:var(--accent)}
 
-  /* инлайн-календарь */
-  .cal{padding-top:10px}
-  .calhead{display:flex;justify-content:space-between;align-items:center;margin-bottom:7px}
-  .calhead b{font-size:14.5px;font-weight:600}
-  .calnav{width:34px;height:34px;border:1.5px solid var(--line);border-radius:9px;
-          display:flex;align-items:center;justify-content:center;cursor:pointer;
-          font-size:18px;line-height:1;color:var(--ink)}
+  .cal{padding-top:4px}
+  .calhead{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
+  .calhead b{font-size:14.5px;font-weight:700}
+  .calnav{width:34px;height:34px;border:1.5px solid var(--line);border-radius:10px;
+    display:flex;align-items:center;justify-content:center;cursor:pointer;font-size:18px;line-height:1;color:var(--ink)}
   .calnav:active{transform:scale(.93)}
   .calgrid{display:grid;grid-template-columns:repeat(7,1fr);gap:3px}
-  .caldow{text-align:center;font-size:11px;color:var(--hint);padding:1px 0 3px}
-  .calday{aspect-ratio:1/1;display:flex;align-items:center;justify-content:center;
-          font-size:13.5px;border-radius:9px;cursor:pointer;user-select:none;color:var(--ink)}
-  .calday.mut{opacity:.3;cursor:default}
-  .calday.rng{background:color-mix(in srgb,var(--btn) 20%,transparent);border-radius:0}
-  .calday.sel{background:var(--btn);color:var(--btn-ink);font-weight:700;border-radius:9px}
-  .calday.today:not(.sel){box-shadow:inset 0 0 0 1.5px var(--btn)}
-  .calnote{color:var(--hint);font-size:12.5px;margin-top:8px;text-align:center}
-  .calnote b{color:var(--btn)}
-  .preview{
-    background:var(--bg);border:1px solid var(--line);border-radius:10px;
-    padding:12px;font-size:13.5px;white-space:pre-wrap;color:var(--ink);
-    margin-top:9px;max-height:240px;overflow:auto
-  }
-  .muted{color:var(--hint);font-size:12.5px;margin-top:7px}
-  .fallback{position:fixed;left:12px;right:12px;bottom:calc(12px + env(safe-area-inset-bottom));
-    background:var(--btn);color:var(--btn-ink);border:0;border-radius:13px;
-    padding:15px;font-size:16px;font-weight:600;width:calc(100% - 24px);display:none}
+  .caldow{text-align:center;font-size:11px;color:var(--muted);padding:1px 0 3px}
+  .calday{aspect-ratio:1/1;display:flex;align-items:center;justify-content:center;font-size:13.5px;
+    border-radius:10px;cursor:pointer;user-select:none;color:var(--ink)}
+  .calday.mut{opacity:.28;cursor:default}
+  .calday.rng{background:var(--accent-weak);border-radius:0}
+  .calday.sel{background:var(--accent);color:var(--accent-ink);font-weight:700;border-radius:10px}
+  .calday.today:not(.sel){box-shadow:inset 0 0 0 1.5px var(--accent)}
+  .calnote{color:var(--muted);font-size:12.5px;margin-top:9px;text-align:center}
+  .calnote b{color:var(--accent)}
+
+  .pv{background:var(--card);border:1px solid var(--line);border-radius:20px;
+    margin:2px 12px 14px;box-shadow:var(--shadow);overflow:hidden}
+  .pvhd{display:flex;align-items:center;gap:9px;padding:15px 16px;cursor:pointer}
+  .pvhd .ic{width:27px;height:27px;border-radius:9px;background:var(--accent-weak);flex:0 0 auto;
+    display:flex;align-items:center;justify-content:center;color:var(--accent)}
+  .pvhd .ic svg{width:15px;height:15px}
+  .pvhd b{font-size:14.5px;font-weight:800}
+  .pvhd .chev{margin-left:auto;color:var(--muted);font-size:18px;transition:transform .15s ease}
+  .pv.open .pvhd .chev{transform:rotate(90deg)}
+  .pvbody{padding:0 16px 16px}
+  .preview{background:var(--bg);border:1px solid var(--line);border-radius:13px;
+    padding:13px;font-size:13.5px;white-space:pre-wrap;color:var(--ink);max-height:260px;overflow:auto}
+  .muted{color:var(--muted);font-size:12.5px;margin-top:8px}
+
+  .fab{position:fixed;left:12px;right:12px;bottom:calc(12px + env(safe-area-inset-bottom));
+    background:var(--accent);color:var(--accent-ink);border:0;border-radius:15px;padding:16px;
+    font-size:16px;font-weight:700;width:calc(100% - 24px);display:none;
+    box-shadow:0 8px 20px rgba(228,71,43,.36)}
 </style>
 </head>
 <body>
 
-<div class="top">
-  <h1 id="title"></h1>
-  <div class="seg" id="langseg"></div>
-</div>
-<p class="lead" id="lead"></p>
-
-<div class="card" id="form"></div>
-
-<div class="card">
-  <div class="rowi" id="pv-row">
-    <span class="rl" id="pv-title"></span>
-    <span class="rv"><span id="pv-digest"></span><span class="chev">›</span></span>
+<div class="hero">
+  <div class="glow"></div>
+  <div class="hrow">
+    <div class="mono disp" id="mono">Р</div>
+    <div>
+      <div class="hname disp" id="hname"></div>
+      <div class="hsub" id="hsub"></div>
+    </div>
+    <div class="seg" id="seg"></div>
   </div>
-  <div class="exp" id="pv-box" style="display:none">
+  <div class="brief disp" id="brief"></div>
+</div>
+
+<div class="wrap" id="wrap"></div>
+
+<div class="pv" id="pv">
+  <div class="pvhd" id="pvhd">
+    <span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h13l3 3v13H4z"/><path d="M8 9h8M8 13h8M8 17h5"/></svg></span>
+    <b id="pv-title"></b>
+    <span class="chev">›</span>
+  </div>
+  <div class="pvbody" id="pvbody" style="display:none">
     <div class="preview" id="preview"></div>
     <div class="muted" id="pv-hint"></div>
   </div>
 </div>
 
-<button class="fallback" id="fallback"></button>
+<button class="fab" id="fab"></button>
 
 <script>
 const tg = window.Telegram?.WebApp;
@@ -367,11 +390,10 @@ function buildCalendar(mode){   // mode: "range" (date_from/date_to) | "single" 
   return wrap;
 }
 
-// ---------------------------------------- рендер: строки-сводки ----------
-// Каждый параметр — одна строка «название → текущее значение»; тап
-// раскрывает варианты под строкой. Вся анкета видна одним экраном.
-let open = null;      // ключ раскрытой строки
-let pvOpen = false;   // раскрыт ли текст запроса
+// ----------------------------------------- рендер: блоки и чипы ----------
+// Всё на одном экране: параметры сгруппированы в карточки-разделы, варианты —
+// всегда открытые чипы (без раскрытия строк). Вверху — живой «бриф».
+let pvOpen = false;        // calView объявлен выше, в блоке календаря
 
 function fieldOptions(f){
   if (f.districts){
@@ -380,7 +402,7 @@ function fieldOptions(f){
   }
   if (f.budget) return BUDGET_CHIPS[A.deal] || BUDGET_CHIPS.rent;
   let o = typeof f.o === "function" ? f.o(A) : f.o;
-  return o.map(([v,key])=>[v, f.raw ? key : (L().o[key] ?? key)]);
+  return o.map(([v,key])=>[v, v==="any" ? L().any : (f.raw ? key : (L().o[key] ?? key))]);
 }
 
 function isOn(f, val){
@@ -397,173 +419,156 @@ function pick(f, val){
   } else if (f.multi){
     let cur = A[f.k] || [];
     if (val==="any") cur = ["any"];
-    else {
-      cur = cur.filter(x=>x!=="any");
-      cur = cur.includes(val) ? cur.filter(x=>x!==val) : cur.concat([val]);
-    }
+    else { cur = cur.filter(x=>x!=="any");
+           cur = cur.includes(val) ? cur.filter(x=>x!==val) : cur.concat([val]); }
     A[f.k] = cur;
   } else if (f.k==="movein"){
-    A.movein = val;
-    if (val!=="date") A.movein_date = "";   // быстрый вариант отменяет дату
-    // «📅 Дата» оставляем строку открытой — снизу появится календарь
-    if (val!=="date") open = null;
+    A.movein = val; if (val!=="date") A.movein_date = "";
   } else {
     A[f.k] = val;
-    if (f.k==="deal"){          // пресеты бюджета под тип сделки
+    if (f.k==="deal"){                       // пресеты под тип сделки
       A.budget = {rent:"1200", daily:"80", buy:"120000"}[val] || "1200";
-      if (val==="daily"){ A.movein_date=""; A.movein="flex"; }   // даты берём из календаря
-      else { A.date_from=""; A.date_to=""; }                     // календарь — только посуточно
+      calView = null;
+      if (val==="daily"){ A.movein_date=""; A.movein="flex"; }
+      else { A.date_from=""; A.date_to=""; }
     }
-    // одиночный выбор закрывает строку; «другой город» открывает поле ввода
-    open = (f.k==="city" && val==="other") ? "city_other" : null;
+    if (f.k==="city" && val!=="other") A.city_other = "";
   }
-  calView = null;
+  tg?.HapticFeedback?.selectionChanged();
   render();
 }
 
-function summary(f){
-  const o = L().o;
-  if (f.text) return (A[f.k]||"").trim() || "—";
-  if (f.districts){
-    const names = A.lang==="ru" ? DISTRICTS_RU : DISTRICTS_UZ;
-    const ds = (A.districts||[]).filter(x=>x!=="any").map(i=>names[+i]);
-    if (!ds.length) return L().all;
-    return ds.length<=2 ? ds.join(", ") : ds.slice(0,2).join(", ")+" +"+(ds.length-2);
+// 14 параметров сгруппированы по смыслу в 4 раздела
+const SEC = {
+  ru:[["where","Что и где"],["home","Жильё"],["when","Сроки и кто"],["send","Куда прислать варианты"]],
+  uz:[["where","Nima va qayerda"],["home","Uy-joy"],["when","Muddat va kim"],["send","Variantlar qayerga"]],
+  en:[["where","What & where"],["home","The home"],["when","When & who"],["send","Where to send"]],
+};
+const SEC_FIELDS = {
+  where:["deal","object","city","city_other","districts"],
+  home:["rooms","budget","class","floor","furniture"],
+  when:["dates","term","movein","who","pets","parking"],
+  send:["contact"],
+};
+const ICON = {
+  where:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 0 1 16 0Z"/><circle cx="12" cy="10" r="2.6"/></svg>',
+  home:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9.5 12 3l9 6.5"/><path d="M5 9v11h14V9"/><path d="M9.5 20v-6h5v6"/></svg>',
+  when:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4.5" width="18" height="17" rx="3"/><path d="M8 2.5v4M16 2.5v4M3 10h18"/></svg>',
+  send:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/></svg>',
+};
+
+function esc(x){ return String(x).replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c])); }
+
+// живой «бриф» — параметры складываются в человеческую фразу
+function brief(){
+  const uz=A.lang==="uz", en=A.lang==="en";
+  const OBJ = uz?{flat:"kvartira",house:"hovli uy",dacha:"dala hovli",land:"yer"}
+            : en?{flat:"apartment",house:"house",dacha:"country house",land:"land plot"}
+            : {flat:"квартиру",house:"дом",dacha:"дачу",land:"участок"};
+  const segs=[];
+  let objp = '<span class="hl">'+OBJ[A.object]+'</span>';
+  if (A.object!=="land"){
+    const r=(A.rooms||[]).filter(x=>x!=="any").sort().map(x=>x==="4"?"4+":x);
+    if (r.length) objp = r.join("–")+(uz?"-xonali ":en?"-room ":"-комн. ")+objp;
   }
-  if (f.k==="rooms"){
-    const r = (A.rooms||[]).filter(x=>x!=="any").sort().map(x=>x==="4"?"4+":x);
-    return r.length ? r.join(", ") : L().any;
+  segs.push(objp);
+  let loc="";
+  if (A.city==="tashkent"){
+    const names=(uz||en)?DISTRICTS_UZ:DISTRICTS_RU;   // латиница для uz и en
+    const ds=(A.districts||[]).filter(x=>x!=="any").map(i=>names[+i]);
+    loc = ds.length ? (ds.length<=2?ds.join(", "):ds.slice(0,2).join(", ")+" +"+(ds.length-2)) : "";
+  } else if (A.city==="other"){ loc=(A.city_other||"").trim(); }
+  else { loc=(uz?{charvak:"Chorvoq",region:"Toshkent vil."}:en?{charvak:"Charvak",region:"Tashkent reg."}
+             :{charvak:"Чарвак",region:"Ташк. обл."})[A.city]||""; }
+  if (loc) segs.push(esc(loc));
+  if (A.deal==="daily" && A.date_from && A.date_to){
+    const a=fromIso(A.date_from), b=fromIso(A.date_to);
+    segs.push(a.getMonth()===b.getMonth()? a.getDate()+"–"+b.getDate()+" "+L().monS[b.getMonth()]
+             : dShort(A.date_from)+"–"+dShort(A.date_to));
   }
-  if (f.budget){
-    const b = A.budget_max || A.budget;
-    const unit = A.deal==="daily" ? L().day : A.deal==="buy" ? "" : L().mo;
-    return b ? money(b)+unit : "—";
+  const bud=A.budget_max||A.budget;
+  if (bud){
+    const unit=A.deal==="daily"?L().day:A.deal==="buy"?"":L().mo;
+    const txt = uz?(money(bud)+unit+" gacha"):en?(money(bud)+unit):("до "+money(bud)+unit);
+    segs.push('<span class="hl">'+txt+'</span>');
   }
-  if (f.floor){
-    const fp = A.floor_pref||[]; const parts = [];
-    if (fp.includes("nf")) parts.push(L().nf_s);
-    if (fp.includes("nl")) parts.push(L().nl_s);
-    const lo = String(A.floor_min||"").trim(), hi = String(A.floor_max||"").trim();
-    if (lo&&hi) parts.push(lo+"–"+hi);
-    else if (lo) parts.push("≥ "+lo);
-    else if (hi) parts.push("≤ "+hi);
-    return parts.length ? parts.join(", ") : o.fl_any;
-  }
-  if (f.cal){                         // диапазон дат: «15–18 авг · 3 ночи»
-    if (!A.date_from) return "—";
-    if (!A.date_to)   return dShort(A.date_from)+" …";
-    const a = fromIso(A.date_from), b = fromIso(A.date_to);
-    const span = a.getMonth()===b.getMonth()          // тот же месяц → «15–18 авг»
-      ? a.getDate()+"–"+b.getDate()+" "+L().monS[b.getMonth()]
-      : dShort(A.date_from)+"–"+dShort(A.date_to);
-    return span+" · "+L().nights(nights(A.date_from,A.date_to));
-  }
-  if (f.k==="movein" && A.movein==="date")   // конкретная дата заезда
-    return A.movein_date ? dShort(A.movein_date) : o.pick;
-  const opts = typeof f.o==="function" ? f.o(A) : f.o;
-  const m = (opts||[]).find(x=>x[0]===A[f.k]);
-  return m ? (f.raw ? m[1] : (o[m[1]] ?? m[1])) : "—";
+  const pre = uz?"Rano qidiryapti:":en?"Rano is looking for:":"Рано ищет:";
+  return pre+" "+segs.join(" · ");
 }
 
-function refresh(){   // лёгкое обновление без пересборки DOM — не сбивает фокус ввода
-  document.querySelectorAll(".rvv").forEach(el=>{
-    const f = FIELDS.find(x=>x.k===el.dataset.k);
-    if (f) el.textContent = summary(f);
-  });
-  preview();
+function refresh(){          // лёгкое обновление брифа и текста запроса (не сбивает фокус ввода)
+  const bl=document.getElementById("brief"); if(bl) bl.innerHTML=brief();
+  const pv=document.getElementById("preview"); if(pv) pv.textContent=letter();
+  const ph=document.getElementById("pv-hint");
+  if(ph) ph.textContent=L().pv_hint+(A.lang==="en"?" "+L().pv_hint_en:"");
+}
+
+function control(f){
+  const wrap=document.createElement("div"); wrap.className="field";
+  const lab=document.createElement("div"); lab.className="flabel";
+  lab.textContent=L().q[f.floor?"floor":f.k]; wrap.appendChild(lab);
+  if (f.text){
+    const row=document.createElement("div"); row.className="row"; row.style.marginTop="0";
+    const inp=document.createElement("input"); inp.type="text"; inp.value=A[f.k]||"";
+    inp.oninput=e=>{ A[f.k]=e.target.value; refresh(); };
+    row.appendChild(inp); wrap.appendChild(row); return wrap;
+  }
+  if (f.cal){ wrap.appendChild(buildCalendar("range")); return wrap; }
+  const box=document.createElement("div"); box.className="chips grid"+(f.cols||2);
+  const opts = f.floor?[["nf",L().o.nf],["nl",L().o.nl],["any",L().o.fl_any]]:fieldOptions(f);
+  for (const [val,text] of opts){
+    const b=document.createElement("div"); b.className="chip"+(isOn(f,val)?" on":"");
+    b.textContent=text; b.onclick=()=>pick(f,val); box.appendChild(b);
+  }
+  wrap.appendChild(box);
+  if (f.budget){
+    const row=document.createElement("div"); row.className="row";
+    const inp=document.createElement("input"); inp.type="number"; inp.inputMode="numeric";
+    inp.placeholder=L().exact; inp.value=A.budget_max||"";
+    inp.oninput=e=>{ A.budget_max=e.target.value; refresh(); };
+    row.appendChild(inp); wrap.appendChild(row);
+  }
+  if (f.floor){
+    const row=document.createElement("div"); row.className="row";
+    for (const [kk,ph] of [["floor_min",L().from],["floor_max",L().to]]){
+      const inp=document.createElement("input"); inp.type="number"; inp.inputMode="numeric";
+      inp.placeholder=ph; inp.value=A[kk]||""; inp.oninput=e=>{ A[kk]=e.target.value; refresh(); };
+      row.appendChild(inp);
+    }
+    wrap.appendChild(row);
+  }
+  if (f.calopt && A.movein==="date") wrap.appendChild(buildCalendar("single"));
+  return wrap;
 }
 
 function render(){
-  const seg = document.getElementById("langseg");
-  seg.innerHTML = "";
-  for (const [code,label] of [["ru","RU"],["uz","UZ"],["en","EN"]]){
-    const b = document.createElement("div");
-    b.className = A.lang===code ? "on" : "";
-    b.textContent = label;
-    b.onclick = ()=>{ A.lang=code; tg?.HapticFeedback?.selectionChanged(); render(); };
-    seg.appendChild(b);
+  document.getElementById("mono").textContent = A.lang==="ru" ? "Р" : "R";
+  document.getElementById("hname").textContent = A.lang==="ru" ? "Рано" : "Rano";
+  document.getElementById("hsub").textContent = L().title;
+  const seg=document.getElementById("seg"); seg.innerHTML="";
+  for (const [c,l] of [["ru","RU"],["uz","UZ"],["en","EN"]]){
+    const d=document.createElement("div"); d.className=A.lang===c?"on":""; d.textContent=l;
+    d.onclick=()=>{ A.lang=c; tg?.HapticFeedback?.selectionChanged(); render(); };
+    seg.appendChild(d);
   }
-  document.getElementById("title").textContent = L().title;
-  document.getElementById("lead").textContent = L().lead;
-  document.getElementById("pv-title").textContent = L().pv;
-  document.getElementById("fallback").textContent = L().submit;
+  document.getElementById("pv-title").textContent=L().pv;
+  const fab=document.getElementById("fab"); if(fab) fab.textContent=L().submit;
   tg?.MainButton?.setText(L().submit);
 
-  const root = document.getElementById("form");
-  root.innerHTML = "";
-  for (const f of FIELDS){
-    if (f.when && !f.when(A)) continue;
-    const key = f.floor ? "floor" : f.k;
-    const r = document.createElement("div");
-    r.className = "rowi" + (open===f.k ? " open" : "");
-    const rl = document.createElement("span");
-    rl.className = "rl"; rl.textContent = L().q[key];
-    const rv = document.createElement("span"); rv.className = "rv";
-    const rvv = document.createElement("span");
-    rvv.className = "rvv"; rvv.dataset.k = f.k; rvv.textContent = summary(f);
-    const ch = document.createElement("span"); ch.className = "chev"; ch.textContent = "›";
-    rv.append(rvv, ch); r.append(rl, rv);
-    r.onclick = ()=>{ open = open===f.k ? null : f.k; calView = null;
-                      tg?.HapticFeedback?.selectionChanged(); render(); };
-    root.appendChild(r);
-    if (open !== f.k) continue;
-
-    const ex = document.createElement("div");
-    ex.className = "exp";
-    ex.onclick = ev=>ev.stopPropagation();
-    if (f.text){
-      const row = document.createElement("div"); row.className = "row";
-      const inp = document.createElement("input");
-      inp.type = "text"; inp.value = A[f.k]||"";
-      inp.oninput = e=>{ A[f.k]=e.target.value; refresh(); };
-      row.appendChild(inp); ex.appendChild(row);
-      root.appendChild(ex);
-      setTimeout(()=>inp.focus(), 50);
-      continue;
-    }
-    if (f.cal){                       // посуточно: сразу календарь-диапазон
-      ex.appendChild(buildCalendar("range"));
-      root.appendChild(ex);
-      continue;
-    }
-    const box = document.createElement("div");
-    box.className = "chips grid" + (f.cols || 2);
-    const opts = f.floor
-      ? [["nf",L().o.nf],["nl",L().o.nl],["any",L().o.fl_any]]
-      : fieldOptions(f);
-    for (const [val,text] of opts){
-      const b = document.createElement("div");
-      b.className = "chip" + (isOn(f,val) ? " on" : "");
-      b.textContent = text;
-      b.onclick = ev=>{ ev.stopPropagation(); pick(f,val);
-                        tg?.HapticFeedback?.selectionChanged(); };
-      box.appendChild(b);
-    }
-    ex.appendChild(box);
-    if (f.budget){
-      const row = document.createElement("div"); row.className = "row";
-      const inp = document.createElement("input");
-      inp.type = "number"; inp.inputMode = "numeric";
-      inp.placeholder = L().exact; inp.value = A.budget_max||"";
-      inp.oninput = e=>{ A.budget_max=e.target.value; refresh(); };
-      row.appendChild(inp); ex.appendChild(row);
-    }
-    if (f.floor){
-      const row = document.createElement("div"); row.className = "row";
-      for (const [kk, ph] of [["floor_min",L().from],["floor_max",L().to]]){
-        const inp = document.createElement("input");
-        inp.type = "number"; inp.inputMode = "numeric";
-        inp.placeholder = ph; inp.value = A[kk]||"";
-        inp.oninput = e=>{ A[kk]=e.target.value; refresh(); };
-        row.appendChild(inp);
-      }
-      ex.appendChild(row);
-    }
-    if (f.calopt && A.movein==="date")   // «📅 Дата» → одиночный календарь под чипами
-      ex.appendChild(buildCalendar("single"));
-    root.appendChild(ex);
+  const wrap=document.getElementById("wrap"); wrap.innerHTML="";
+  for (const [key,title] of (SEC[A.lang]||SEC.ru)){
+    const fields = SEC_FIELDS[key].map(k=>FIELDS.find(f=>f.k===k))
+                   .filter(f=>f && (!f.when || f.when(A)));
+    if (!fields.length) continue;
+    const sec=document.createElement("div"); sec.className="sec";
+    const hd=document.createElement("div"); hd.className="sechd";
+    const ic=document.createElement("span"); ic.className="ic"; ic.innerHTML=ICON[key];
+    const b=document.createElement("b"); b.textContent=title;
+    hd.append(ic,b); sec.appendChild(hd);
+    for (const f of fields) sec.appendChild(control(f));
+    wrap.appendChild(sec);
   }
-  preview();
+  refresh();
 }
 
 // -------------------------------------------- предпросмотр письма --------
@@ -676,15 +681,11 @@ function letter(){
   return p.join("\n");
 }
 
-function preview(){
-  document.getElementById("preview").textContent = letter();
-  document.getElementById("pv-hint").textContent =
-    L().pv_hint + (A.lang==="en" ? " " + L().pv_hint_en : "");
-  document.getElementById("pv-box").style.display = pvOpen ? "" : "none";
-  document.getElementById("pv-row").classList.toggle("open", pvOpen);
-}
-document.getElementById("pv-row").onclick = ()=>{
-  pvOpen = !pvOpen; tg?.HapticFeedback?.selectionChanged(); preview();
+document.getElementById("pvhd").onclick = ()=>{
+  pvOpen = !pvOpen;
+  document.getElementById("pvbody").style.display = pvOpen ? "" : "none";
+  document.getElementById("pv").classList.toggle("open", pvOpen);
+  tg?.HapticFeedback?.selectionChanged(); refresh();
 };
 
 function submit(){
@@ -697,14 +698,20 @@ function submit(){
 }
 
 if (tg){
-  tg.ready();
-  tg.expand();
-  tg.MainButton.show();
-  tg.MainButton.onClick(submit);
+  tg.ready(); tg.expand();
+  const applyScheme = ()=>{
+    document.body.classList.toggle("dark", tg.colorScheme==="dark");
+    try{
+      const bg = getComputedStyle(document.body).backgroundColor;
+      tg.setBackgroundColor(bg); tg.setHeaderColor(bg);
+    }catch(e){}
+  };
+  applyScheme();
+  try{ tg.MainButton.setParams({text:L().submit, color:"#E85A34", text_color:"#ffffff"}); }catch(e){}
+  tg.MainButton.show(); tg.MainButton.onClick(submit);
+  if (tg.onEvent) tg.onEvent("themeChanged", ()=>{ applyScheme(); render(); });
 } else {
-  const b = document.getElementById("fallback");
-  b.style.display = "block";
-  b.onclick = submit;
+  const fab=document.getElementById("fab"); fab.style.display="block"; fab.onclick=submit;
 }
 render();
 </script>
