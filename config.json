@@ -75,5 +75,8 @@
     }
   },
   "bot_username": "rano_smart_bot",
-  "assistant_name": "Ra'no"
+  "assistant_name": "Ra'no",
+  "sale_search": {
+    "enabled": true
+  }
 }

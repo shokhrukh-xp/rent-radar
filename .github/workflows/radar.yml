@@ -46,7 +46,7 @@ jobs:
           git config user.email "actions@users.noreply.github.com"
           for i in 1 2 3 4 5; do
             python rent_radar.py --minutes 10 || true
-            git add radar.db || true
+            git add radar.db sale.db || true
             git commit -q -m "state $(date -u +'%Y-%m-%d %H:%M')" || true
             git fetch -q origin main || true
             # -X theirs = при конфликте побеждает свежее состояние радара

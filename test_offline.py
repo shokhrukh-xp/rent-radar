@@ -317,8 +317,10 @@ assert "💰 $450" in msg and "сум" not in msg, msg
 assert "📍 Яккасарай" in msg
 
 # фильтр цены наконец работает: $1650 > лимита $1000
-assert rr.passes_filters(dict(a), cfg) is True
-assert rr.passes_filters(dict(b), cfg) is False, "объявление за $1650 обязано отсеиваться"
+# (возраст не проверяем: даты в фикстуре фиксированные и со временем «стареют»)
+cfg_any_age = dict(cfg, notify_max_age_days=0)
+assert rr.passes_filters(dict(a), cfg_any_age) is True
+assert rr.passes_filters(dict(b), cfg_any_age) is False, "объявление за $1650 обязано отсеиваться"
 
 # фильтр района теперь реально фильтрует
 only_yakka = {**rr.default_settings(), "districts": ["Яккасарай"]}
@@ -1028,3 +1030,145 @@ with mock.patch.object(rr, "tg_call", fake_getme):
 assert c2["bot_username"] == "rano_smart_bot"
 adb.unlink(missing_ok=True)
 print("OK — переименование в Ra'no, голос ассистента, авто-подхват username")
+
+# ------------------------------------------- покупка от собственника ----
+from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+
+ss = rr.deep_merge(rr.DEFAULT_CONFIG, {"sale_search": {"enabled": True}})
+scfg_ = ss["sale_search"]
+assert scfg_["max_price_usd"] == 45000 and scfg_["rooms"] == [1, 2]
+assert scfg_["notify_max_age_days"] == 45
+assert set(scfg_["districts"]) == {"Яккасарай", "Мирабад", "Шайхантахур", "Юнусабад"}
+
+_now = _dt.now(_tz.utc)
+def _iso(days):
+    return (_now - _td(days=days)).isoformat()
+
+def uy(id_, user, district, room=1, price=40000, cur="usd", days=1, desc="Продаётся квартира"):
+    return {"id": id_, "userId": user, "districtId": district, "room": room, "price": price,
+            "priceCurrency": cur, "square": 30, "floor": 3, "floorTotal": 5,
+            "isNewBuilding": False, "repair": "evro", "createdAt": _iso(days),
+            "description": desc, "address": "ул. Тестовая", "media": []}
+
+UY_ADS = {1: 1, 2: 134, 3: 1, 4: 2, 5: 1, 6: 1, 7: 1, 8: 1}   # userId → объявлений
+UY_BY_DISTRICT = {
+    205: [uy(101, 1, 205),                                   # годится
+          uy(102, 2, 205),                                   # агентство: 134 объявления
+          uy(103, 3, 205, price=52000),                      # дороже бюджета
+          uy(104, 4, 205, price=500_000_000, cur="uzs")],    # ~$42 000 в сумах — годится
+    204: [uy(201, 5, 204, desc="Агентство недвижимости «Дом» предлагает"),  # агентство по тексту
+          uy(202, 6, 204, desc="Продаю сам. Риелторам не беспокоить"),      # хозяин, несмотря на «риелтор»
+          uy(203, 7, 204, days=60)],                         # старше 45 дней
+    198: [uy(301, 8, 198, room=3)],                          # 3 комнаты (если API не отфильтровал)
+    197: [uy(101, 1, 205)],                                  # дубль id из другого запроса
+}
+calls = []
+
+class FakeUy:
+    def __init__(self, data):
+        self.status_code = 200
+        self._d = data
+    def json(self):
+        return self._d
+    def raise_for_status(self):
+        pass
+
+def fake_uy_get(url, params=None, headers=None, timeout=None):
+    calls.append(dict(params or {}))
+    if "user__eq" in (params or {}):
+        uid = int(params["user__eq"])
+        return FakeUy({"total": UY_ADS[uid], "results": [{"userId": uid}]})
+    assert params["operationType__eq"] == "sale" and params["room__in"] == "1,2"
+    assert params["priceCurrency__eq"] == "usd" and params["price__lte"] == 45000
+    return FakeUy({"total": 1, "results": UY_BY_DISTRICT.get(params["district__eq"], [])})
+
+with mock.patch.object(rr.requests, "get", fake_uy_get), mock.patch.object(rr.time, "sleep"):
+    sl = rr.fetch_uybor_sale(scfg_, ss)
+assert sorted(c["district__eq"] for c in calls) == [197, 198, 204, 205], calls
+assert len(sl) == 8 and len({x["key"] for x in sl}) == 8      # дубль id 101 схлопнут
+assert all(x["key"].startswith("sale:uybor:") for x in sl)
+assert sl[0]["source"] == "Uybor · продажа" and sl[0]["repair"] == "evro"
+
+sdb = Path("/tmp/test_sale.db"); sdb.unlink(missing_ok=True)
+sstore = rr.Store(sdb)
+sent_msgs = []
+def fake_sale_tg(cfg_, method, payload, timeout=20, quiet=False):
+    sent_msgs.append((method, payload.get("text") or payload.get("media") or ""))
+    return {"ok": True, "result": {}}
+
+ss_tg = dict(ss, telegram_bot_token="T", telegram_chat_id="1")
+by_id = {x["key"].rsplit(":", 1)[1]: x for x in sl}
+with mock.patch.object(rr.requests, "get", fake_uy_get):
+    reasons = {k: rr.sale_reject(dict(v), scfg_, sstore, ss_tg) for k, v in by_id.items()}
+assert reasons["101"] == ("", False), reasons["101"]
+assert "агентство или маклер" in reasons["102"][0]
+assert "дороже бюджета" in reasons["103"][0]
+assert reasons["104"] == ("", False), reasons["104"]            # сумы переведены в доллары
+assert "текст агентства" in reasons["201"][0]
+assert reasons["202"] == ("", False), reasons["202"]            # «риелторам не беспокоить» = хозяин
+assert "дн." in reasons["203"][0]
+assert reasons["301"][0] == "3-комн"
+
+# продавца проверить не удалось → не отсеиваем навсегда, пробуем позже
+def broken_get(url, params=None, headers=None, timeout=None):
+    raise rr.requests.ConnectionError("нет сети")
+fresh = dict(by_id["101"], seller_id="uybor:999")
+with mock.patch.object(rr.requests, "get", broken_get):
+    assert rr.sale_reject(fresh, scfg_, sstore, ss_tg) == ("не удалось проверить продавца", True)
+
+# карточка: продажа, цена за м², вторичка и ремонт, ссылка на Uybor
+ok101 = dict(by_id["101"]); rr.sale_reject(ok101, scfg_, sstore, ss_tg)
+card = rr.format_sale_message(ok101, ss_tg)
+assert "Продажа от собственника" in card and "Яккасарай" in card
+assert "💰 $40 000" in card and "~$1 333/м²" in card, card
+assert "вторичка · евроремонт" in card and "uybor.uz/listings/101" in card
+
+# полный проход: сначала одно вступление, потом три подходящих варианта
+sdb.unlink(missing_ok=True); sstore = rr.Store(sdb); sent_msgs.clear()
+with mock.patch.object(rr.requests, "get", fake_uy_get), mock.patch.object(rr, "tg_call", fake_sale_tg), \
+        mock.patch.object(rr.time, "sleep"):
+    n = rr.run_sale_search(ss_tg, sstore, {"photos": False})
+assert n == 3, (n, sent_msgs)
+assert "Поиск квартиры для покупки включён" in sent_msgs[0][1]
+assert "нашлось подходящих: 3" in sent_msgs[0][1] and "45 дней" in sent_msgs[0][1]
+assert sum("Продажа от собственника" in m[1] for m in sent_msgs) == 3
+# повторный проход ничего не дублирует и вступление не повторяет
+sent_msgs.clear()
+with mock.patch.object(rr.requests, "get", fake_uy_get), mock.patch.object(rr, "tg_call", fake_sale_tg), \
+        mock.patch.object(rr.time, "sleep"):
+    assert rr.run_sale_search(ss_tg, sstore, {"photos": False}) == 0
+assert sent_msgs == []
+
+# Telegram недоступен (например, токен отозван): ничего не теряется
+sdb.unlink(missing_ok=True); sstore = rr.Store(sdb)
+with mock.patch.object(rr.requests, "get", fake_uy_get), \
+        mock.patch.object(rr, "tg_call", lambda *a, **k: None), mock.patch.object(rr.time, "sleep"):
+    assert rr.run_sale_search(ss_tg, sstore, {"photos": False}) == 0
+assert not sstore.get_kv("sale_intro_sent", False)
+assert not sstore.known("sale:uybor:101")          # придёт, когда Telegram оживёт
+sent_msgs.clear()
+with mock.patch.object(rr.requests, "get", fake_uy_get), mock.patch.object(rr, "tg_call", fake_sale_tg), \
+        mock.patch.object(rr.time, "sleep"):
+    assert rr.run_sale_search(ss_tg, sstore, {"photos": False}) == 3
+
+# пауза: ничего не шлём и не помечаем
+sdb.unlink(missing_ok=True); sstore = rr.Store(sdb); sent_msgs.clear()
+with mock.patch.object(rr.requests, "get", fake_uy_get), mock.patch.object(rr, "tg_call", fake_sale_tg), \
+        mock.patch.object(rr.time, "sleep"):
+    assert rr.run_sale_search(ss_tg, sstore, {"paused": True}) == 0
+assert sent_msgs == [] and not sstore.known("sale:uybor:101")
+
+# /sale показывает критерии и присланные варианты
+sdb.unlink(missing_ok=True); sstore = rr.Store(sdb)
+with mock.patch.object(rr.requests, "get", fake_uy_get), mock.patch.object(rr, "tg_call", fake_sale_tg), \
+        mock.patch.object(rr.time, "sleep"):
+    rr.run_sale_search(ss_tg, sstore, {"photos": False})
+with mock.patch.object(rr, "SALE_DB_PATH", sdb):
+    st = rr.sale_status_text(ss_tg)
+    reply, view = rr.handle_command("/sale", rr.default_settings(), store, ss_tg)
+assert reply == st and "прислано: 3" in st and "1-комн, 30 м², $40 000" in st, st
+assert "Поиск квартиры для покупки выключен" in rr.sale_status_text(cfg)
+# аренда не затронута: Uybor-аренда по-прежнему парсится старым путём
+assert rr.uybor_listing(uy(1, 1, 205))["key"] == "uybor:1"
+sdb.unlink(missing_ok=True)
+print("OK — покупка от собственника: фильтры, агентства, вступление, повторы, /sale")

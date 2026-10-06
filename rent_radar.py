@@ -32,6 +32,9 @@ import concierge
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "config.json"
 DB_PATH = BASE_DIR / "radar.db"
+# Поиск квартиры для покупки — отдельная база: цены продажи не должны
+# попадать в арендную аналитику и дедупликацию.
+SALE_DB_PATH = BASE_DIR / "sale.db"
 
 TASHKENT_TZ = timezone(timedelta(hours=5))
 HEADERS = {
@@ -70,6 +73,24 @@ DEFAULT_CONFIG = {
     "broker_min_ads": 3,         # от скольких объявлений считаем продавца маклером
     "max_owner_ads": 2,          # у настоящего хозяина 1–2 объявления, не больше
     "seller_cache_days": 3,      # как часто перепроверять число объявлений продавца
+    # Покупка квартиры от собственника (личный поиск владельца бота).
+    # Источник — Uybor: OLX и Birbir отдают 403 на автоматические запросы.
+    "sale_search": {
+        "enabled": False,
+        "max_price_usd": 45000,
+        "min_price_usd": 5000,       # дешевле — опечатка или цена за м²
+        "rooms": [1, 2],
+        "districts": ["Яккасарай", "Мирабад", "Шайхантахур", "Юнусабад"],
+        # Квартира в продаже неделями остаётся актуальной (на Uybor объявление
+        # живёт 45 дней), поэтому окно шире, чем у аренды.
+        "notify_max_age_days": 45,
+        "max_owner_ads": 2,          # у собственника 1–2 объявления, у агентства — десятки
+        "first_run_limit": 15,       # сколько текущих вариантов прислать при включении
+        "uybor": {
+            "enabled": True, "interval_seconds": 600,
+            "region_id": 13, "category_id": 7, "limit": 100,   # 100 — максимум API
+        },
+    },
     "dedup": {
         "phone_days": 14,
         "fuzzy_days": 10,
@@ -406,6 +427,59 @@ def fetch_olx(scfg: dict, cfg: dict) -> list:
     return out
 
 
+UYBOR_API = "https://api.uybor.uz/api/v1/listings"
+
+
+def uybor_listing(o: dict) -> dict:
+    """Одно объявление Uybor → унифицированный dict (общий для аренды и продажи)."""
+    desc = o.get("description") or ""
+    price_value, price_currency = o.get("price"), canon_currency(o.get("priceCurrency"))
+    rooms = as_int(o.get("room")) or extract_rooms(desc)
+    price_value = as_int(price_value) if price_value is not None else None
+    text = desc[:900]
+    title = desc.strip().split("\n")[0][:80] or "Объявление Uybor"
+    photo_urls = []
+    for m_item in (o.get("media") or [])[:6]:
+        u = None
+        if isinstance(m_item, str):
+            u = m_item
+        elif isinstance(m_item, dict):
+            for k in ("url", "link", "file", "path", "name", "filename"):
+                v = m_item.get(k)
+                if isinstance(v, str) and v:
+                    u = v
+                    break
+        if not u:
+            continue
+        if not u.startswith("http"):
+            u = f"https://api.uybor.uz/api/v1/media/n/{u.lstrip('/')}"
+        photo_urls.append(u)
+    return {
+        "photo_urls": photo_urls,
+        "lat": o.get("lat"), "lon": o.get("lng"),
+        "area": sane(as_int(o.get("square")), 10, 500),
+        "floor": sane(as_int(o.get("floor")), 1, 60),
+        "floors_total": sane(as_int(o.get("floorTotal")), 1, 60),
+        "house_type": o.get("foundation"),
+        "key": f'uybor:{o.get("id")}',
+        "source": "Uybor",
+        "url": f'https://uybor.uz/listings/{o.get("id")}',
+        "title": title,
+        "text": text,
+        "price_value": price_value,
+        "price_currency": price_currency,
+        "rooms": rooms,
+        "district": (UYBOR_DISTRICT_IDS.get(o.get("districtId"))
+                     or canon_district(text, o.get("address"))),
+        "district_raw": o.get("address") or None,
+        "phones": extract_phones(text),
+        "created_at": o.get("createdAt"),
+        "seller": "",
+        "seller_id": f'uybor:{o.get("userId")}',
+        "is_business": None,
+    }
+
+
 def fetch_uybor(scfg: dict, cfg: dict) -> list:
     params = {
         "limit": 30,
@@ -414,57 +488,48 @@ def fetch_uybor(scfg: dict, cfg: dict) -> list:
         "region__eq": scfg["region_id"],
         "sort": "-createdAt",
     }
-    r = requests.get("https://api.uybor.uz/api/v1/listings", params=params,
-                     headers=HEADERS, timeout=20)
+    r = requests.get(UYBOR_API, params=params, headers=HEADERS, timeout=20)
     r.raise_for_status()
-    out = []
-    for o in r.json().get("results", []):
-        desc = o.get("description") or ""
-        price_value, price_currency = o.get("price"), canon_currency(o.get("priceCurrency"))
-        rooms = as_int(o.get("room")) or extract_rooms(desc)
-        price_value = as_int(price_value) if price_value is not None else None
-        text = desc[:900]
-        title = desc.strip().split("\n")[0][:80] or "Объявление Uybor"
-        photo_urls = []
-        for m_item in (o.get("media") or [])[:6]:
-            u = None
-            if isinstance(m_item, str):
-                u = m_item
-            elif isinstance(m_item, dict):
-                for k in ("url", "link", "file", "path", "name", "filename"):
-                    v = m_item.get(k)
-                    if isinstance(v, str) and v:
-                        u = v
-                        break
-            if not u:
+    return [uybor_listing(o) for o in r.json().get("results", [])]
+
+
+def fetch_uybor_sale(ss: dict, cfg: dict) -> list:
+    """Продажа квартир на Uybor: по запросу на каждый нужный район,
+    сразу с фильтром по комнатам (фильтр района на стороне API — district__eq)."""
+    u = ss.get("uybor") or {}
+    district_ids = [i for i, name in UYBOR_DISTRICT_IDS.items()
+                    if name in (ss.get("districts") or [])]
+    out, seen = [], set()
+    for did in district_ids:
+        params = {
+            "limit": u.get("limit", 50),
+            "operationType__eq": "sale",
+            "category__eq": u.get("category_id", 7),
+            "region__eq": u.get("region_id", 13),
+            "district__eq": did,
+            "sort": "-createdAt",
+        }
+        if ss.get("rooms"):
+            params["room__in"] = ",".join(str(r) for r in ss["rooms"])
+        if ss.get("max_price_usd"):
+            # У Uybor priceCurrency__eq — это валюта порога цены, а не фильтр по
+            # валюте объявления: price__lte сравнивается с ценой, приведённой к ней,
+            # так что объявления в сумах тоже попадают. Без валюты price__lte не работает.
+            params["priceCurrency__eq"] = "usd"
+            params["price__lte"] = int(ss["max_price_usd"])
+        r = requests.get(UYBOR_API, params=params, headers=HEADERS, timeout=20)
+        r.raise_for_status()
+        for o in r.json().get("results", []):
+            l = uybor_listing(o)
+            if l["key"] in seen:
                 continue
-            if not u.startswith("http"):
-                u = f"https://api.uybor.uz/api/v1/media/n/{u.lstrip('/')}"
-            photo_urls.append(u)
-        out.append({
-            "photo_urls": photo_urls,
-            "lat": o.get("lat"), "lon": o.get("lng"),
-            "area": sane(as_int(o.get("square")), 10, 500),
-            "floor": sane(as_int(o.get("floor")), 1, 60),
-            "floors_total": sane(as_int(o.get("floorTotal")), 1, 60),
-            "house_type": o.get("foundation"),
-            "key": f'uybor:{o.get("id")}',
-            "source": "Uybor",
-            "url": f'https://uybor.uz/listings/{o.get("id")}',
-            "title": title,
-            "text": text,
-            "price_value": price_value,
-            "price_currency": price_currency,
-            "rooms": rooms,
-            "district": (UYBOR_DISTRICT_IDS.get(o.get("districtId"))
-                         or canon_district(text, o.get("address"))),
-            "district_raw": o.get("address") or None,
-            "phones": extract_phones(text),
-            "created_at": o.get("createdAt"),
-            "seller": "",
-            "seller_id": f'uybor:{o.get("userId")}',
-            "is_business": None,
-        })
+            seen.add(l["key"])
+            l["key"] = "sale:" + l["key"]
+            l["source"] = "Uybor · продажа"
+            l["new_building"] = bool(o.get("isNewBuilding"))
+            l["repair"] = o.get("repair")
+            out.append(l)
+        time.sleep(0.5)
     return out
 
 
@@ -1017,9 +1082,9 @@ def send_photo_upload(cfg, photo_url: str, caption: str) -> bool:
         return False
 
 
-def send_listing(cfg, settings: dict, l: dict, likely_makler: bool) -> bool:
+def send_listing(cfg, settings: dict, l: dict, likely_makler: bool, text: str = None) -> bool:
     """Уведомление об объявлении: альбом с фото, если они есть и включены."""
-    text = format_message(l, cfg, likely_makler)
+    text = text or format_message(l, cfg, likely_makler)
     photos = (l.get("photo_urls") or []) if settings.get("photos", True) else []
     if photos:
         media = [{"type": "photo", "media": u} for u in photos[:4]]
@@ -1069,6 +1134,7 @@ HELP_TEXT = """🏠 <b>Ra'no</b> — ваш ассистент по поиску
 /prices — реальные цены по данным маклеров
 /brokers — база маклеров и рассылка запроса в один тап
 /owner — только хозяева (без маклеров)
+/sale — поиск квартиры для покупки (от собственника)
 /segment — класс жилья: любой ↔ новый ЖК с ремонтом
 /work — адрес работы (считать расстояние)
 /photos — фото вкл/выкл
@@ -1267,6 +1333,8 @@ def handle_command(text: str, settings: dict, store, cfg: dict):
         return "", "M"
     if cmd == "/status":
         return status_text(cfg, settings, store), None
+    if cmd in ("/sale", "/buy", "/kupit", "/покупка"):
+        return sale_status_text(cfg), None
     if cmd in ("/owner", "/hozyain"):
         if arg in OFF_WORDS or arg in RESET_WORDS:
             settings["owner_only"] = False
@@ -1828,6 +1896,255 @@ def passes_user_filters(l: dict, settings: dict) -> bool:
     return True
 
 
+# ------------------------------------------------ покупка от собственника ----
+# Личный поиск владельца бота: квартира для покупки, только от собственников.
+# Живёт отдельно от арендного радара (своя база sale.db, свой формат карточки),
+# чтобы цены продажи не смешивались с арендной аналитикой.
+
+SALE_AGENCY_WORDS = [
+    "агентство недвижимости", "агентства недвижимости", "риелтор", "риэлтор",
+    "realtor", "rieltor", "услуги агентства", "наши услуги", "agentlik",
+]
+# Фразы собственника, которые перевешивают слова-признаки агентства
+# («риелторам не беспокоить» — это как раз хозяин).
+SALE_OWNER_WORDS = [
+    "риелторам не", "риэлторам не", "без риелтор", "без риэлтор", "маклерам не",
+    "maklerlar kerak emas", "маклерлар керак эмас", "агентствам не",
+]
+SALE_NOT_FLAT_WORDS = [
+    "продается комната", "продаётся комната", "продам комнату",
+    "комната в общежитии", "доля в квартире", "долю в квартире",
+]
+# значения Uybor (собраны по живым объявлениям); неизвестное показываем как есть
+REPAIR_RU = {
+    "evro": "евроремонт", "sredniy": "средний ремонт", "custom": "авторский проект",
+    "chernovaya": "черновая отделка", "kapital": "требует ремонта",
+}
+FOUNDATION_RU = {
+    "kirpich": "кирпич", "monolit": "монолит", "panel": "панель", "blok": "блок",
+    "other": "",
+}
+
+
+def uybor_user_ads(uid: str, store, cfg) -> int:
+    """Сколько активных объявлений у пользователя Uybor во всех разделах.
+    У собственника 1–2, у агентства — десятки и сотни. -1 = узнать не удалось."""
+    if not uid or uid == "None":
+        return -1
+    sid = f"uybor:{uid}"
+    cached = store.seller_ads_cached(sid, cfg.get("seller_cache_days", 3))
+    if cached is not None:
+        return cached
+    try:
+        r = requests.get(UYBOR_API, params={"limit": 1, "user__eq": uid},
+                         headers=HEADERS, timeout=20)
+        if r.status_code != 200:
+            return -1
+        data = r.json() or {}
+        res = data.get("results") or []
+        # если API перестанет понимать user__eq, вернётся весь сайт — не верим
+        if res and str(res[0].get("userId")) != str(uid):
+            log.warning("[продажа] Uybor не отфильтровал по продавцу %s", uid)
+            return -1
+        cnt = int(data.get("total", -1))
+    except (requests.RequestException, ValueError, TypeError) as e:
+        log.info("[продажа] не удалось узнать число объявлений %s: %s", sid, e)
+        return -1
+    if cnt >= 0:
+        store.seller_ads_put(sid, cnt)
+    return cnt
+
+
+def sale_reject(l: dict, ss: dict, store, cfg) -> tuple:
+    """('', False) — подходит; (причина, False) — отсеять навсегда;
+    (причина, True) — не удалось проверить, попробовать в следующий проход."""
+    l["price_usd"] = to_usd(l.get("price_value"), l.get("price_currency"), cfg)
+    p = l["price_usd"]
+    if p is None:
+        return "цена не указана", False
+    if p > ss.get("max_price_usd", 0):
+        return f"дороже бюджета (${p:,.0f})", False
+    if p < (ss.get("min_price_usd") or 0):
+        return f"подозрительно низкая цена (${p:,.0f})", False
+    rooms = as_int(l.get("rooms"))
+    if ss.get("rooms") and rooms is not None and rooms not in ss["rooms"]:
+        return f"{rooms}-комн", False
+    if ss.get("districts") and l.get("district") not in ss["districts"]:
+        return f"район {l.get('district') or 'не указан'}", False
+    a = age_days(l.get("created_at") or "")
+    if a is not None and a > ss.get("notify_max_age_days", 14):
+        return f"объявлению {a:.0f} дн.", False
+
+    low = f"{l.get('title', '')} {l.get('text', '')}".lower()
+    hit = next((w for w in SALE_NOT_FLAT_WORDS if w in low), "")
+    if hit:
+        return f"продаётся не квартира («{hit}»)", False
+    says_owner = bool(hot_flags(l.get("text") or "", cfg)) \
+        or any(w in low for w in SALE_OWNER_WORDS)
+    if not says_owner:
+        hit = next((w for w in SALE_AGENCY_WORDS if w in low), "")
+        if hit:
+            return f"текст агентства («{hit}»)", False
+
+    limit = ss.get("max_owner_ads", 2)
+    spread = phone_spread(l, store)
+    if spread > limit:
+        return f"телефон встречается в {spread} объявлениях", False
+    uid = (l.get("seller_id") or "").partition(":")[2]
+    ads = uybor_user_ads(uid, store, cfg)
+    l["seller_ads"] = ads
+    if ads < 0:
+        return "не удалось проверить продавца", True
+    if ads > limit:
+        return f"у продавца {ads} объявлений — агентство или маклер", False
+    return "", False
+
+
+def _money(v: float) -> str:
+    return f"{v:,.0f}".replace(",", " ")
+
+
+def format_sale_message(l: dict, cfg: dict) -> str:
+    district = l.get("district") or "район не указан"
+    lines = [f"🏷 <b>Продажа от собственника</b> · {escape_html(district)}"]
+    spec = []
+    if l.get("rooms"):
+        spec.append(f'{l["rooms"]}-комн')
+    if l.get("area"):
+        spec.append(f'{l["area"]} м²')
+    if l.get("floor"):
+        spec.append(f'этаж {l["floor"]}'
+                    + (f'/{l["floors_total"]}' if l.get("floors_total") else ""))
+    if spec:
+        lines.append("🛏 " + " · ".join(spec))
+    p = l.get("price_usd")
+    if p:
+        price = f"💰 ${_money(p)}"
+        if (l.get("price_currency") or "").upper() == "UZS":
+            price = f'💰 {_money(l["price_value"])} сум (~${_money(p)})'
+        if l.get("area"):
+            price += f' · ~${_money(p / l["area"])}/м²'
+        lines.append(price)
+    bits = ["новостройка" if l.get("new_building") else "вторичка",
+            FOUNDATION_RU.get(l.get("house_type") or "", l.get("house_type") or ""),
+            REPAIR_RU.get(l.get("repair") or "", l.get("repair") or "")]
+    lines.append("🏗 " + " · ".join(escape_html(b) for b in bits if b))
+    if l.get("district_raw"):
+        lines.append(f'📍 {escape_html(l["district_raw"])}')
+    text = " ".join((l.get("text") or "").split())
+    if text:
+        lines.append("\n" + escape_html(text[:220]) + ("…" if len(text) > 220 else ""))
+    ev = []
+    if l.get("seller_ads") is not None and l["seller_ads"] >= 0:
+        ev.append(f'объявлений у продавца на Uybor: {l["seller_ads"]}')
+    flags = hot_flags(l.get("text") or "", cfg)
+    if flags:
+        ev.append(f"«{flags[0]}»")
+    if ev:
+        lines.append("🔑 " + " · ".join(ev))
+    if l.get("phones"):
+        lines.append("📞 " + ", ".join(fmt_phone(x) for x in l["phones"][:2]))
+    dt = parse_iso(l.get("created_at") or "")
+    if dt:
+        lines.append(f'🕐 {dt.astimezone(TASHKENT_TZ).strftime("%d.%m %H:%M")}')
+    lines.append(f'\n<a href="{l["url"]}">Открыть на Uybor</a>')
+    return "\n".join(lines)
+
+
+def sale_criteria_text(ss: dict) -> str:
+    rooms = "–".join(str(r) for r in (ss.get("rooms") or [])) or "любые"
+    districts = ", ".join(ss.get("districts") or []) or "любые районы"
+    return (f'{rooms} комн · до ${_money(ss.get("max_price_usd", 0))} · {districts}\n'
+            f'Только собственники: у продавца не больше {ss.get("max_owner_ads", 2)} '
+            f'объявлений и нет признаков агентства. Источник — Uybor.')
+
+
+def run_sale_search(cfg: dict, store, settings: dict) -> int:
+    """Один проход поиска квартиры для покупки. Возвращает число отправленных."""
+    ss = cfg.get("sale_search") or {}
+    try:
+        listings = fetch_uybor_sale(ss, cfg)
+    except Exception as e:
+        log.warning("[продажа] ошибка получения: %s", e)
+        return 0
+
+    candidates = []
+    for l in listings:
+        try:
+            if store.known(l["key"]):
+                continue
+            why, retry = sale_reject(l, ss, store, cfg)
+            if why:
+                if not retry:
+                    store.save(l, notified=False)
+                log.info("[продажа] мимо — %s: %s", why, l["title"][:45])
+                continue
+            candidates.append(l)
+        except Exception as e:
+            log.warning("[продажа] объявление %s пропущено из-за ошибки: %s", l.get("key"), e)
+            try:
+                store.save(l, notified=False)
+            except Exception:
+                pass
+
+    if settings.get("paused"):
+        return 0          # ничего не сохраняем — пришлём после /resume
+    if not store.get_kv("sale_intro_sent", False):
+        days = ss.get("notify_max_age_days", 14)
+        found = (f"За последние {days} дней нашлось подходящих: {len(candidates)} — присылаю."
+                 if candidates else
+                 f"За последние {days} дней подходящих нет — пришлю, как только появятся.")
+        intro = ("🏷 <b>Поиск квартиры для покупки включён</b>\n"
+                 + sale_criteria_text(ss) + "\n\n" + found + "\n/sale — статус поиска")
+        if not send_telegram(cfg, intro):
+            return 0      # Telegram недоступен — всё повторим в следующий проход
+        store.set_kv("sale_intro_sent", True)
+
+    sent = 0
+    for l in candidates[:ss.get("first_run_limit", 15)]:
+        dup = store.find_dup(l, cfg)
+        if dup:
+            store.save(l, notified=False, dup_of=dup)
+            continue
+        if not send_listing(cfg, settings, l, False, text=format_sale_message(l, cfg)):
+            log.info("[продажа] не отправилось, повторю позже: %s", l["title"][:45])
+            break         # не сохраняем — объявление придёт в следующий проход
+        store.save(l, notified=True)
+        sent += 1
+        log.info("[продажа] уведомление: %s", l["title"][:60])
+        time.sleep(1)
+    return sent
+
+
+def sale_status_text(cfg: dict) -> str:
+    ss = cfg.get("sale_search") or {}
+    if not ss.get("enabled"):
+        return "🏷 Поиск квартиры для покупки выключен."
+    store = Store(SALE_DB_PATH)
+    try:
+        total = store.counts()[0]
+        rows = store.conn.execute(
+            "SELECT url, data FROM listings WHERE notified=1 "
+            "ORDER BY first_seen DESC LIMIT 7").fetchall()
+        n_sent = store.conn.execute(
+            "SELECT COUNT(*) FROM listings WHERE notified=1").fetchone()[0]
+    finally:
+        store.conn.close()
+    lines = ["🏷 <b>Поиск квартиры для покупки</b>", sale_criteria_text(ss), "",
+             f"Проверено объявлений: {total}, прислано: {n_sent}"]
+    for url, data in rows:
+        try:
+            d = json.loads(data or "{}")
+        except ValueError:
+            d = {}
+        bits = [f'{d["rooms"]}-комн' if d.get("rooms") else "",
+                f'{d["area"]} м²' if d.get("area") else "",
+                f'${_money(d["price_usd"])}' if d.get("price_usd") else ""]
+        label = ", ".join(b for b in bits if b) or "вариант"
+        lines.append(f'• <a href="{url}">{label}</a> — {escape_html(d.get("district") or "")}')
+    return "\n".join(lines)
+
+
 def run():
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(levelname)s %(message)s",
@@ -1855,6 +2172,13 @@ def run():
     mode = " (разовый проход)" if once else (f" на {minutes:.0f} мин" if minutes else "")
     log.info("Rent Radar запущен%s. Источники: %s. Лимит: $%s",
              mode, ", ".join(enabled) or "нет", cfg["max_price_usd"])
+
+    sale_cfg = cfg.get("sale_search") or {}
+    sale_store, next_sale = None, 0.0
+    if sale_cfg.get("enabled") and (sale_cfg.get("uybor") or {}).get("enabled", True):
+        sale_store = Store(SALE_DB_PATH)
+        sale_store.prune()
+        log.info("Покупка: %s", sale_criteria_text(sale_cfg).replace("\n", " "))
     if first_run:
         log.info("Первый запуск: текущие объявления запоминаю без уведомлений")
 
@@ -1939,6 +2263,15 @@ def run():
 
             if fresh:
                 log.info("[%s] новых: %d", name, fresh)
+
+        if sale_store is not None and (once or now >= next_sale):
+            next_sale = now + (sale_cfg.get("uybor") or {}).get("interval_seconds", 600)
+            try:
+                n = run_sale_search(cfg, sale_store, settings)
+                if n:
+                    log.info("[продажа] новых: %d", n)
+            except Exception as e:      # поиск покупки не должен ронять радар
+                log.warning("[продажа] проход не удался: %s", e)
 
         if first_run:
             total, _ = store.counts()
