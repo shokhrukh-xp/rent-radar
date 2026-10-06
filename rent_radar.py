@@ -31,10 +31,14 @@ import concierge
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "config.json"
-DB_PATH = BASE_DIR / "radar.db"
+# Базы с данными (объявления, маклеры, телефоны) в публичный репозиторий не
+# попадают: на GitHub Actions они живут в приватном rent-radar-state, workflow
+# кладёт его в каталог из RADAR_STATE_DIR. Локально — рядом с кодом.
+STATE_DIR = Path(os.environ.get("RADAR_STATE_DIR") or BASE_DIR)
+DB_PATH = STATE_DIR / "radar.db"
 # Поиск квартиры для покупки — отдельная база: цены продажи не должны
 # попадать в арендную аналитику и дедупликацию.
-SALE_DB_PATH = BASE_DIR / "sale.db"
+SALE_DB_PATH = STATE_DIR / "sale.db"
 
 TASHKENT_TZ = timezone(timedelta(hours=5))
 HEADERS = {

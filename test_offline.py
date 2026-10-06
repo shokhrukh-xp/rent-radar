@@ -1172,3 +1172,12 @@ assert "Поиск квартиры для покупки выключен" in r
 assert rr.uybor_listing(uy(1, 1, 205))["key"] == "uybor:1"
 sdb.unlink(missing_ok=True)
 print("OK — покупка от собственника: фильтры, агентства, вступление, повторы, /sale")
+
+# ------------------------------------- данные вне публичного репозитория ----
+import os as _os, subprocess as _sp, sys as _sys
+_r = _sp.run([_sys.executable, "-c", "import rent_radar as r; print(r.DB_PATH); print(r.SALE_DB_PATH)"],
+             env={**_os.environ, "RADAR_STATE_DIR": "/tmp/rr-state"}, capture_output=True, text=True,
+             cwd=str(Path(rr.__file__).parent))
+assert _r.stdout.split() == ["/tmp/rr-state/radar.db", "/tmp/rr-state/sale.db"], (_r.stdout, _r.stderr)
+assert rr.DB_PATH.parent == Path(rr.__file__).resolve().parent      # без переменной — рядом с кодом
+print("OK — базы берутся из RADAR_STATE_DIR (приватный rent-radar-state)")

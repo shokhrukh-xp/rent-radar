@@ -1,0 +1,5 @@
+# Данные бота живут в приватном репозитории rent-radar-state, не здесь
+*.db
+*.db-journal
+state/
+__pycache__/
