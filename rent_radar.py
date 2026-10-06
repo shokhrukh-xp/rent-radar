@@ -88,8 +88,9 @@ DEFAULT_CONFIG = {
         # Квартира в продаже неделями остаётся актуальной (на Uybor объявление
         # живёт 45 дней), поэтому окно шире, чем у аренды.
         "notify_max_age_days": 45,
+        "owner_only": True,          # False — присылать и маклеров/агентства (с пометкой)
         "max_owner_ads": 2,          # у собственника 1–2 объявления, у агентства — десятки
-        "first_run_limit": 15,       # сколько текущих вариантов прислать при включении
+        "first_run_limit": 25,       # не больше стольких уведомлений за один проход
         "uybor": {
             "enabled": True, "interval_seconds": 600,
             "region_id": 13, "category_id": 7, "limit": 100,   # 100 — максимум API
@@ -849,7 +850,7 @@ class Store:
             "price_usd", "rooms", "district", "district_raw", "phones", "created_at",
             "seller", "seller_id", "is_business", "photo_urls", "lat", "lon", "area",
             "floor", "floors_total", "furnished", "house_type", "commission",
-            "seller_ads", "premium")
+            "seller_ads", "premium", "seller_kind", "listed_since", "new_building", "repair")
 
     def pack(self, listing: dict) -> str:
         d = {k: listing.get(k) for k in self.KEEP}
@@ -1983,25 +1984,41 @@ def sale_reject(l: dict, ss: dict, store, cfg) -> tuple:
     hit = next((w for w in SALE_NOT_FLAT_WORDS if w in low), "")
     if hit:
         return f"продаётся не квартира («{hit}»)", False
+
+    why = classify_sale_seller(l, ss, store, cfg)
+    if not ss.get("owner_only", True):
+        return "", False                 # подходят и маклеры — продавца только помечаем
+    if l["seller_kind"] == "unknown":
+        return "не удалось проверить продавца", True
+    if l["seller_kind"] == "agency":
+        return why, False
+    return "", False
+
+
+def classify_sale_seller(l: dict, ss: dict, store, cfg) -> str:
+    """Кто продаёт: l['seller_kind'] = owner | agency | unknown.
+    Возвращает причину, по которой продавец признан агентством/маклером."""
+    low = f"{l.get('title', '')} {l.get('text', '')}".lower()
     says_owner = bool(hot_flags(l.get("text") or "", cfg)) \
         or any(w in low for w in SALE_OWNER_WORDS)
-    if not says_owner:
-        hit = next((w for w in SALE_AGENCY_WORDS if w in low), "")
-        if hit:
-            return f"текст агентства («{hit}»)", False
-
     limit = ss.get("max_owner_ads", 2)
-    spread = phone_spread(l, store)
-    if spread > limit:
-        return f"телефон встречается в {spread} объявлениях", False
     uid = (l.get("seller_id") or "").partition(":")[2]
     ads = uybor_user_ads(uid, store, cfg)
     l["seller_ads"] = ads
-    if ads < 0:
-        return "не удалось проверить продавца", True
-    if ads > limit:
-        return f"у продавца {ads} объявлений — агентство или маклер", False
-    return "", False
+
+    why = ""
+    if not says_owner:
+        hit = next((w for w in SALE_AGENCY_WORDS if w in low), "")
+        if hit:
+            why = f"текст агентства («{hit}»)"
+    if not why:
+        spread = phone_spread(l, store)
+        if spread > limit:
+            why = f"телефон встречается в {spread} объявлениях"
+    if not why and ads > limit:
+        why = f"у продавца {ads} объявлений — агентство или маклер"
+    l["seller_kind"] = "agency" if why else ("unknown" if ads < 0 else "owner")
+    return why
 
 
 def _money(v: float) -> str:
@@ -2010,7 +2027,9 @@ def _money(v: float) -> str:
 
 def format_sale_message(l: dict, cfg: dict) -> str:
     district = l.get("district") or "район не указан"
-    lines = [f"🏷 <b>Продажа от собственника</b> · {escape_html(district)}"]
+    who = {"owner": "от собственника", "agency": "агентство / маклер"}.get(
+        l.get("seller_kind"), "продавец не проверен")
+    lines = [f"🏷 <b>Продажа · {who}</b> · {escape_html(district)}"]
     spec = []
     if l.get("rooms"):
         spec.append(f'{l["rooms"]}-комн')
@@ -2051,16 +2070,80 @@ def format_sale_message(l: dict, cfg: dict) -> str:
     dt = parse_iso(l.get("created_at") or "")
     if dt:
         lines.append(f'🕐 {dt.astimezone(TASHKENT_TZ).strftime("%d.%m %H:%M")}')
+    since = parse_iso(l.get("listed_since") or "")
+    if since:
+        days = age_days(l["listed_since"])
+        lines.append(f'🔁 Перевыложено: впервые на Uybor {since.astimezone(TASHKENT_TZ).strftime("%d.%m.%Y")}'
+                     + (f" — на рынке ~{days:.0f} дн." if days else ""))
     lines.append(f'\n<a href="{l["url"]}">Открыть на Uybor</a>')
     return "\n".join(lines)
 
 
 def sale_criteria_text(ss: dict) -> str:
-    rooms = "–".join(str(r) for r in (ss.get("rooms") or [])) or "любые"
+    rooms = "–".join(str(r) for r in (ss.get("rooms") or []))
+    rooms = f"{rooms} комн" if rooms else "любая комнатность"
     districts = ", ".join(ss.get("districts") or []) or "любые районы"
-    return (f'{rooms} комн · до ${_money(ss.get("max_price_usd", 0))} · {districts}\n'
-            f'Только собственники: у продавца не больше {ss.get("max_owner_ads", 2)} '
-            f'объявлений и нет признаков агентства. Источник — Uybor.')
+    if ss.get("owner_only", True):
+        sellers = (f'Только собственники: у продавца не больше {ss.get("max_owner_ads", 2)} '
+                   f'объявлений и нет признаков агентства.')
+    else:
+        sellers = "Продавцы — собственники и маклеры/агентства; в карточке помечено, кто продаёт."
+    return (f'{rooms} · до ${_money(ss.get("max_price_usd", 0))} · {districts}\n'
+            f'{sellers} Источник — Uybor.')
+
+
+def sale_fingerprint(ss: dict) -> str:
+    """Условия поиска одной строкой: изменились — пересматриваем отсеянное."""
+    keys = ("max_price_usd", "min_price_usd", "rooms", "districts", "owner_only",
+            "max_owner_ads", "notify_max_age_days")
+    return json.dumps({k: ss.get(k) for k in keys}, ensure_ascii=False, sort_keys=True)
+
+
+def _areas_differ(a, b) -> bool:
+    return bool(a and b and abs(a - b) / max(a, b) > 0.10)
+
+
+def _same_sale(a: dict, b: dict, cfg: dict) -> bool:
+    """Одна и та же квартира в двух объявлениях текущего прохода (как find_dup).
+    Телефон сравниваем только у собственников: у агентства один номер на десятки квартир."""
+    if a.get("rooms") and b.get("rooms") and a["rooms"] != b["rooms"]:
+        return False
+    if _areas_differ(a.get("area"), b.get("area")):
+        return False
+    if "agency" not in (a.get("seller_kind"), b.get("seller_kind")) \
+            and set(a.get("phones") or []) & set(b.get("phones") or []):
+        return True
+    pa, pb = a.get("price_usd"), b.get("price_usd")
+    if pa and pb and abs(pa - pb) / max(pa, pb) > cfg["dedup"]["price_tolerance"]:
+        return False
+    na, nb = normalize_text(a.get("text") or ""), normalize_text(b.get("text") or "")
+    if len(na) < 40 or len(nb) < 40:
+        return False
+    return SequenceMatcher(None, na, nb).ratio() >= cfg["dedup"]["fuzzy_threshold"]
+
+
+def find_sale_dup(l: dict, store, cfg: dict):
+    """find_dup для продажи: у агентств не сравниваем телефоны, и разная площадь — не дубль."""
+    probe = dict(l, phones=[]) if l.get("seller_kind") == "agency" else l
+    key = store.find_dup(probe, cfg)
+    if not key:
+        return None
+    row = store.conn.execute("SELECT data, notified FROM listings WHERE key=?", (key,)).fetchone()
+    try:
+        other = json.loads(row[0]) if row and row[0] else {}
+    except ValueError:
+        other = {}
+    if _areas_differ(l.get("area"), other.get("area")):
+        return None
+    if row and not row[1]:
+        # та же квартира, но прежнее объявление мы не присылали (например, оно было
+        # слишком старым) — это перевыкладка: присылаем и показываем, с какого времени
+        # квартира на рынке; это аргумент для торга
+        first = other.get("created_at")
+        if first and (not l.get("listed_since") or first < l["listed_since"]):
+            l["listed_since"] = first
+        return None
+    return key
 
 
 def run_sale_search(cfg: dict, store, settings: dict) -> int:
@@ -2071,6 +2154,18 @@ def run_sale_search(cfg: dict, store, settings: dict) -> int:
     except Exception as e:
         log.warning("[продажа] ошибка получения: %s", e)
         return 0
+
+    # Условия поиска поменялись — всё, что раньше отсеяли, пересматриваем заново.
+    # Уже присланное не трогаем, чтобы не было повторов.
+    fp = sale_fingerprint(ss)
+    intro_sent = store.get_kv("sale_intro_sent", False)
+    criteria_changed = intro_sent and store.get_kv("sale_criteria") != fp
+    if criteria_changed:
+        store.conn.execute("DELETE FROM phones WHERE key IN "
+                           "(SELECT key FROM listings WHERE notified=0)")
+        store.conn.execute("DELETE FROM listings WHERE notified=0")
+        store.conn.commit()
+        log.info("[продажа] условия изменились — пересматриваю отсеянные объявления")
 
     candidates = []
     for l in listings:
@@ -2091,22 +2186,31 @@ def run_sale_search(cfg: dict, store, settings: dict) -> int:
             except Exception:
                 pass
 
+    # одна квартира, выложенная несколькими продавцами, — одно уведомление;
+    # повтор пройдёт через find_dup в следующий проход, когда оригинал уже в базе
+    unique = []
+    for l in candidates:
+        if not any(_same_sale(l, u, cfg) for u in unique):
+            unique.append(l)
+
     if settings.get("paused"):
         return 0          # ничего не сохраняем — пришлём после /resume
-    if not store.get_kv("sale_intro_sent", False):
+    if not intro_sent or criteria_changed:
         days = ss.get("notify_max_age_days", 14)
-        found = (f"За последние {days} дней нашлось подходящих: {len(candidates)} — присылаю."
-                 if candidates else
+        found = (f"За последние {days} дней нашлось подходящих: {len(unique)} — присылаю."
+                 if unique else
                  f"За последние {days} дней подходящих нет — пришлю, как только появятся.")
-        intro = ("🏷 <b>Поиск квартиры для покупки включён</b>\n"
-                 + sale_criteria_text(ss) + "\n\n" + found + "\n/sale — статус поиска")
+        title = "Условия поиска обновлены" if intro_sent else "Поиск квартиры для покупки включён"
+        intro = (f"🏷 <b>{title}</b>\n" + sale_criteria_text(ss) + "\n\n" + found
+                 + "\n/sale — статус поиска")
         if not send_telegram(cfg, intro):
             return 0      # Telegram недоступен — всё повторим в следующий проход
         store.set_kv("sale_intro_sent", True)
+        store.set_kv("sale_criteria", fp)
 
     sent = 0
-    for l in candidates[:ss.get("first_run_limit", 15)]:
-        dup = store.find_dup(l, cfg)
+    for l in unique[:ss.get("first_run_limit", 15)]:
+        dup = find_sale_dup(l, store, cfg)
         if dup:
             store.save(l, notified=False, dup_of=dup)
             continue

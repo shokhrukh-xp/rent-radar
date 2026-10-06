@@ -77,6 +77,8 @@
   "bot_username": "rano_smart_bot",
   "assistant_name": "Ra'no",
   "sale_search": {
-    "enabled": true
+    "enabled": true,
+    "owner_only": false,
+    "rooms": []
   }
 }

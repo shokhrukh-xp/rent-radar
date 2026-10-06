@@ -1063,6 +1063,7 @@ UY_BY_DISTRICT = {
     197: [uy(101, 1, 205)],                                  # дубль id из другого запроса
 }
 calls = []
+EXPECT_ROOMS = "1,2"
 
 class FakeUy:
     def __init__(self, data):
@@ -1078,7 +1079,8 @@ def fake_uy_get(url, params=None, headers=None, timeout=None):
     if "user__eq" in (params or {}):
         uid = int(params["user__eq"])
         return FakeUy({"total": UY_ADS[uid], "results": [{"userId": uid}]})
-    assert params["operationType__eq"] == "sale" and params["room__in"] == "1,2"
+    assert params["operationType__eq"] == "sale"
+    assert params.get("room__in") == EXPECT_ROOMS, params
     assert params["priceCurrency__eq"] == "usd" and params["price__lte"] == 45000
     return FakeUy({"total": 1, "results": UY_BY_DISTRICT.get(params["district__eq"], [])})
 
@@ -1119,7 +1121,7 @@ with mock.patch.object(rr.requests, "get", broken_get):
 # карточка: продажа, цена за м², вторичка и ремонт, ссылка на Uybor
 ok101 = dict(by_id["101"]); rr.sale_reject(ok101, scfg_, sstore, ss_tg)
 card = rr.format_sale_message(ok101, ss_tg)
-assert "Продажа от собственника" in card and "Яккасарай" in card
+assert "Продажа · от собственника" in card and "Яккасарай" in card
 assert "💰 $40 000" in card and "~$1 333/м²" in card, card
 assert "вторичка · евроремонт" in card and "uybor.uz/listings/101" in card
 
@@ -1131,7 +1133,7 @@ with mock.patch.object(rr.requests, "get", fake_uy_get), mock.patch.object(rr, "
 assert n == 3, (n, sent_msgs)
 assert "Поиск квартиры для покупки включён" in sent_msgs[0][1]
 assert "нашлось подходящих: 3" in sent_msgs[0][1] and "45 дней" in sent_msgs[0][1]
-assert sum("Продажа от собственника" in m[1] for m in sent_msgs) == 3
+assert sum("Продажа · от собственника" in m[1] for m in sent_msgs) == 3
 # повторный проход ничего не дублирует и вступление не повторяет
 sent_msgs.clear()
 with mock.patch.object(rr.requests, "get", fake_uy_get), mock.patch.object(rr, "tg_call", fake_sale_tg), \
@@ -1172,6 +1174,92 @@ assert "Поиск квартиры для покупки выключен" in r
 assert rr.uybor_listing(uy(1, 1, 205))["key"] == "uybor:1"
 sdb.unlink(missing_ok=True)
 print("OK — покупка от собственника: фильтры, агентства, вступление, повторы, /sale")
+
+# --------------------------------- покупка: маклеры тоже, любая комнатность ----
+ss_all = rr.deep_merge(ss_tg, {"sale_search": {"owner_only": False, "rooms": []}})
+sa_ = ss_all["sale_search"]
+EXPECT_ROOMS = None                                  # без фильтра комнат в запросе к API
+sdb.unlink(missing_ok=True); sstore = rr.Store(sdb)
+with mock.patch.object(rr.requests, "get", fake_uy_get):
+    l102 = dict(by_id["102"]); assert rr.sale_reject(l102, sa_, sstore, ss_all) == ("", False)
+    l201 = dict(by_id["201"]); assert rr.sale_reject(l201, sa_, sstore, ss_all) == ("", False)
+    l101 = dict(by_id["101"]); assert rr.sale_reject(l101, sa_, sstore, ss_all) == ("", False)
+    l103 = dict(by_id["103"]); assert "дороже бюджета" in rr.sale_reject(l103, sa_, sstore, ss_all)[0]
+assert (l102["seller_kind"], l201["seller_kind"], l101["seller_kind"]) == ("agency", "agency", "owner")
+assert "Продажа · агентство / маклер" in rr.format_sale_message(l102, ss_all)
+assert "объявлений у продавца на Uybor: 134" in rr.format_sale_message(l102, ss_all)
+assert "Продажа · от собственника" in rr.format_sale_message(l101, ss_all)
+# API продавца недоступно: маклеров не отсекаем — присылаем с пометкой «не проверен»
+with mock.patch.object(rr.requests, "get", broken_get):
+    lx = dict(by_id["101"], seller_id="uybor:777")
+    assert rr.sale_reject(lx, sa_, sstore, ss_all) == ("", False)
+assert "продавец не проверен" in rr.format_sale_message(lx, ss_all)
+assert "любая комнатность" in rr.sale_criteria_text(sa_) and "маклеры" in rr.sale_criteria_text(sa_)
+
+# смена условий: отсеянное раньше пересматривается, присланное не повторяется
+EXPECT_ROOMS = "1,2"
+sdb.unlink(missing_ok=True); sstore = rr.Store(sdb); sent_msgs.clear()
+with mock.patch.object(rr.requests, "get", fake_uy_get), mock.patch.object(rr, "tg_call", fake_sale_tg), \
+        mock.patch.object(rr.time, "sleep"):
+    assert rr.run_sale_search(ss_tg, sstore, {"photos": False}) == 3        # только собственники
+EXPECT_ROOMS = None; sent_msgs.clear()
+with mock.patch.object(rr.requests, "get", fake_uy_get), mock.patch.object(rr, "tg_call", fake_sale_tg), \
+        mock.patch.object(rr.time, "sleep"):
+    n = rr.run_sale_search(ss_all, sstore, {"photos": False})
+assert n == 3, (n, [m[1][:60] for m in sent_msgs])                      # 102, 201 и 3-комнатная 301
+assert "Условия поиска обновлены" in sent_msgs[0][1] and "нашлось подходящих: 3" in sent_msgs[0][1]
+assert sum("агентство / маклер" in m[1] for m in sent_msgs) == 2         # 102 и 201
+assert any("3-комн" in m[1] and "от собственника" in m[1] for m in sent_msgs)  # 301
+assert not any("uybor.uz/listings/101" in m[1] for m in sent_msgs)     # не повторили
+sent_msgs.clear()
+with mock.patch.object(rr.requests, "get", fake_uy_get), mock.patch.object(rr, "tg_call", fake_sale_tg), \
+        mock.patch.object(rr.time, "sleep"):
+    assert rr.run_sale_search(ss_all, sstore, {"photos": False}) == 0   # условия те же — тишина
+assert sent_msgs == []
+
+# одна квартира от двух маклеров — одно уведомление
+LONG = ("Продаётся 1-комнатная квартира, Яккасарайский район, ориентир Хосилот, кирпичный дом, "
+        "3 этаж из 5, евроремонт, остаётся мебель и техника, документы готовы")
+UY_ADS.update({9: 60, 10: 80})
+UY_BY_DISTRICT[205] = [uy(401, 9, 205, price=39000, desc=LONG), uy(402, 10, 205, price=39500, desc=LONG + "!")]
+sdb.unlink(missing_ok=True); sstore = rr.Store(sdb); sent_msgs.clear()
+with mock.patch.object(rr.requests, "get", fake_uy_get), mock.patch.object(rr, "tg_call", fake_sale_tg), \
+        mock.patch.object(rr.time, "sleep"):
+    rr.run_sale_search(ss_all, sstore, {"photos": False})
+assert sum("listings/401" in m[1] or "listings/402" in m[1] for m in sent_msgs) == 1, sent_msgs
+with mock.patch.object(rr.requests, "get", fake_uy_get), mock.patch.object(rr, "tg_call", fake_sale_tg), \
+        mock.patch.object(rr.time, "sleep"):
+    rr.run_sale_search(ss_all, sstore, {"photos": False})
+assert sum("listings/401" in m[1] or "listings/402" in m[1] for m in sent_msgs) == 1   # дубль сохранён как дубль
+assert sstore.known("sale:uybor:402") or sstore.known("sale:uybor:401")
+sdb.unlink(missing_ok=True)
+# у агентства один телефон на разные квартиры — это не дубли
+AG = "Агентство «Тест». Тел: +998 90 111-22-33. "
+UY_ADS.update({11: 90})
+UY_BY_DISTRICT[205] = [
+    uy(501, 11, 205, price=30000, desc=AG + "1-комн, 23 м², бывшее общежитие, кухня и санузел внутри, 2 этаж"),
+    uy(502, 11, 205, price=38000, desc=AG + "1-комн, 30 м², новостройка, кирпич, ипотека возможна, 1 этаж")]
+UY_BY_DISTRICT[205][0]["square"], UY_BY_DISTRICT[205][1]["square"] = 23, 30
+sdb.unlink(missing_ok=True); sstore = rr.Store(sdb); sent_msgs.clear()
+with mock.patch.object(rr.requests, "get", fake_uy_get), mock.patch.object(rr, "tg_call", fake_sale_tg), \
+        mock.patch.object(rr.time, "sleep"):
+    rr.run_sale_search(ss_all, sstore, {"photos": False})
+assert sum("listings/501" in m[1] or "listings/502" in m[1] for m in sent_msgs) == 2, sent_msgs
+sdb.unlink(missing_ok=True)
+# перевыкладка: старое объявление отсеяли по возрасту, свежая копия — присылаем с датой
+OLD = "Продаётся 1-комн квартира, Юнусабад, бывшее общежитие, кухня и санузел внутри, 2 этаж из 4"
+UY_ADS.update({12: 30})
+UY_BY_DISTRICT[205] = [uy(601, 12, 205, price=28500, days=136, desc=OLD),
+                       uy(602, 12, 205, price=28500, days=2, desc=OLD + ".")]
+sdb.unlink(missing_ok=True); sstore = rr.Store(sdb); sent_msgs.clear()
+with mock.patch.object(rr.requests, "get", fake_uy_get), mock.patch.object(rr, "tg_call", fake_sale_tg), \
+        mock.patch.object(rr.time, "sleep"):
+    rr.run_sale_search(ss_all, sstore, {"photos": False})
+m602 = [m[1] for m in sent_msgs if "listings/602" in m[1]]
+assert len(m602) == 1 and "Перевыложено" in m602[0] and "на рынке ~136 дн." in m602[0], sent_msgs
+assert not any("listings/601" in m[1] for m in sent_msgs)
+sdb.unlink(missing_ok=True)
+print("OK — покупка с маклерами: пометка продавца, пересмотр при смене условий, дубли")
 
 # ------------------------------------- данные вне публичного репозитория ----
 import os as _os, subprocess as _sp, sys as _sys
