@@ -28,6 +28,7 @@ import requests
 
 import analyst
 import concierge
+import market
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "config.json"
@@ -441,6 +442,8 @@ def uybor_listing(o: dict) -> dict:
     price_value, price_currency = o.get("price"), canon_currency(o.get("priceCurrency"))
     rooms = as_int(o.get("room")) or extract_rooms(desc)
     price_value = as_int(price_value) if price_value is not None else None
+    if o.get("priceType") == "sqm" and price_value and as_int(o.get("square")):
+        price_value = price_value * as_int(o.get("square"))   # цена указана за м²
     text = desc[:900]
     title = desc.strip().split("\n")[0][:80] or "Объявление Uybor"
     photo_urls = []
@@ -531,7 +534,7 @@ def fetch_uybor_sale(ss: dict, cfg: dict) -> list:
             seen.add(l["key"])
             l["key"] = "sale:" + l["key"]
             l["source"] = "Uybor · продажа"
-            l["new_building"] = bool(o.get("isNewBuilding"))
+            l["new_building"] = market.looks_new(o.get("isNewBuilding"), l["text"])
             l["repair"] = o.get("repair")
             out.append(l)
         time.sleep(0.5)
@@ -1139,7 +1142,8 @@ HELP_TEXT = """🏠 <b>Ra'no</b> — ваш ассистент по поиску
 /prices — реальные цены по данным маклеров
 /brokers — база маклеров и рассылка запроса в один тап
 /owner — только хозяева (без маклеров)
-/sale — поиск квартиры для покупки (от собственника)
+/sale — поиск квартиры для покупки
+/rynok — сводка рынка: цены за м², аренда, сценарии
 /segment — класс жилья: любой ↔ новый ЖК с ремонтом
 /work — адрес работы (считать расстояние)
 /photos — фото вкл/выкл
@@ -1340,6 +1344,8 @@ def handle_command(text: str, settings: dict, store, cfg: dict):
         return status_text(cfg, settings, store), None
     if cmd in ("/sale", "/buy", "/kupit", "/покупка"):
         return sale_status_text(cfg), None
+    if cmd in ("/rynok", "/market", "/рынок"):
+        return sale_market_text(cfg), None
     if cmd in ("/owner", "/hozyain"):
         if arg in OFF_WORDS or arg in RESET_WORDS:
             settings["owner_only"] = False
@@ -2154,6 +2160,8 @@ def run_sale_search(cfg: dict, store, settings: dict) -> int:
     except Exception as e:
         log.warning("[продажа] ошибка получения: %s", e)
         return 0
+    # раз в сутки — срез рынка для анализа (сам ловит свои ошибки)
+    market.maybe_scan(store, cfg, sale_district_ids(ss))
 
     # Условия поиска поменялись — всё, что раньше отсеяли, пересматриваем заново.
     # Уже присланное не трогаем, чтобы не было повторов.
@@ -2208,6 +2216,10 @@ def run_sale_search(cfg: dict, store, settings: dict) -> int:
         store.set_kv("sale_intro_sent", True)
         store.set_kv("sale_criteria", fp)
 
+    # анализ к вариантам, присланным до его появления, — до новых карточек,
+    # чтобы новые не получили анализ дважды
+    backfill_sale_analysis(cfg, store, settings)
+
     sent = 0
     for l in unique[:ss.get("first_run_limit", 15)]:
         dup = find_sale_dup(l, store, cfg)
@@ -2220,8 +2232,65 @@ def run_sale_search(cfg: dict, store, settings: dict) -> int:
         store.save(l, notified=True)
         sent += 1
         log.info("[продажа] уведомление: %s", l["title"][:60])
+        send_sale_analysis(cfg, store, l)
         time.sleep(1)
     return sent
+
+
+def sale_district_ids(ss: dict) -> list:
+    return [i for i, name in UYBOR_DISTRICT_IDS.items() if name in (ss.get("districts") or [])]
+
+
+def send_sale_analysis(cfg: dict, store, l: dict) -> bool:
+    """Анализ варианта — отдельным сообщением: в подпись к фото (1024 символа) не влезает."""
+    try:
+        text = market.format_analysis(store, l, cfg)
+    except Exception as e:
+        log.warning("[продажа] анализ %s не удался: %s", l.get("key"), e)
+        return False
+    return bool(text) and send_telegram(cfg, text)
+
+
+def backfill_sale_analysis(cfg: dict, store, settings: dict) -> int:
+    """Один раз: анализ для вариантов, присланных до появления анализа."""
+    if store.get_kv("sale_analysis_backfill", False) or settings.get("paused"):
+        return 0
+    if not store.get_kv("market_scan_at"):
+        return 0                     # без среза рынка анализ пустой — подождём
+    rows = store.conn.execute(
+        "SELECT data FROM listings WHERE notified=1 ORDER BY first_seen").fetchall()
+    active = {k for (k,) in store.conn.execute(
+        "SELECT key FROM market WHERE op='sale' AND removed_at IS NULL")}
+    todo = []
+    for (data,) in rows:
+        try:
+            l = json.loads(data or "{}")
+        except ValueError:
+            continue
+        if l.get("key") in active:
+            todo.append(l)
+    if todo and not send_telegram(cfg, f"📊 <b>Добавила анализ цены</b> к вариантам, которые уже "
+                                       f"присылала и которые ещё в продаже ({len(todo)}). "
+                                       f"Сводка рынка — /rynok"):
+        return 0
+    n = 0
+    for l in todo[:20]:
+        if send_sale_analysis(cfg, store, l):
+            n += 1
+        time.sleep(1)
+    store.set_kv("sale_analysis_backfill", True)
+    return n
+
+
+def sale_market_text(cfg: dict) -> str:
+    ss = cfg.get("sale_search") or {}
+    if not ss.get("enabled"):
+        return "📊 Поиск квартиры для покупки выключен."
+    store = Store(SALE_DB_PATH)
+    try:
+        return market.summary_text(store, cfg, ss.get("districts") or [])
+    finally:
+        store.conn.close()
 
 
 def sale_status_text(cfg: dict) -> str:
@@ -2250,6 +2319,7 @@ def sale_status_text(cfg: dict) -> str:
                 f'${_money(d["price_usd"])}' if d.get("price_usd") else ""]
         label = ", ".join(b for b in bits if b) or "вариант"
         lines.append(f'• <a href="{url}">{label}</a> — {escape_html(d.get("district") or "")}')
+    lines.append("\n📊 /rynok — цены за м², аренда и сценарии по районам")
     return "\n".join(lines)
 
 

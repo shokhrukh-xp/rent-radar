@@ -1,7 +1,7 @@
 {
   "telegram_bot_token": "PUT_YOUR_BOT_TOKEN_HERE",
   "telegram_chat_id": "PUT_YOUR_CHAT_ID_HERE",
-  "uzs_per_usd": 11900,
+  "uzs_per_usd": 11780,
   "max_price_usd": 1000,
   "min_price_usd": 0,
   "notify_max_age_days": 3,

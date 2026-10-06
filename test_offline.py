@@ -1269,3 +1269,119 @@ _r = _sp.run([_sys.executable, "-c", "import rent_radar as r; print(r.DB_PATH); 
 assert _r.stdout.split() == ["/tmp/rr-state/radar.db", "/tmp/rr-state/sale.db"], (_r.stdout, _r.stderr)
 assert rr.DB_PATH.parent == Path(rr.__file__).resolve().parent      # без переменной — рядом с кодом
 print("OK — базы берутся из RADAR_STATE_DIR (приватный rent-radar-state)")
+
+# ---------------------------------------------- анализ рынка (market.py) ----
+import market as mk
+
+R = lambda **kw: dict({"id": 1, "price": 30000, "priceCurrency": "usd", "priceType": "all",
+                      "square": 25, "room": "1", "districtId": 197, "isNewBuilding": False,
+                      "createdAt": _iso(10), "userId": 1, "description": "Квартира"}, **kw)
+row = mk._row_from_uybor(R(priceType="sqm", price=1400), "sale", 11780)
+assert row["price_usd"] == 35000 and row["key"] == "sale:uybor:1"          # цена за м² × площадь
+assert abs(mk._row_from_uybor(R(price=353_400_000, priceCurrency="uzs"), "sale", 11780)["price_usd"] - 30000) < 1
+assert mk._row_from_uybor(R(price=40, pricePeriodUnit="day"), "rent", 11780) is None   # посуточно
+assert mk._row_from_uybor(R(price=900), "sale", 11780) is None                         # $36/м² — опечатка
+assert mk._row_from_uybor(R(description="Бывшее общежитие, галерейка"), "sale", 11780)["dorm"] == 1
+assert mk._row_from_uybor(R(description="НОВОСТРОЙКА! ЖК Imperial"), "sale", 11780)["new_building"] == 1
+
+# срез: страницы, история цены, снятые с продажи
+SALE_PAGES = [[R(id=1, price=30000), R(id=2, price=40000, square=30)]]
+RENT = {197: [R(id=900 + i, price=p, square=25, pricePeriodUnit="month") for i, p in enumerate([300, 320, 340, 360, 380])]}
+def fake_mk_get(url, params=None, headers=None, timeout=None):
+    p = params or {}
+    if p.get("operationType__eq") == "rent":
+        return FakeUy({"results": RENT.get(p.get("district__eq"), []) if p.get("page") == 1 else []})
+    if "user__eq" in p:
+        return FakeUy({"total": 1, "results": [{"userId": int(p["user__eq"])}]})
+    pages = SALE_PAGES
+    i = p.get("page", 1) - 1
+    return FakeUy({"results": pages[i] if i < len(pages) else []})
+mdb = Path("/tmp/test_market.db"); mdb.unlink(missing_ok=True)
+mst = rr.Store(mdb)
+with mock.patch.object(mk.requests, "get", fake_mk_get), mock.patch.object(mk.time, "sleep"):
+    assert mk.scan(mst, ss_all, [197]) == {"sale": 2, "rent": 5}
+    SALE_PAGES = [[R(id=1, price=28000)]]                                   # подешевела, №2 снята
+    mk.scan(mst, ss_all, [197])
+assert [p for _, p in mk.price_history(mst, {"key": "sale:uybor:1"})] == [30000, 28000]
+assert mst.conn.execute("SELECT removed_at IS NOT NULL FROM market WHERE key='sale:uybor:2'").fetchone()[0] == 1
+assert mk.maybe_scan(mst, ss_all, [197]) is False                         # раз в сутки, не чаще
+mst.set_kv("market_scan_at", "2020-01-01T00:00:00+00:00"); mst.set_kv("market_scan_try", None)
+with mock.patch.object(mk.requests, "get", broken_get):
+    assert mk.maybe_scan(mst, ss_all, [197]) is False                     # Uybor недоступен
+    assert mk.maybe_scan(mst, ss_all, [197]) is False                     # и повтор не раньше чем через час
+with mock.patch.object(mk, "scan") as sc:
+    mk.maybe_scan(mst, ss_all, [197]); assert not sc.called
+
+# похожие: общежитие сравниваем только с общежитиями; огромная разница — не аналоги
+mst.conn.execute("DELETE FROM market WHERE op='sale'")
+def put(i, price, area, dorm=0, nb=0, d="Юнусабад"):
+    mst.conn.execute("INSERT INTO market(key, op, district, rooms, area, price_usd, new_building, dorm, "
+                     "first_seen, last_seen) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                     (f"sale:uybor:{i}", "sale", d, 1, area, price, nb, dorm, "x", "x"))
+for i in range(6):
+    put(100 + i, 1250 * 24, 24, dorm=1)            # общежития по $1 250/м²
+    put(200 + i, 2500 * 25, 25)                     # обычные квартиры по $2 500/м²
+mst.conn.commit()
+dorm_l = {"key": "sale:uybor:1", "district": "Юнусабад", "area": 24, "rooms": 1, "price_usd": 27600,
+          "text": "Бывшее общежитие, санузел на этаже", "created_at": _iso(100), "seller_kind": "agency"}
+c = mk.comparables(mst, dorm_l)
+assert round(c["median_m2"]) == 1250 and "общежития" in c["label"], c
+flat_l = dict(dorm_l, text="Квартира в кирпичном доме", price_usd=60000)
+assert round(mk.comparables(mst, flat_l)["median_m2"]) == 2500
+cheap = dict(flat_l, price_usd=30000)                                       # −50% к похожим
+xa = mk.analyze(mst, cheap, ss_all)
+assert "gap" not in xa and xa["comp_unreliable"] < -0.4 and xa["verdict"][0] == "⚪"
+
+# аренда, сценарии, налог при продаже раньше 3 лет, вердикт
+x = mk.analyze(mst, dorm_l, ss_all)
+assert abs(x["gap"] - (27600 / 24 / 1250 - 1)) < 1e-9 and x["verdict"][0] == "🟠"
+assert abs(x["values"]["base"][3] - 27600 * 1.03 ** 3) < 0.01
+assert abs(x["values"]["pess"][1] - 27600 * 0.94) < 0.01
+assert "dorm" in x["flags"] and "stale" in x["flags"] and "agency" in x["flags"]
+assert abs(x["rent"] - 340 * 0.85) < 0.01, x["rent"]                        # медиана 5 объявл. − 15%
+gain1 = 27600 * 0.03
+assert abs(x["invest"][1]["base"] - (gain1 * 0.88 + x["rent"] * 11 * 0.88)) < 0.01   # налог 12% с прироста
+assert abs(x["invest"][3]["base"] - (27600 * (1.03 ** 3 - 1) + x["rent"] * 11 * 0.88 * 3)) < 0.01
+txt = mk.format_analysis(mst, dorm_l, ss_all)
+for part in ("📊 <b>Анализ</b>", "на 8% ниже похожих", "Цена через 1 / 3 / 5 лет", "Бывшее общежитие",
+             "Долго продаётся", "Вердикт", mk.REPORT_URL, "средняя по району: $1 441/м²"):
+    assert part in txt, (part, txt)
+# аренда по объявлениям нереально высокая → в расчёте осторожная средняя, цифра из объявлений рядом
+RENT_HI = dict(dorm_l, text="Квартира", price_usd=12000, area=24)
+mst.conn.execute("UPDATE market SET price_usd=price_usd WHERE 0"); mst.conn.commit()
+xh = mk.analyze(mst, RENT_HI, ss_all)
+assert xh["rent_ads"] and abs(xh["rent"] - 9.5 * 24) < 0.01, xh
+s_txt = mk.summary_text(mst, ss_all, ["Юнусабад"])
+assert "Юнусабад" in s_txt and "Сценарии на год" in s_txt and mk.REPORT_URL in s_txt
+
+# в боте: после карточки — отдельное сообщение с анализом; старым вариантам — один раз
+sdb.unlink(missing_ok=True); sstore = rr.Store(sdb); sent_msgs.clear()
+UY_BY_DISTRICT[205] = [uy(701, 1, 205, price=39000)]
+def fake_both(url, params=None, headers=None, timeout=None):
+    p = params or {}
+    if "district__eq" in p and p.get("operationType__eq") == "sale":
+        return fake_uy_get(url, params, headers, timeout)
+    return fake_mk_get(url, params, headers, timeout)
+SALE_PAGES = [[R(id=701, price=39000, square=30, districtId=205)]]
+with mock.patch.object(rr.requests, "get", fake_both), mock.patch.object(mk.requests, "get", fake_both), \
+        mock.patch.object(rr, "tg_call", fake_sale_tg), mock.patch.object(rr.time, "sleep"), \
+        mock.patch.object(mk.time, "sleep"):
+    rr.run_sale_search(ss_all, sstore, {"photos": False})
+texts = [m[1] for m in sent_msgs]
+i_card = next(i for i, t in enumerate(texts) if "listings/701" in t)
+assert "📊 <b>Анализ</b>" in texts[i_card + 1], texts
+n_cards = sum(t.startswith("🏷 <b>Продажа") for t in texts)
+assert n_cards >= 1 and sum("📊 <b>Анализ</b>" in t for t in texts) == n_cards   # по анализу на карточку
+assert sstore.get_kv("sale_analysis_backfill") is True
+sent_msgs.clear()
+sstore.set_kv("sale_analysis_backfill", False)                              # как после обновления бота
+with mock.patch.object(rr, "tg_call", fake_sale_tg), mock.patch.object(rr.time, "sleep"):
+    assert rr.backfill_sale_analysis(ss_all, sstore, {}) == 1
+assert "Добавила анализ цены" in sent_msgs[0][1] and "📊 <b>Анализ</b>" in sent_msgs[1][1]
+with mock.patch.object(rr, "SALE_DB_PATH", sdb):
+    reply, _ = rr.handle_command("/rynok", rr.default_settings(), store, ss_all)
+assert "Рынок по срезу Uybor" in reply
+# цена «за м²» у Uybor переводится в полную
+assert rr.uybor_listing(dict(uy(9, 1, 205, price=1500), priceType="sqm"))["price_value"] == 45000
+sdb.unlink(missing_ok=True); mdb.unlink(missing_ok=True)
+print("OK — анализ рынка: срез Uybor, история цен, аналоги, аренда, сценарии, вердикт, /rynok")
