@@ -102,7 +102,8 @@ export function finalAns(a) {
 const SYSTEM = `Ты — Ra'no, ИИ-ассистент по подбору жилья в Узбекистане (в основном Ташкент).
 Ты всегда ИИ-ассистент, никогда не выдаёшь себя за человека. В этом чате ты коротким
 дружелюбным разговором выясняешь, что ищет клиент, и заполняешь параметры поиска.
-По ним потом автоматически соберётся запрос маклерам.
+По ним ты СНАЧАЛА ищешь сама — на сайтах и в Telegram-каналах. Маклеров подключаешь, только
+если на сайтах пусто (это предложит система) или клиент сам попросит. Не предлагай маклеров первой.
 
 Твой характер: живая, весёлая девушка из Ташкента с лёгким юмором, которая обожает разбираться
 в квартирах. О себе — только в женском роде («нашла», «поняла», «записала»). К клиенту — на «вы».
@@ -131,9 +132,9 @@ const SYSTEM = `Ты — Ra'no, ИИ-ассистент по подбору жи
 - Ничего не выдумывай, не обещай квартир и цен, не дави и не торопи.
 - ready=true, когда известны deal, city, budget и (кроме участка) rooms, И ты уже спросила
   про пожелания (или клиент сам сказал, что остальное неважно / «ищи» / «хватит»).
-  Тогда в reply одной-двумя строками перечисли собранное и скажи, что сейчас пришлёшь текст
-  запроса на проверку. НЕ пиши, что запрос уже отправлен или передан маклерам: клиент сначала
-  утверждает текст, а маклерам его отправляет сам, одним нажатием из карточек.
+  Тогда в reply одной-двумя строками перечисли собранное и скажи, что начинаешь искать сама.
+  Про маклеров и текст запроса НЕ говори (кроме посуточной аренды: её на сайтах почти нет —
+  скажи, что быстрее найдут маклеры, и система покажет текст запроса).
 - Клиент может потом менять что угодно словами («бюджет 1200», «добавь Юнусабад»,
   «парковка не нужна»). Обнови поля и снова верни ready=true, если главное известно.
 - Если сообщение не про жильё — ответь коротко и мягко верни к поиску. Не выдумывай факты, которых
@@ -710,13 +711,13 @@ async function queueAndWake(env, upd, chat, note) {
 // ───────────────────────────── интервью ─────────────────────────────
 const GREET = {
   ru: "Привет! Я Ra'no 👋 — ИИ-ассистент, которая обожает квартиры в Ташкенте: аренда и покупка.\n\n" +
-    "Ищу двумя способами:\n🔎 Сама — каждый день прочёсываю сайты и Telegram-каналы, выгодное приношу сразу.\n" +
-    "📇 Через маклеров — составлю запрос, вы отправите его в пару нажатий.\n" +
+    "Ищу двумя способами:\n🔎 Сначала сама — каждый день прочёсываю сайты и Telegram-каналы, выгодное приношу сразу.\n" +
+    "📇 Если на сайтах пусто — подключу маклеров: составлю запрос, вы отправите его в пару нажатий.\n" +
     "К каждому варианту — честный разбор цены: дешевле рынка или кто-то загнул 😉\n\n" +
     "С чего начнём? Напишите своими словами, что ищете, — например: «купить двушку в центре до $50 000, нужна ипотека».",
   uz: "Salom! Men Ra'no 👋 — Toshkentdagi kvartiralarni juda yaxshi ko'radigan AI-yordamchiman: ijara va sotib olish.\n\n" +
     "🔎 O'zim har kuni saytlar va Telegram-kanallarni ko'rib chiqaman, zo'r variantlarni darhol olib kelaman.\n" +
-    "📇 Maklerlar orqali — so'rov tuzaman, siz uni bir-ikki bosishda yuborasiz.\n" +
+    "📇 Saytlarda bo'lmasa — maklerlarni ulayman: so'rov tuzaman, siz uni bir-ikki bosishda yuborasiz.\n" +
     "Har bir variantga — halol narx tahlili 😉\n\n" +
     "Nima qidirayotganingizni yozing — masalan: «markazda 2 xonali, $50 000 gacha, ipoteka kerak».",
   en: "Hi! I'm Ra'no, an AI assistant for finding a home in Tashkent. Tell me in your own words what you're looking for — " +
@@ -915,9 +916,9 @@ export async function interviewTurn(env, chat, text) {
       web_app_data: { data: JSON.stringify({ v: 3, replace: true, src: "chat", ans: fin }) } } });
     const alive = await wake(env);
     const lang = fin.lang || "ru";
-    reply += "\n\n" + (alive
-      ? { ru: "📝 Сейчас покажу текст запроса — гляньте, всё ли так…", uz: "📝 So'rov matnini tekshirish uchun hozir yuboraman…", en: "📝 Sending the request text for your review…" }[lang]
-      : { ru: "📝 Текст запроса пришлю через минуту-две — гляньте, всё ли так.", uz: "📝 So'rov matnini 1–2 daqiqada tekshirish uchun yuboraman.", en: "📝 The request text will come for your review in 1–2 minutes." }[lang]);
+    reply += "\n\n" + (fin.deal === "daily"
+      ? { ru: "📇 Посуточно быстрее всего находят маклеры — сейчас покажу текст запроса.", uz: "📇 Kunlik ijarani maklerlar tezroq topadi — so'rov matnini hozir ko'rsataman.", en: "📇 Daily rentals are fastest via brokers — I'll show the request text now." }[lang]
+      : { ru: "🔎 Уже ищу сама по сайтам и каналам — первые варианты пришлю через пару минут.", uz: "🔎 Saytlar va kanallarda o'zim qidiryapman — birinchi variantlarni bir-ikki daqiqada yuboraman.", en: "🔎 Already searching sites and channels myself — first options in a couple of minutes." }[lang]);
   }
   await say(env, chat, reply, { reply_markup: OWNER_KB });
 }

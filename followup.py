@@ -224,6 +224,37 @@ def evening_digest(cfg, store, sale_store, now):
     return bool(text) and _send(cfg, text, rows)
 
 
+def broker_offer(cfg, store, sale_store, now):
+    """Сначала ищет Ra'no сама. Маклеров предлагает, когда на сайтах пусто:
+    покупка — первый проход ничего не дал или за 2 дня меньше 3 подходящих; аренда — сутки без вариантов."""
+    st = store.get_kv("search_start") or {}
+    if not st.get("at") or st.get("offered"):
+        return False
+    start = datetime.fromisoformat(st["at"])
+    if store.conn.execute("SELECT COUNT(*) FROM brokers WHERE status='contacted' AND last_contact>=?",
+                          (st["at"],)).fetchone()[0]:
+        return False                           # уже сам пишет маклерам — не навязываем
+    age_h = (now - start).total_seconds() / 3600
+    why = ""
+    if st.get("deal") == "buy" and sale_store is not None:
+        fp = sale_store.get_kv("first_pass") or {}
+        shown = sale_store.conn.execute("SELECT COUNT(*) FROM listings WHERE notified=1 AND first_seen>=?",
+                                        (st["at"],)).fetchone()[0]
+        if fp.get("at", "") >= st["at"] and not fp.get("fit") and not (sale_store.get_kv("sale_pick") or []):
+            why = "🙈 Пробежалась по всем сайтам и каналам — под ваши условия сейчас ничего нет."
+        elif age_h >= 48 and shown < 3:
+            why = f"🙈 За 2 дня на сайтах нашлось совсем мало подходящего ({shown})."
+    elif st.get("deal") == "rent" and age_h >= 24:
+        sent = store.conn.execute("SELECT COUNT(*) FROM listings WHERE notified=1 AND first_seen>=?",
+                                  (st["at"],)).fetchone()[0]
+        if not sent:
+            why = "🙈 За сутки на сайтах не нашлось подходящей аренды."
+    if not why or not 9 <= now.astimezone(TZ).hour < 22:
+        return False
+    cg.offer_brokers(cfg, store, why)
+    return True
+
+
 def run(cfg, store, sale_store=None, now=None, force=False):
     """Вызывается из главного цикла; сам решает, пора ли."""
     t = datetime.now(timezone.utc).timestamp()
@@ -235,7 +266,8 @@ def run(cfg, store, sale_store=None, now=None, force=False):
     for name, fn in (("silent", lambda: silent_brokers(cfg, store, now)),
                      ("viewing", lambda: viewing_reminders(cfg, store, now)),
                      ("morning", lambda: morning_note(cfg, store, now)),
-                     ("digest", lambda: evening_digest(cfg, store, sale_store, now))):
+                     ("digest", lambda: evening_digest(cfg, store, sale_store, now)),
+                     ("brokers", lambda: broker_offer(cfg, store, sale_store, now))):
         try:
             out[name] = fn()
         except Exception as e:                  # напоминания не должны ронять радар

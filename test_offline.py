@@ -2049,3 +2049,45 @@ assert c["last_pick"][0]["n"] == 1 and c["last_pick"][0]["key"].startswith("sale
 assert "shortlist" in c and "today" in c and "pick_pending" in c
 xdb.unlink(missing_ok=True); ydb.unlink(missing_ok=True)
 print("OK — Ищет Ra'no: Realt24/Joymee/Realting, цена за м², дубли между сайтами, подборка, 👍 → шортлист, экраны")
+
+# ============ сначала ищет сама, маклеров предлагает, только когда на сайтах пусто ============
+zdb = Path("/tmp/test_self.db"); zdb.unlink(missing_ok=True); zs = rr.Store(zdb)
+sdbz = Path("/tmp/test_self_sale.db"); sdbz.unlink(missing_ok=True); zsale = rr.Store(sdbz)
+ZT = []
+ztg = lambda c, m, pl, **k: (ZT.append((m, pl)), {"ok": True})[1]
+buy = {"deal": "buy", "object": "flat", "city": "tashkent", "rooms": ["2"], "budget": "50000", "contact": "bot"}
+with mock.patch.object(rr, "tg_call", ztg):
+    cg.apply_webapp_data(cfg, zs, json.dumps({"v": 3, "replace": True, "ans": buy}))
+    assert not any("Готовый запрос" in (pl.get("text") or "") for m, pl in ZT)        # маклеров не навязываем
+    assert zs.get_kv("request_text") and zs.get_kv("sale_force")                       # текст готов, поиск — сразу
+    st0 = zs.get_kv("search_start"); assert st0["deal"] == "buy" and not st0["offered"]
+    noon = datetime.now(cg.TZ).replace(hour=12)
+    assert not fu.broker_offer(cfg, zs, zsale, noon)                                   # сайты ещё не проверяли
+    zsale.set_kv("first_pass", {"at": datetime.now(timezone.utc).isoformat(), "fit": 3})
+    assert not fu.broker_offer(cfg, zs, zsale, noon)                                   # нашлось — маклеры не нужны
+    zsale.set_kv("first_pass", {"at": datetime.now(timezone.utc).isoformat(), "fit": 0})
+    ZT.clear()
+    assert fu.broker_offer(cfg, zs, zsale, noon)                                       # пусто → предлагаем
+    o = ZT[-1][1]
+    assert "ничего нет" in o["text"] and "q:show" in o["reply_markup"] and "q:later" in o["reply_markup"]
+    assert not fu.broker_offer(cfg, zs, zsale, noon)                                   # один раз
+    ZT.clear()
+    t, _ = cg.handle_request_cb("q:show", cfg, zs, rr.default_settings())
+    assert "Готовый запрос маклерам" in ZT[-1][1]["text"] and "q:ok" in ZT[-1][1]["reply_markup"]
+    assert "ищу дальше сама" in cg.handle_request_cb("q:later", cfg, zs, rr.default_settings())[0]
+    # посуточно — сразу маклеры
+    ZT.clear()
+    cg.apply_webapp_data(cfg, zs, json.dumps({"v": 3, "replace": True, "ans": dict(buy, deal="daily", budget="60")}))
+    assert any("Посуточную" in (pl.get("text") or "") for m, pl in ZT)
+    # аренда: фильтры радара — из разговора; сутки без вариантов → маклеры
+    rs = cg.rent_settings({"deal": "rent", "budget": "800", "rooms": ["2", "3"], "districts": ["2", "8"]}, rr.default_settings())
+    assert rs["max_price_usd"] == 800 and (rs["rooms_min"], rs["rooms_max"]) == (2, 3) and rs["districts"] == ["Мирабад", "Юнусабад"]
+    zs.set_kv("search_start", {"at": (datetime.now(timezone.utc) - timedelta(hours=50)).isoformat(), "deal": "rent", "offered": ""})
+    ZT.clear()
+    assert fu.broker_offer(cfg, zs, None, noon) and "аренды" in ZT[-1][1]["text"]
+    # если уже сам пишет маклерам — не предлагаем
+    zs.set_kv("search_start", {"at": (datetime.now(timezone.utc) - timedelta(hours=50)).isoformat(), "deal": "rent", "offered": ""})
+    zs.upsert_broker("z1", "X", "", "901112299", 3, None, None); zs.broker_status("z1", "contacted")
+    assert not fu.broker_offer(cfg, zs, None, noon)
+zdb.unlink(missing_ok=True); sdbz.unlink(missing_ok=True)
+print("OK — сначала ищет сама: маклеры — только если на сайтах пусто (покупка, аренда), посуточно — сразу")

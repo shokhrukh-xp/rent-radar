@@ -1171,8 +1171,8 @@ def send_listing(cfg, settings: dict, l: dict, likely_makler: bool, text: str = 
 WELCOME_TEXT = (
     "Привет! Я <b>Ra'no</b> 👋 — ИИ-ассистент, которая обожает квартиры в Ташкенте: аренда и покупка.\n\n"
     "Ищу двумя способами:\n"
-    "🔎 Сама — каждый день прочёсываю сайты и Telegram-каналы, выгодное приношу сразу.\n"
-    "📇 Через маклеров — составлю запрос, вы отправите его в пару нажатий.\n"
+    "🔎 Сначала сама — каждый день прочёсываю сайты и Telegram-каналы, выгодное приношу сразу.\n"
+    "📇 Если на сайтах пусто — подключу маклеров: составлю запрос, вы отправите его в пару нажатий.\n"
     "К каждому варианту — честный разбор цены: дешевле рынка или кто-то загнул 😉\n\n"
     "С чего начнём? Напишите своими словами, что ищете, — например: «купить двушку в центре до $50 000, "
     "нужна ипотека» 👇")
@@ -1181,7 +1181,7 @@ HELP_TEXT = """🏠 <b>Ra'no</b> — ваш ИИ-ассистент по пои�
 
 <b>Команды запоминать не нужно.</b> Внизу три кнопки — два способа искать:
 🔎 <b>Ищет Ra'no</b> — я сама смотрю сайты (Uybor, Realt24, Joymee, Realting, Yangiuylar) и Telegram-каналы. Выгодное — сразу, остальное — подборкой в 19:30
-📇 <b>Через маклеров</b> — запрос маклерам по одному, их варианты карточками, шортлист
+📇 <b>Через маклеров</b> — если на сайтах пусто: запрос маклерам по одному, их варианты карточками, шортлист
 ⋯ <b>Ещё</b> — вариант из WhatsApp, цены рынка, текст запроса, начать заново
 
 Поменять поиск — просто напишите («бюджет 60 тысяч», «добавь Юнусабад»).
@@ -2714,6 +2714,9 @@ def process_commands(cfg: dict, store, long_poll: int = 0) -> dict:
             if concierge.apply_webapp_data(cfg, store, wad["data"]):
                 log.info("параметры получены из мини-аппа")
                 changed = True
+                ans = (store.get_kv("anketa") or {}).get("ans") or {}
+                if ans.get("deal") == "rent":     # «ищу сама» по аренде — по параметрам из разговора
+                    settings.update(concierge.rent_settings(ans, settings))
                 push_snapshot(cfg, store, settings, force=True)   # новый текст запроса — в ссылки маклерам
             continue
 
@@ -3179,6 +3182,8 @@ def run_sale_search(cfg: dict, store, settings: dict, force: bool = False) -> in
             sale_sources.queue_pick(store, l, sc, why)
             queued += 1
     sale_sources.day_stats(store, {"seen": seen, "fit": len(unique), "instant": sent, "queued": queued})
+    if first:                                  # первый проход по новым условиям — для «на сайтах пусто → маклеры»
+        store.set_kv("first_pass", {"at": datetime.now(timezone.utc).isoformat(), "fit": len(unique)})
     if first and queued:
         sale_sources.send_pick(cfg, store, reason="Что нашлось сейчас")
     return sent

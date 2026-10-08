@@ -178,14 +178,15 @@ def _():
     rr.send_screen(cfg, scr); rr.send_screen(cfg, rr.via_screen(cfg, store))
 
 
-@scen("2. параметры из интервью → текст запроса")
+@scen("2. параметры из интервью → сначала ищет сама, без запроса маклерам")
 def _():
     ans = {"lang": "ru", "deal": "buy", "object": "flat", "city": "tashkent", "rooms": ["2"], "budget": "50000",
            "note": "ближе к центру, нужна ипотека", "districts": ["2", "8"], "class": "any", "floor_pref": ["nf"],
            "contact": "bot"}
     cg.apply_webapp_data(cfg, store, json.dumps({"v": 3, "replace": True, "src": "chat", "ans": ans}))
     expect(not store.get_kv("fresh_start"), "fresh_start снят")
-    expect("Готовый запрос" in (last() or {}).get("text", ""), "текст запроса показан")
+    expect(not any("Готовый запрос" in r["text"] for r in MSGS if r["scen"] == SCEN), "запрос маклерам не навязан")
+    expect((store.get_kv("search_start") or {}).get("deal") == "buy", "старт самостоятельного поиска записан")
     ss = rr.effective_sale_cfg(cfg, store)["sale_search"]
     expect(ss["max_price_usd"] == 50000 and ss["rooms"] == [2] and ss.get("mortgage"), f"поиск покупки: {ss}")
     expect(set(ss["districts"]) == {"Мирабад", "Юнусабад"}, f"районы {ss['districts']}")
@@ -227,8 +228,20 @@ def _():
         expect("Убрала" in t3, f"Мимо → {t3}")
 
 
-@scen("5. рассылка маклерам по одному")
+@scen("5. на сайтах пусто → предложение маклеров → запрос → рассылка по одному")
 def _():
+    import followup as FU
+    from datetime import datetime, timedelta, timezone
+    ss0 = store.get_kv("search_start") or {}
+    store.set_kv("search_start", {**ss0, "at": (datetime.now(timezone.utc) - timedelta(hours=50)).isoformat(), "offered": ""})
+    noon = datetime.now(cg.TZ).replace(hour=12) + timedelta(days=1)
+    q = sale.get_kv("sale_pick"); sale.set_kv("sale_pick", [])
+    sale.set_kv("first_pass", {"at": datetime.now(timezone.utc).isoformat(), "fit": 0})
+    offered = FU.broker_offer(cfg, store, sale, noon)
+    sale.set_kv("sale_pick", q or [])
+    expect(offered and "q:show" in (last() or {}).get("kb", []), "предложение маклеров, когда пусто")
+    rr.handle_callback("q:show", settings, store, cfg, 1)
+    expect("Готовый запрос" in (last() or {}).get("text", ""), "текст запроса по кнопке")
     rr.send_broker_cards(cfg, store, settings)
     card = last()
     expect(card and any(d.startswith("bw:") for d in card["kb"]), "карточка маклера с кнопками")

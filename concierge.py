@@ -546,9 +546,10 @@ def compose_request(cfg, store, username=None):
     return "\n".join(parts)
 
 
-def finish_anketa(cfg, store):
+def request_message(cfg, store):
+    """Текст запроса маклерам на проверку — с кнопкой «Утвердить и показать маклеров»."""
     rr = _rr()
-    text = compose_request(cfg, store)
+    text = store.get_kv("request_text") or compose_request(cfg, store)
     store.set_kv("request_text", text)
     kb = {"inline_keyboard": [
         [{"text": "✅ Утвердить и показать маклеров", "callback_data": "q:ok"}],
@@ -559,10 +560,51 @@ def finish_anketa(cfg, store):
         "chat_id": cfg["telegram_chat_id"], "parse_mode": "HTML",
         "text": "📝 <b>Готовый запрос маклерам</b>\n\n"
                 f"<code>{rr.escape_html(text)}</code>\n\n"
-                "Гляньте, всё ли так 👀 Можно утвердить или переписать своими словами."
-                + ("\n\n🔎 А по сайтам я уже побежала сама — выгодное пришлю сразу, остальное подборкой."
-                   if (get_anketa(store).get("ans") or {}).get("deal") == "buy" else ""),
+                "Гляньте, всё ли так 👀 Можно утвердить или переписать своими словами.",
         "reply_markup": json.dumps(kb, ensure_ascii=False)})
+
+
+def offer_brokers(cfg, store, why):
+    """Сначала Ra'no ищет сама. Маклеров предлагает, только когда на сайтах пусто (или посуточно)."""
+    rr = _rr()
+    st = store.get_kv("search_start") or {}
+    st["offered"] = datetime.now(timezone.utc).isoformat()
+    store.set_kv("search_start", st)
+    rr.tg_call(cfg, "sendMessage", {
+        "chat_id": cfg["telegram_chat_id"],
+        "text": why + "\n\nДавайте подключим маклеров? Я уже подготовила текст запроса — "
+                      "гляньте, и в пару нажатий разошлём. А на сайтах я продолжу искать сама 👀",
+        "reply_markup": json.dumps({"inline_keyboard": [
+            [{"text": "📇 Да, показать текст запроса", "callback_data": "q:show"}],
+            [{"text": "Пока не надо, ищи сама", "callback_data": "q:later"}]]}, ensure_ascii=False)})
+
+
+def finish_anketa(cfg, store):
+    """Параметры собраны: Ra'no сразу ищет сама по сайтам. Запрос маклерам готовим, но не навязываем."""
+    store.set_kv("request_text", compose_request(cfg, store))
+    deal = (get_anketa(store).get("ans") or {}).get("deal", "rent")
+    store.set_kv("search_start", {"at": datetime.now(timezone.utc).isoformat(), "deal": deal, "offered": ""})
+    if deal == "daily":                       # посуточно на сайтах почти нет — сразу маклеры
+        offer_brokers(cfg, store, "🏨 Посуточную аренду на сайтах почти не выкладывают — "
+                                  "быстрее всего её находят маклеры.")
+
+
+def rent_settings(ans, settings):
+    """Аренда из разговора → фильтры радара аренды (бюджет, комнаты, районы), чтобы «ищу сама» шло по ним."""
+    rr = _rr()
+    s = dict(settings)
+    b = str(ans.get("budget") or "")
+    if b.isdigit():
+        s["max_price_usd"] = int(b)
+    rooms = sorted(int(r) for r in (ans.get("rooms") or []) if str(r).isdigit())
+    if rooms:
+        s["rooms_min"], s["rooms_max"] = rooms[0], (6 if rooms[-1] >= 4 else rooms[-1])
+    elif ans.get("rooms_any"):
+        s["rooms_min"] = s["rooms_max"] = None
+    ds = [rr.DISTRICT_LIST[int(i)] for i in (ans.get("districts") or [])
+          if str(i).isdigit() and int(i) < len(rr.DISTRICT_LIST)]
+    s["districts"] = ds
+    return s
 
 
 def handle_request_cb(data, cfg, store, settings):
@@ -579,6 +621,11 @@ def handle_request_cb(data, cfg, store, settings):
     if act == "again":
         start_anketa(cfg, store)
         return "Начинаем заново", True
+    if act == "show":                          # «Да, показать текст запроса»
+        request_message(cfg, store)
+        return "", True
+    if act == "later":
+        return "Хорошо, ищу дальше сама 🙂", True
     return "", False
 
 
