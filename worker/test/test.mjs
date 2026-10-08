@@ -305,6 +305,8 @@ await post("/svc/snapshot", { offers: [], offers_total: 0, shortlist: 2, written
         p: { ...SLV([{ oid: 22, line: "<b>$41000</b> · 2к", note: "" }, { oid: 21, line: "<b>$44000</b> · 2к", note: "" }]), sort_label: "по цене" },
         m: SLV([]) },
   sl_empty: "📋 Шортлист пуст",
+  screens: { "/rano": { text: "🔎 <b>Ищет Ra'no</b> — сайты", kb: { inline_keyboard: [[{ text: "🔄 Проверить сайты сейчас", callback_data: "R:check" }]] } },
+             "/via": { text: "📇 <b>Через маклеров</b>", kb: { inline_keyboard: [[{ text: "📨 Написать маклерам", callback_data: "b" }]] } } },
   cards: { "22": { text: "🏠 <b>Вариант #22</b>\n<b>Этап:</b> 👍 в шортлисте", kb: { inline_keyboard: [[{ text: "📅 Назначить просмотр", callback_data: "o:view:22" }]] } } },
   texts: { "/rynok": "📊 <b>Рынок</b> Мирабад $1450/м²", "/sale": "🏷 <b>Поиск</b>",
   "/request": "📝 <b>Текущий запрос</b>", "/help": "🏠 Ra'no — кнопки" } });
@@ -351,6 +353,17 @@ assert.deepEqual(got.at(-1).message._note, { oid: 22 });
 await handleUpdate(env, { update_id: ++uid, callback_query: { id: "m9", data: "o:seen:22:g", message: { message_id: 41, chat: { id: +OWNER } } } });
 assert.match(sent.filter(x => x.m === "answerCallbackQuery").at(-1).text, /нравится/);
 assert.equal((await drain()).at(-1).callback_query._toast_done, true);
+// две кнопки поиска — экраны сразу из снимка
+await handleUpdate(env, msg(BTN.rano));
+assert.match(texts().at(-1), /Ищет Ra'no/); assert.ok(JSON.stringify(sent.at(-1).reply_markup).includes("R:check"));
+await handleUpdate(env, msg(BTN.via));
+assert.match(texts().at(-1), /Через маклеров/);
+assert.equal((await drain()).length, 0);
+assert.deepEqual(OWNER_KB.keyboard.map(r => r.map(b => b.text)), [[BTN.rano, BTN.via], [BTN.more]]);
+// объявление с сайта → в шортлист: подсказка сразу, сохранит Python
+await handleUpdate(env, { update_id: ++uid, callback_query: { id: "L1", data: "L:s:sale:joymee:77", message: { message_id: 60, chat: { id: +OWNER } } } });
+assert.match(sent.filter(x => x.m === "answerCallbackQuery").at(-1).text, /шортлист/);
+got = await drain(); assert.equal(got.at(-1).callback_query.data, "L:s:sale:joymee:77"); assert.equal(got.at(-1).callback_query._toast_done, true);
 // «Шортлист» из другого сообщения — новым сообщением, не правкой чужого
 const nEdits = sent.filter(x => x.m === "editMessageText").length;
 await handleUpdate(env, { update_id: ++uid, callback_query: { id: "m6", data: "s:show", message: { message_id: 50, chat: { id: +OWNER } } } });

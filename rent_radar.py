@@ -30,6 +30,7 @@ import requests
 import analyst
 import concierge
 import followup
+import sale_sources
 import market
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -194,8 +195,8 @@ DISTRICTS = {
     "Мирабад": ["мирабад", "mirobod", "mirabad"],
     "Юнусабад": ["юнусабад", "yunusobod", "yunusabad"],
     "Чиланзар": ["чиланзар", "chilonzor", "chilanzar"],
-    "Мирзо-Улугбек": ["мирзо улугбек", "мирзо-улугбек", "mirzo ulug", "улугбек"],
-    "Шайхантахур": ["шайхантахур", "shayxontohur", "шайхантаур"],
+    "Мирзо-Улугбек": ["мирзо улугбек", "мирзо-улугбек", "mirzo ulug", "mirzo-ulug", "улугбек"],
+    "Шайхантахур": ["шайхантахур", "shayxontohur", "shayxontoxur", "shaykhantakhur", "шайхантаур"],
     "Алмазар": ["алмазар", "olmazor", "almazar"],
     "Учтепа": ["учтепа", "uchtepa"],
     "Яшнабад": ["яшнабад", "yashnobod", "yashnabad"],
@@ -890,7 +891,8 @@ class Store:
             "price_usd", "rooms", "district", "district_raw", "phones", "created_at",
             "seller", "seller_id", "is_business", "photo_urls", "lat", "lon", "area",
             "floor", "floors_total", "furnished", "house_type", "commission",
-            "seller_ads", "premium", "seller_kind", "listed_since", "new_building", "repair")
+            "seller_ads", "premium", "seller_kind", "listed_since", "new_building", "repair",
+            "site", "seller_hint", "mortgage", "price_note", "score", "why")
 
     def pack(self, listing: dict) -> str:
         d = {k: listing.get(k) for k in self.KEEP}
@@ -1055,6 +1057,8 @@ def format_message(l: dict, cfg: dict, likely_makler: bool) -> str:
         lines.append(f'🕐 {dt.astimezone(TASHKENT_TZ).strftime("%d.%m %H:%M")}')
 
     ev = []
+    if l.get("price_note"):
+        ev.append(l["price_note"])
     if l.get("seller_ads") is not None and l["seller_ads"] >= 0:
         ev.append(f"{l['seller_ads']} объявл. у продавца")
     if (l.get("commission") or "").lower() in ("нет", "yo'q", "no"):
@@ -1160,15 +1164,14 @@ WELCOME_TEXT = (
 
 HELP_TEXT = """🏠 <b>Ra'no</b> — ассистент по поиску жилья
 
-<b>Команды запоминать не нужно.</b> Внизу четыре кнопки:
-🔎 <b>Мой поиск</b> — что сейчас ищем; поменять — просто напишите («бюджет 60 тысяч», «добавь Юнусабад»)
-🏠 <b>Варианты</b> — что прислали маклеры: новые карточки и шортлист
-📇 <b>Маклерам</b> — разослать запрос: маклеры по одному, текст уже набран
-⋯ <b>Ещё</b> — добавить вариант из WhatsApp, шортлист, цены рынка, поиск на Uybor, начать заново
+<b>Команды запоминать не нужно.</b> Внизу три кнопки — два способа искать:
+🔎 <b>Ищет Ra'no</b> — я сама смотрю сайты (Uybor, Realt24, Joymee, Realting, Yangiuylar) и Telegram-каналы. Выгодное — сразу, остальное — подборкой в 19:30
+📇 <b>Через маклеров</b> — запрос маклерам по одному, их варианты карточками, шортлист
+⋯ <b>Ещё</b> — вариант из WhatsApp, цены рынка, текст запроса, начать заново
 
-Можно и словами: «что прислали?», «давай заново», «мне скинули квартиру — добавь».
-Варианты из WhatsApp — просто перешлите сюда, фото и текст я соберу в карточку.
-В шортлисте нажмите номер варианта — откроется карточка: уточнить у маклера, назначить просмотр, заметка, «посмотрел».
+Поменять поиск — просто напишите («бюджет 60 тысяч», «добавь Юнусабад»).
+Варианты из WhatsApp — перешлите сюда, соберу карточку с анализом цены.
+Понравилось объявление с сайта — «👍 В шортлист». В шортлисте нажмите номер: уточнить, назначить просмотр, заметка, «посмотрел».
 Сама напомню: если маклер молчит сутки, утром в день просмотра и за 2 часа; в 20:00 — итоги дня.
 
 Для тонкой настройки радара остались команды: /menu, /status, /owner, /segment, /work, /photos, /pause, /resume"""
@@ -1371,6 +1374,9 @@ def handle_command(text: str, settings: dict, store, cfg: dict):
         return "", None
     if cmd == "/help":
         return HELP_TEXT, None
+    if cmd in ("/rano", "/via"):
+        send_screen(cfg, (rano_screen if cmd == "/rano" else via_screen)(cfg, store))
+        return "", None
     if cmd == "/menu":
         return "", "M"
     if cmd == "/status":
@@ -1570,6 +1576,7 @@ def effective_sale_cfg(cfg, store):
           if str(i).isdigit() and int(i) < len(DISTRICT_LIST)]
     if ds:
         ss["districts"] = ds
+    ss["mortgage"] = "ипотек" in str(ans.get("note") or "").lower() or ans.get("payment") == "mortgage"
     ss["enabled"] = True
     return {**cfg, "sale_search": ss}
 
@@ -1894,7 +1901,7 @@ def outreach_empty_text(store, deal) -> str:
     return (f"📇 Новых маклеров {_kind(deal)} с контактом пока нет.\n"
             f"Всего в базе {_kind(deal)}: {total} (с контактом {withph}).\n"
             + ("Собираю их с Realt24, Joymee, Realting, Uybor и из Telegram-каналов — "
-               "загляните через час — кнопка «📇 Маклерам»" if deal == "sale" else
+               "загляните через час — кнопка «📇 Через маклеров»" if deal == "sale" else
                "База пополняется по мере работы радара — попробуйте позже."))
 
 
@@ -1956,7 +1963,7 @@ def send_next_broker(cfg, store) -> bool:
     if not pool:
         send_telegram(cfg, f"✅ Рассылка закончена: написано {st.get('sent', 0)}, "
                            f"пропущено {st.get('skipped', 0)}. Новые маклеры добавляются сами — "
-                           "загляните через пару часов — кнопка «📇 Маклерам».")
+                           "загляните через пару часов — кнопка «📇 Через маклеров».")
         return False
     b = pool[0]
     body, first_row = broker_card(b, deal, text)
@@ -1976,6 +1983,80 @@ def send_next_broker(cfg, store) -> bool:
 # Python заранее отдаёт воркеру готовые карточки (варианты, очередь маклеров, текст
 # запроса), а воркер показывает их сам. Нажатия потом доходят до Python и сохраняются.
 SNAPSHOT_EVERY = 15
+
+
+SRC_LABEL = {"realt24": "Realt24", "joymee": "Joymee", "realting": "Realting",
+             "yangiuylar": "Yangiuylar", "telegram": "Telegram-каналы"}
+
+
+def rano_screen(cfg, store) -> dict:
+    """«🔎 Ищет Ra'no»: что ищу сама, где, что нашла сегодня, что ждёт в подборке."""
+    eff = effective_sale_cfg(cfg, store)
+    ss = eff.get("sale_search") or {}
+    if not ss.get("enabled"):
+        srcs = ", ".join(n for n, x in (cfg.get("sources") or {}).items() if x.get("enabled")) or "—"
+        return {"text": "🔎 <b>Ищет Ra'no</b> — сама смотрю объявления, без маклеров\n\n"
+                        f"Сейчас слежу за арендой: {escape_html(srcs)}. Подходящие присылаю сразу.\n"
+                        "Поиск покупки по всем сайтам включается, когда в чате вы ищете купить квартиру.",
+                "kb": {"inline_keyboard": [[{"text": "✏️ Изменить, что ищем", "callback_data": "cmd:/mysearch"}]]}}
+    st, pend, sent_total, stats = {}, 0, 0, {}
+    if SALE_DB_PATH.exists():
+        sst = Store(SALE_DB_PATH)
+        try:
+            st = sale_sources.day_stats(sst)
+            pend = len(sale_sources.pick_pending(sst))
+            sent_total = sst.conn.execute("SELECT COUNT(*) FROM listings WHERE notified=1").fetchone()[0]
+            stats = sst.get_kv("sale_src_stats") or {}
+        finally:
+            sst.conn.close()
+    srcs = ["Uybor"] + [SRC_LABEL[k] + (" ⚠️" if (stats.get(k) or {}).get("err") else "")
+                        for k in sale_sources.SOURCES if k not in (ss.get("sources_off") or [])]
+    lines = ["🔎 <b>Ищет Ra'no</b> — сама смотрю сайты и каналы, без маклеров", "",
+             "Ищу: " + escape_html(sale_criteria_text(ss).split("\n")[0])
+             + (" · нужна ипотека" if ss.get("mortgage") else ""),
+             "Где: " + ", ".join(srcs), "",
+             f"Сегодня: новых объявлений {st.get('seen', 0)}, подошло {st.get('fit', 0)}",
+             f"Прислала сразу: {st.get('instant', 0)} · в подборке ждут: {pend}",
+             f"Всего прислала: {sent_total}", "",
+             "Самые выгодные (ниже рынка, снижена цена) — сразу. Остальные — подборкой в 19:30, лучшие сверху."]
+    rows = []
+    if pend:
+        rows.append([{"text": f"📬 Показать подборку сейчас ({pend})", "callback_data": "R:pick"}])
+    rows.append([{"text": "🔄 Проверить сайты сейчас", "callback_data": "R:check"}])
+    rows.append([{"text": "✏️ Изменить, что ищем", "callback_data": "cmd:/mysearch"},
+                 {"text": "📊 Цены рынка", "callback_data": "cmd:/rynok"}])
+    rows.append([{"text": "📋 Шортлист", "callback_data": "s:show"}])
+    return {"text": "\n".join(lines), "kb": {"inline_keyboard": rows}}
+
+
+def via_screen(cfg, store) -> dict:
+    """«📇 Через маклеров»: запрос маклерам, их варианты, ожидание ответов."""
+    q = lambda sql, *a: store.conn.execute(sql, a).fetchone()[0]
+    written = q("SELECT COUNT(*) FROM brokers WHERE status='contacted'")
+    got = q("SELECT COUNT(*) FROM broker_offers WHERE broker_chat NOT LIKE 'site:%' AND status != 'message'")
+    pool = q("SELECT COUNT(*) FROM broker_offers WHERE status IN ('new','later')")
+    sl = q("SELECT COUNT(*) FROM broker_offers WHERE status IN ('shortlist','asked')")
+    waiting = q("SELECT COUNT(*) FROM broker_offers WHERE status='asked' AND replied_at IS NULL")
+    lines = ["📇 <b>Через маклеров</b> — запрос уходит маклерам, варианты приходят сюда карточками", "",
+             f"Маклерам написали: {written} · прислали вариантов: {got}",
+             f"🏠 Ждут вашего решения: {pool} · 📋 в шортлисте: {sl}"]
+    if waiting:
+        lines.append(f"⏳ Ждём ответа на уточнение: {waiting}")
+    lines += ["", "Пишите маклерам понемногу — 10–15 в день, так номер не попадёт в спам."]
+    rows = []
+    if pool:
+        rows.append([{"text": f"🏠 Варианты ({pool})", "callback_data": "cmd:/offers"}])
+    rows.append([{"text": "📨 Написать маклерам" if written else "📨 Разослать запрос маклерам",
+                  "callback_data": "b"}])
+    rows.append([{"text": "📋 Шортлист", "callback_data": "s:show"},
+                 {"text": "💬 Вариант из WhatsApp", "callback_data": "cmd:/add"}])
+    return {"text": "\n".join(lines), "kb": {"inline_keyboard": rows}}
+
+
+def send_screen(cfg, scr):
+    tg_call(cfg, "sendMessage", {"chat_id": cfg["telegram_chat_id"], "text": scr["text"],
+                                 "parse_mode": "HTML", "disable_web_page_preview": True,
+                                 "reply_markup": json.dumps(scr["kb"], ensure_ascii=False)})
 
 
 def ui_snapshot(cfg, store, settings) -> dict:
@@ -2020,8 +2101,15 @@ def ui_snapshot(cfg, store, settings) -> dict:
             log.info("сводка рынка для снимка: %s", e)
     if mk.get("text"):
         texts["/rynok"] = mk["text"]
+    screens = {}
+    for name, fn in (("/rano", rano_screen), ("/via", via_screen)):
+        try:
+            screens[name] = fn(cfg, store)
+        except Exception as e:
+            log.info("экран %s для снимка: %s", name, e)
     return {"offers": offers, "offers_total": len(pool), "shortlist": shortlist, "written": written,
             "sl": sl, "sl_empty": concierge.SL_EMPTY, "cards": cards, "texts": texts,
+            "screens": screens,
             "free": cfg.get("free_offers", 2), "deal": deal,
             "brokers": brokers, "brokers_total": len(ranked),
             "header": outreach_header(store, deal, text, len(ranked)) if ranked else "",
@@ -2118,6 +2206,34 @@ def handle_callback(data: str, settings: dict, store, cfg: dict, message_id=None
     if d.startswith("o:"):
         toast, _ = concierge.handle_offer_cb(d, cfg, store, message_id)
         return toast, None
+    if d.startswith("L:"):                     # объявление с сайта: в шортлист / мимо
+        kind, key = d[2:3], d[4:]
+        row = None
+        if SALE_DB_PATH.exists():
+            sst = Store(SALE_DB_PATH)
+            try:
+                row = sst.conn.execute("SELECT data FROM listings WHERE key LIKE ?",
+                                       (key.replace("%", "") + "%",)).fetchone()
+            finally:
+                sst.conn.close()
+        if not row:
+            return "Объявление не найдено", None
+        if kind == "n":
+            return "Убрала", None
+        oid, new = concierge.add_site_offer(cfg, store, json.loads(row[0] or "{}"))
+        return ("👍 В шортлисте — там уточнение, просмотр, заметки" if new else "Уже в шортлисте"), None
+    if d == "R:pick":
+        if not SALE_DB_PATH.exists():
+            return "Подборка пуста", None
+        sst = Store(SALE_DB_PATH)
+        try:
+            n = sale_sources.send_pick(cfg, sst, reason="Подборка")
+        finally:
+            sst.conn.close()
+        return ("" if n else "Подборка пуста — новое пришлю, как найду"), None
+    if d == "R:check":
+        store.set_kv("sale_force", True)
+        return "Проверяю все сайты — 1–2 минуты", None
     if d.startswith("s:"):
         toast, done = concierge.handle_shortlist_cb(d, cfg, store, message_id)
         if done:
@@ -2691,9 +2807,11 @@ def classify_sale_seller(l: dict, ss: dict, store, cfg) -> str:
     says_owner = bool(hot_flags(l.get("text") or "", cfg)) \
         or any(w in low for w in SALE_OWNER_WORDS)
     limit = ss.get("max_owner_ads", 2)
-    uid = (l.get("seller_id") or "").partition(":")[2]
-    ads = uybor_user_ads(uid, store, cfg)
+    sid = l.get("seller_id") or ""
+    uid = sid.partition(":")[2]
+    ads = uybor_user_ads(uid, store, cfg) if sid.startswith("uybor:") else -1   # у других сайтов — своя пометка
     l["seller_ads"] = ads
+    hint = l.get("seller_hint") or ""
 
     why = ""
     if not says_owner:
@@ -2706,7 +2824,14 @@ def classify_sale_seller(l: dict, ss: dict, store, cfg) -> str:
             why = f"телефон встречается в {spread} объявлениях"
     if not why and ads > limit:
         why = f"у продавца {ads} объявлений — агентство или маклер"
-    l["seller_kind"] = "agency" if why else ("unknown" if ads < 0 else "owner")
+    if not why and hint in ("agency", "developer"):
+        why = "застройщик" if hint == "developer" else f"агентство/посредник по данным {l.get('site') or 'сайта'}"
+    if why:
+        l["seller_kind"] = "agency"
+    elif hint == "owner" or ads >= 0:
+        l["seller_kind"] = "owner"
+    else:
+        l["seller_kind"] = "unknown"
     return why
 
 
@@ -2718,6 +2843,8 @@ def format_sale_message(l: dict, cfg: dict) -> str:
     district = l.get("district") or "район не указан"
     who = {"owner": "от собственника", "agency": "агентство / маклер"}.get(
         l.get("seller_kind"), "продавец не проверен")
+    if l.get("seller_hint") == "developer":
+        who = "от застройщика"
     lines = [f"🏷 <b>Продажа · {who}</b> · {escape_html(district)}"]
     spec = []
     if l.get("rooms"):
@@ -2747,6 +2874,8 @@ def format_sale_message(l: dict, cfg: dict) -> str:
     if text:
         lines.append("\n" + escape_html(text[:220]) + ("…" if len(text) > 220 else ""))
     ev = []
+    if l.get("price_note"):
+        ev.append(l["price_note"])
     if l.get("seller_ads") is not None and l["seller_ads"] >= 0:
         ev.append(f'объявлений у продавца на Uybor: {l["seller_ads"]}')
     flags = hot_flags(l.get("text") or "", cfg)
@@ -2762,9 +2891,11 @@ def format_sale_message(l: dict, cfg: dict) -> str:
     since = parse_iso(l.get("listed_since") or "")
     if since:
         days = age_days(l["listed_since"])
-        lines.append(f'🔁 Перевыложено: впервые на Uybor {since.astimezone(TASHKENT_TZ).strftime("%d.%m.%Y")}'
+        lines.append(f'🔁 Перевыложено: впервые замечено {since.astimezone(TASHKENT_TZ).strftime("%d.%m.%Y")}'
                      + (f" — на рынке ~{days:.0f} дн." if days else ""))
-    lines.append(f'\n<a href="{l["url"]}">Открыть на Uybor</a>')
+    if l.get("why"):
+        lines.append("⭐ " + escape_html(", ".join(l["why"])))
+    lines.append(f'\n<a href="{l["url"]}">Открыть на {escape_html(l.get("site") or "Uybor")}</a>')
     return "\n".join(lines)
 
 
@@ -2778,7 +2909,7 @@ def sale_criteria_text(ss: dict) -> str:
     else:
         sellers = "Продавцы — собственники и маклеры/агентства; в карточке помечено, кто продаёт."
     return (f'{rooms} · до ${_money(ss.get("max_price_usd", 0))} · {districts}\n'
-            f'{sellers} Источник — Uybor.')
+            f'{sellers} Источники — Uybor, Realt24, Joymee, Realting, Yangiuylar и Telegram-каналы.')
 
 
 def sale_fingerprint(ss: dict) -> str:
@@ -2835,14 +2966,21 @@ def find_sale_dup(l: dict, store, cfg: dict):
     return key
 
 
-def run_sale_search(cfg: dict, store, settings: dict) -> int:
-    """Один проход поиска квартиры для покупки. Возвращает число отправленных."""
+def run_sale_search(cfg: dict, store, settings: dict, force: bool = False) -> int:
+    """Один проход поиска квартиры для покупки по всем источникам.
+    Сильные варианты (ниже рынка, снижена цена) — сразу, остальные — в подборку дня.
+    Возвращает число отправленных сразу."""
     ss = cfg.get("sale_search") or {}
+    listings = []
+    if (ss.get("uybor") or {}).get("enabled", True):
+        try:
+            listings = fetch_uybor_sale(ss, cfg)
+        except Exception as e:
+            log.warning("[продажа] Uybor: %s", e)
     try:
-        listings = fetch_uybor_sale(ss, cfg)
+        listings += sale_sources.fetch_due(ss, cfg, store, force=force)
     except Exception as e:
-        log.warning("[продажа] ошибка получения: %s", e)
-        return 0
+        log.warning("[продажа] другие источники: %s", e)
     # раз в сутки — срез рынка для анализа (сам ловит свои ошибки)
     market.maybe_scan(store, cfg, sale_district_ids(ss))
 
@@ -2856,14 +2994,18 @@ def run_sale_search(cfg: dict, store, settings: dict) -> int:
                            "(SELECT key FROM listings WHERE notified=0)")
         store.conn.execute("DELETE FROM listings WHERE notified=0")
         store.conn.commit()
+        store.set_kv("sale_pick", [])
         log.info("[продажа] условия изменились — пересматриваю отсеянные объявления")
 
-    candidates = []
+    candidates, seen = [], 0
     for l in listings:
         try:
             if store.known(l["key"]):
                 continue
-            why, retry = sale_reject(l, ss, store, cfg)
+            seen += 1
+            sale_sources.normalize(l, cfg)
+            why, retry = ("в цене только первый взнос, полной цены нет", False) \
+                if l.get("down_payment_only") else sale_reject(l, ss, store, cfg)
             if why:
                 if not retry:
                     store.save(l, notified=False)
@@ -2881,19 +3023,21 @@ def run_sale_search(cfg: dict, store, settings: dict) -> int:
     # повтор пройдёт через find_dup в следующий проход, когда оригинал уже в базе
     unique = []
     for l in candidates:
-        if not any(_same_sale(l, u, cfg) for u in unique):
+        if not any(_same_sale(l, u, cfg) or sale_sources.same_flat(l, u) for u in unique):
             unique.append(l)
 
     if settings.get("paused"):
         return 0          # ничего не сохраняем — пришлём после /resume
-    if not intro_sent or criteria_changed:
+    first = not intro_sent or criteria_changed
+    if first:
         days = ss.get("notify_max_age_days", 14)
-        found = (f"За последние {days} дней нашлось подходящих: {len(unique)} — присылаю."
+        found = (f"За последние {days} дней нашлось подходящих: {len(unique)}. Самые выгодные пришлю "
+                 f"отдельно, остальные — одной подборкой, лучшие сверху."
                  if unique else
                  f"За последние {days} дней подходящих нет — пришлю, как только появятся.")
         title = "Условия поиска обновлены" if intro_sent else "Поиск квартиры для покупки включён"
         intro = (f"🏷 <b>{title}</b>\n" + sale_criteria_text(ss) + "\n\n" + found
-                 + "\nСтатус поиска — «⋯ Ещё» → «Поиск на Uybor»")
+                 + "\nСтатус — кнопка «🔎 Ищет Ra'no»")
         if not send_telegram(cfg, intro):
             return 0      # Telegram недоступен — всё повторим в следующий проход
         store.set_kv("sale_intro_sent", True)
@@ -2903,20 +3047,32 @@ def run_sale_search(cfg: dict, store, settings: dict) -> int:
     # чтобы новые не получили анализ дважды
     backfill_sale_analysis(cfg, store, settings)
 
-    sent = 0
-    for l in unique[:ss.get("first_run_limit", 15)]:
-        dup = find_sale_dup(l, store, cfg)
+    day = sale_sources.day_stats(store)
+    cap = ss.get("instant_per_day", 6)         # сразу — не больше стольких в день, остальное подборкой
+    sent = queued = 0
+    for l in unique[:ss.get("first_run_limit", 25) * 4]:
+        dup = find_sale_dup(l, store, cfg) or sale_sources.structural_dup(store, l)
         if dup:
             store.save(l, notified=False, dup_of=dup)
             continue
-        if not send_listing(cfg, settings, l, False, text=format_sale_message(l, cfg)):
-            log.info("[продажа] не отправилось, повторю позже: %s", l["title"][:45])
-            break         # не сохраняем — объявление придёт в следующий проход
-        store.save(l, notified=True)
-        sent += 1
-        log.info("[продажа] уведомление: %s", l["title"][:60])
-        send_sale_analysis(cfg, store, l)
-        time.sleep(1)
+        sc, why, strong, _ = sale_sources.score(store, l, cfg, ss)
+        l["score"], l["why"] = sc, why
+        if strong and day.get("instant", 0) + sent < cap:
+            if not send_listing(cfg, settings, l, False, text=format_sale_message(l, cfg)):
+                log.info("[продажа] не отправилось, повторю позже: %s", l["title"][:45])
+                break     # не сохраняем — объявление придёт в следующий проход
+            store.save(l, notified=True)
+            sent += 1
+            log.info("[продажа] сразу (%s): %s", sc, l["title"][:60])
+            send_sale_analysis(cfg, store, l, kb=sale_kb(l["key"]))
+            time.sleep(1)
+        else:
+            store.save(l, notified=False)
+            sale_sources.queue_pick(store, l, sc, why)
+            queued += 1
+    sale_sources.day_stats(store, {"seen": seen, "fit": len(unique), "instant": sent, "queued": queued})
+    if first and queued:
+        sale_sources.send_pick(cfg, store, reason="Что нашлось сейчас")
     return sent
 
 
@@ -2924,14 +3080,25 @@ def sale_district_ids(ss: dict) -> list:
     return [i for i, name in UYBOR_DISTRICT_IDS.items() if name in (ss.get("districts") or [])]
 
 
-def send_sale_analysis(cfg: dict, store, l: dict) -> bool:
-    """Анализ варианта — отдельным сообщением: в подпись к фото (1024 символа) не влезает."""
+def sale_kb(key):
+    return {"inline_keyboard": [[{"text": "👍 В шортлист", "callback_data": f"L:s:{key}"[:64]},
+                                 {"text": "👎 Мимо", "callback_data": f"L:n:{key}"[:64]}]]}
+
+
+def send_sale_analysis(cfg: dict, store, l: dict, kb=None) -> bool:
+    """Анализ варианта — отдельным сообщением: в подпись к фото (1024 символа) не влезает.
+    С кнопками «В шортлист / Мимо», если передали kb."""
     try:
         text = market.format_analysis(store, l, cfg)
     except Exception as e:
         log.warning("[продажа] анализ %s не удался: %s", l.get("key"), e)
-        return False
-    return bool(text) and send_telegram(cfg, text)
+        text = ""
+    if not kb:
+        return bool(text) and send_telegram(cfg, text)
+    return tg_call(cfg, "sendMessage", {
+        "chat_id": cfg["telegram_chat_id"], "text": text or "Что делаем с этим вариантом?",
+        "parse_mode": "HTML", "disable_web_page_preview": True,
+        "reply_markup": json.dumps(kb, ensure_ascii=False)}) is not None
 
 
 def backfill_sale_analysis(cfg: dict, store, settings: dict) -> int:
@@ -3030,6 +3197,16 @@ def run():
     signal.signal(signal.SIGTERM, lambda *_: stop.update(flag=True))
 
     detect_bot_username(cfg)
+    if not once and store.get_kv("kb_v") != 2:      # новые кнопки внизу — показать один раз
+        if tg_call(cfg, "sendMessage", {
+                "chat_id": cfg["telegram_chat_id"], "parse_mode": "HTML",
+                "text": "✨ <b>Обновила кнопки внизу</b>\n\n"
+                        "🔎 <b>Ищет Ra'no</b> — я сама смотрю Uybor, Realt24, Joymee, Realting, Yangiuylar и "
+                        "Telegram-каналы. Выгодное присылаю сразу, остальное — подборкой в 19:30.\n"
+                        "📇 <b>Через маклеров</b> — запрос маклерам, их варианты и шортлист.\n"
+                        "⋯ <b>Ещё</b> — всё остальное.",
+                "reply_markup": json.dumps(concierge.OWNER_KB, ensure_ascii=False)}) is not None:
+            store.set_kv("kb_v", 2)
     enabled = {name: s for name, s in cfg["sources"].items() if s.get("enabled")}
     next_run = {name: 0.0 for name in enabled}
     mode = " (разовый проход)" if once else (f" на {minutes:.0f} мин" if minutes else "")
@@ -3140,14 +3317,27 @@ def run():
             except Exception as e:
                 log.warning("[маклеры продажи] сбор не удался: %s", e)
 
-        if sale_store is not None and (once or now >= next_sale):
+        force_sale = bool(store.get_kv("sale_force"))          # «Проверить сайты сейчас»
+        if sale_store is not None and (once or now >= next_sale or force_sale):
             next_sale = now + (sale_cfg.get("uybor") or {}).get("interval_seconds", 600)
+            if force_sale:
+                store.set_kv("sale_force", False)
             try:
-                n = run_sale_search(effective_sale_cfg(cfg, store), sale_store, settings)
+                n = run_sale_search(effective_sale_cfg(cfg, store), sale_store, settings, force=force_sale)
+                if force_sale:
+                    st = sale_sources.day_stats(sale_store)
+                    send_telegram(cfg, f"🔄 Проверила все сайты. Сегодня просмотрено {st.get('seen', 0)}, "
+                                       f"подошло {st.get('fit', 0)}; в подборке ждут "
+                                       f"{len(sale_sources.pick_pending(sale_store))}.")
                 if n:
                     log.info("[продажа] новых: %d", n)
             except Exception as e:      # поиск покупки не должен ронять радар
                 log.warning("[продажа] проход не удался: %s", e)
+        if sale_store is not None and not once:
+            try:
+                sale_sources.maybe_daily_pick(cfg, sale_store)   # 19:30 — подборка дня
+            except Exception as e:
+                log.warning("[продажа] подборка: %s", e)
 
         if first_run:
             total, _ = store.counts()

@@ -1072,7 +1072,7 @@ with mock.patch.object(rr, "tg_call", fake2):
 with mock.patch.object(rr, "tg_call", fake2):
     SENT2.clear()
     rr.handle_command("/app", rr.default_settings(), ms2, cfg)
-    assert any("Мой поиск" in pl.get("reply_markup", "") for _, pl in SENT2)
+    assert any("Ищет Ra" in pl.get("reply_markup", "") for _, pl in SENT2)
     SENT2.clear()
     rr.handle_command("/steps", rr.default_settings(), ms2, cfg)
     assert any("Анкета" in str(pl.get("text", "")) for _, pl in SENT2)
@@ -1201,7 +1201,7 @@ def _iso(days):
 
 def uy(id_, user, district, room=1, price=40000, cur="usd", days=1, desc="Продаётся квартира"):
     return {"id": id_, "userId": user, "districtId": district, "room": room, "price": price,
-            "priceCurrency": cur, "square": 30, "floor": 3, "floorTotal": 5,
+            "priceCurrency": cur, "square": 30, "floor": id_ % 9 + 1, "floorTotal": 12,
             "isNewBuilding": False, "repair": "evro", "createdAt": _iso(days),
             "description": desc, "address": "ул. Тестовая", "media": []}
 
@@ -1246,9 +1246,12 @@ assert len(sl) == 8 and len({x["key"] for x in sl}) == 8      # дубль id 10
 assert all(x["key"].startswith("sale:uybor:") for x in sl)
 assert sl[0]["source"] == "Uybor · продажа" and sl[0]["repair"] == "evro"
 
+import sale_sources
+_fd = mock.patch.object(sale_sources, "fetch_due", lambda *a, **k: []); _fd.start()   # только Uybor
 sdb = Path("/tmp/test_sale.db"); sdb.unlink(missing_ok=True)
 sstore = rr.Store(sdb)
 sent_msgs = []
+shown = lambda i: any(f"listings/{i}" in m[1] for m in sent_msgs)
 def fake_sale_tg(cfg_, method, payload, timeout=20, quiet=False):
     sent_msgs.append((method, payload.get("text") or payload.get("media") or ""))
     return {"ok": True, "result": {}}
@@ -1285,10 +1288,11 @@ sdb.unlink(missing_ok=True); sstore = rr.Store(sdb); sent_msgs.clear()
 with mock.patch.object(rr.requests, "get", fake_uy_get), mock.patch.object(rr, "tg_call", fake_sale_tg), \
         mock.patch.object(rr.time, "sleep"):
     n = rr.run_sale_search(ss_tg, sstore, {"photos": False})
-assert n == 3, (n, sent_msgs)
+assert n == 0, (n, sent_msgs)                      # ниже рынка не нашлось — всё в подборку
 assert "Поиск квартиры для покупки включён" in sent_msgs[0][1]
 assert "нашлось подходящих: 3" in sent_msgs[0][1] and "45 дней" in sent_msgs[0][1]
-assert sum("Продажа · от собственника" in m[1] for m in sent_msgs) == 3
+assert "Что нашлось сейчас" in sent_msgs[-1][1] and all(shown(i) for i in (101, 104, 202))
+assert sent_msgs[-1][1].count("собственник") == 3
 # повторный проход ничего не дублирует и вступление не повторяет
 sent_msgs.clear()
 with mock.patch.object(rr.requests, "get", fake_uy_get), mock.patch.object(rr, "tg_call", fake_sale_tg), \
@@ -1306,7 +1310,8 @@ assert not sstore.known("sale:uybor:101")          # придёт, когда Te
 sent_msgs.clear()
 with mock.patch.object(rr.requests, "get", fake_uy_get), mock.patch.object(rr, "tg_call", fake_sale_tg), \
         mock.patch.object(rr.time, "sleep"):
-    assert rr.run_sale_search(ss_tg, sstore, {"photos": False}) == 3
+    assert rr.run_sale_search(ss_tg, sstore, {"photos": False}) == 0
+assert all(shown(i) for i in (101, 104, 202))
 
 # пауза: ничего не шлём и не помечаем
 sdb.unlink(missing_ok=True); sstore = rr.Store(sdb); sent_msgs.clear()
@@ -1356,16 +1361,17 @@ EXPECT_ROOMS = "1,2"
 sdb.unlink(missing_ok=True); sstore = rr.Store(sdb); sent_msgs.clear()
 with mock.patch.object(rr.requests, "get", fake_uy_get), mock.patch.object(rr, "tg_call", fake_sale_tg), \
         mock.patch.object(rr.time, "sleep"):
-    assert rr.run_sale_search(ss_tg, sstore, {"photos": False}) == 3        # только собственники
+    rr.run_sale_search(ss_tg, sstore, {"photos": False})
+assert sum(shown(i) for i in (101, 104, 202)) == 3                      # только собственники
 EXPECT_ROOMS = None; sent_msgs.clear()
 with mock.patch.object(rr.requests, "get", fake_uy_get), mock.patch.object(rr, "tg_call", fake_sale_tg), \
         mock.patch.object(rr.time, "sleep"):
     n = rr.run_sale_search(ss_all, sstore, {"photos": False})
-assert n == 3, (n, [m[1][:60] for m in sent_msgs])                      # 102, 201 и 3-комнатная 301
+assert all(shown(i) for i in (102, 201, 301)), [m[1][:60] for m in sent_msgs]   # 102, 201 и 3-комнатная 301
 assert "Условия поиска обновлены" in sent_msgs[0][1] and "нашлось подходящих: 3" in sent_msgs[0][1]
-assert sum("агентство / маклер" in m[1] for m in sent_msgs) == 2         # 102 и 201
-assert any("3-комн" in m[1] and "от собственника" in m[1] for m in sent_msgs)  # 301
-assert not any("uybor.uz/listings/101" in m[1] for m in sent_msgs)     # не повторили
+assert sent_msgs[-1][1].count("агентство/маклер") == 2                  # 102 и 201
+assert any("3к" in ln and "собственник" in ln and "listings/301" in ln for ln in sent_msgs[-1][1].split("\n"))
+assert not shown(101)                                                   # не повторили
 sent_msgs.clear()
 with mock.patch.object(rr.requests, "get", fake_uy_get), mock.patch.object(rr, "tg_call", fake_sale_tg), \
         mock.patch.object(rr.time, "sleep"):
@@ -1399,7 +1405,7 @@ sdb.unlink(missing_ok=True); sstore = rr.Store(sdb); sent_msgs.clear()
 with mock.patch.object(rr.requests, "get", fake_uy_get), mock.patch.object(rr, "tg_call", fake_sale_tg), \
         mock.patch.object(rr.time, "sleep"):
     rr.run_sale_search(ss_all, sstore, {"photos": False})
-assert sum("listings/501" in m[1] or "listings/502" in m[1] for m in sent_msgs) == 2, sent_msgs
+assert shown(501) and shown(502), sent_msgs
 sdb.unlink(missing_ok=True)
 # перевыкладка: старое объявление отсеяли по возрасту, свежая копия — присылаем с датой
 OLD = "Продаётся 1-комн квартира, Юнусабад, бывшее общежитие, кухня и санузел внутри, 2 этаж из 4"
@@ -1410,10 +1416,11 @@ sdb.unlink(missing_ok=True); sstore = rr.Store(sdb); sent_msgs.clear()
 with mock.patch.object(rr.requests, "get", fake_uy_get), mock.patch.object(rr, "tg_call", fake_sale_tg), \
         mock.patch.object(rr.time, "sleep"):
     rr.run_sale_search(ss_all, sstore, {"photos": False})
-m602 = [m[1] for m in sent_msgs if "listings/602" in m[1]]
-assert len(m602) == 1 and "Перевыложено" in m602[0] and "на рынке ~136 дн." in m602[0], sent_msgs
+m602 = [ln for m in sent_msgs for ln in m[1].split("\n") if "listings/602" in ln]
+assert len(m602) == 1 and "перевыложено" in m602[0] and "на рынке ~136 дн." in m602[0], sent_msgs
 assert not any("listings/601" in m[1] for m in sent_msgs)
 sdb.unlink(missing_ok=True)
+_fd.stop()
 print("OK — покупка с маклерами: пометка продавца, пересмотр при смене условий, дубли")
 
 # ------------------------------------- данные вне публичного репозитория ----
@@ -1520,7 +1527,8 @@ def fake_both(url, params=None, headers=None, timeout=None):
 SALE_PAGES = [[R(id=701, price=39000, square=30, districtId=205)]]
 with mock.patch.object(rr.requests, "get", fake_both), mock.patch.object(mk.requests, "get", fake_both), \
         mock.patch.object(rr, "tg_call", fake_sale_tg), mock.patch.object(rr.time, "sleep"), \
-        mock.patch.object(mk.time, "sleep"):
+        mock.patch.object(mk.time, "sleep"), \
+        mock.patch.object(sale_sources, "score", lambda *a: (90, ["−12% к рынку"], True, {})):   # «сильный» — сразу
     rr.run_sale_search(ss_all, sstore, {"photos": False})
 texts = [m[1] for m in sent_msgs]
 i_card = next(i for i, t in enumerate(texts) if "listings/701" in t)
@@ -1720,7 +1728,7 @@ with mock.patch.object(rr, "tg_call", lambda c, m, pl, **k: (W.append((m, pl)), 
     cg.show_offers(cfg, ws)
     assert "написали 1 маклерам" in W[-1][1]["text"] and "перешлите" in W[-1][1]["text"]
 for t in (rr.HELP_TEXT,):
-    assert "Мой поиск" in t and "/new" not in t and "/brokers" not in t
+    assert "Ищет Ra'no" in t and "Через маклеров" in t and "/new" not in t and "/brokers" not in t
 wdb.unlink(missing_ok=True)
 print("OK — без команд: кнопки внизу, понятные подсказки, маклер не получает приветствие дважды")
 
@@ -1877,3 +1885,131 @@ with mock.patch.object(rr, "tg_call", ftg):
     assert fu.run(cfg, fs, now=T(10), force=True) is not None and fu.run(cfg, fs) == {}
 fdb.unlink(missing_ok=True)
 print("OK — доведение до сделки: напоминание маклеру, этапы просмотра, утренняя и вечерняя сводка")
+
+# ============ «Ищет Ra'no»: все сайты, лучшие сразу + подборка, объявление → шортлист ============
+import sale_sources as SS
+class FR:
+    def __init__(self, d, text=""): self._d, self.text, self.status_code = d, text, 200
+    def json(self): return self._d
+    def raise_for_status(self): pass
+R24 = {"data": [{"id": 1, "name": {"ru": "2-комнатная квартира − 52 м², 3/9 этаж"}, "description": {"ru": "Мирабад, ремонт"},
+                 "price": {"usd": 47000}, "address": {"fullAddress": {"ru": "Ташкент, Мирабадский район, ул. Нукус"}},
+                 "phone": "+998901234567", "isCommissioned": False, "user": {"id": 5, "role": {"key": "owner"}},
+                 "imageSets": [{"w600": "https://img/1.webp"}], "createdAt": "2026-10-07T10:00:00+00:00"},
+                {"id": 2, "name": {"ru": "2-комнатная квартира − 50 м², 2/5 этаж"}, "description": {"ru": ""},
+                 "price": {"usd": 700}, "address": {"fullAddress": {"ru": "Ташкент, Яккасарайский район"}},
+                 "phone": "+998909999999", "isCommissioned": True, "user": {"id": 6, "role": {"key": "agent"}}},
+                {"id": 3, "name": {"ru": "2-комнатная квартира − 50 м², 2/5 этаж"}, "price": {"usd": 40000},
+                 "address": {"fullAddress": {"ru": "Самарканд, центр"}}}], "meta": {"hasNext": False}}
+JM_LIST = {"results": [{"id": 77}], "next": None}
+JM_DET = {"id": 77, "title": "2-комн в ЖК, Мирабад", "description": "Ипотека возможна", "phone_number": "+998977020340",
+          "district": {"id": 200, "name": "Mirobod tumani"}, "address_line": "Toshkent shahri, Mirobod tumani",
+          "pricing": {"currency": 2, "price": "45000.00"}, "advertiser_type": 1, "mortgage_available": True,
+          "detail": {"area_m2": "55.5", "room_quantity": 2, "floor_number": 4, "floors_count": 9, "repair": 4},
+          "seller": {"id": 9, "first_name": "Азиз"}, "ads_at": "2026-10-08T09:00:00+05:00", "media": []}
+RT_HTML = ('<a href="https://realting.uz/property/555"><div class="teaser-title fs-base color-info">Квартира 2 комнаты</div>'
+           '<div class="route">Ташкент, Узбекистан</div>'
+           '<div class="unit-item" title="Число комнат"><img src="x"><span>2</span></div>'
+           '<div class="unit-item" title="Площадь"><img src="x"><span>48 м²</span></div>'
+           '<div class="unit-item" title="Этаж"><img src="x"><span>5/9</span></div>'
+           '<div class="clamp-3">Продажа, Юнусабад, ориентир Мегапланет</div>'
+           '<div class="price-item" data-price-USD="$46 000">$46 000</div>'
+           '<a href="https://telegram.me/Agent_Uz?text=hi">tg</a></a>'
+           '<a href="https://realting.uz/property/556"><div class="teaser-title">Квартира</div><div class="route">Бухара</div></a>')
+def fake_src(url, params=None, headers=None, timeout=None):
+    if "realt24" in url: return FR(R24)
+    if url.endswith("/77/"): return FR(JM_DET)
+    if "joymee" in url:
+        assert params["max_price"] == 50000 and params["room_quantity"] == 2 and params["ordering"] == "newest"
+        assert params["district"] in (200, 3, 199)
+        return FR(JM_LIST)
+    if "realting" in url: return FR({}, RT_HTML)
+    raise AssertionError(url)
+ssx = {"max_price_usd": 50000, "rooms": [2], "districts": ["Мирабад", "Яккасарай", "Юнусабад"], "mortgage": True,
+       "min_price_usd": 5000, "notify_max_age_days": 45, "owner_only": False}
+xdb = Path("/tmp/test_rano.db"); xdb.unlink(missing_ok=True); xs = rr.Store(xdb)
+ydb = Path("/tmp/test_rano_main.db"); ydb.unlink(missing_ok=True); ys = rr.Store(ydb)
+with mock.patch.object(SS.requests, "get", fake_src), mock.patch.object(SS.time, "sleep"):
+    r24 = SS.fetch_realt24(ssx, cfg, xs)
+    jm = SS.fetch_joymee(ssx, cfg, xs)
+    rt = SS.fetch_realting(ssx, cfg, xs)
+assert [l["key"] for l in r24] == ["sale:realt24:1", "sale:realt24:2"]          # Самарканд отсеян
+a = r24[0]
+assert (a["rooms"], a["area"], a["floor"], a["floors_total"], a["district"], a["seller_hint"]) == (2, 52, 3, 9, "Мирабад", "owner")
+assert a["url"] == "https://realt24.uz/listing/1/" and a["phones"] and a["photo_urls"] == ["https://img/1.webp"]
+b = SS.normalize(dict(r24[1]), cfg)                                              # 700$ — это за м²
+assert b["price_value"] == 35000 and "за м²" in b["price_note"] and r24[1]["seller_hint"] == "agency"
+dp = SS.normalize({"text": "МЕРОС п\\в-23260y.e. цена - 77550у.е. ИПОТЕКА первоначальный взнос 30",
+                   "price_value": 23300, "price_currency": "USD", "area": 47.5}, cfg)
+assert dp["price_value"] == 77550 and "первый взнос $23 300" in dp["price_note"]          # взнос ≠ цена
+assert SS.normalize({"text": "ипотека, первоначальный взнос 30%", "price_value": 15000, "price_currency": "USD",
+                     "area": 50}, cfg).get("down_payment_only")
+a1 = {"site": "Joymee", "rooms": 2, "area": 50, "floor": 2, "floors_total": 4, "district": "Мирабад", "price_usd": 48000}
+assert SS.same_flat(a1, dict(a1)) and not SS.same_flat(a1, dict(a1, floor=3)) and not SS.same_flat(a1, dict(a1, price_usd=46000))
+assert SS.same_flat(a1, dict(a1, site="Uybor", price_usd=46500))                         # с другого сайта — мягче
+j = jm[0]
+assert (j["price_value"], j["rooms"], j["area"], j["floor"], j["district"], j["seller_hint"], j["mortgage"]) == \
+       (45000, 2, 55.5, 4, "Мирабад", "owner", True)
+assert j["url"] == "https://joymee.uz/announcements/77" and j["repair"] == "евроремонт"
+assert len(rt) == 2 and rt[0]["key"] == "sale:realting:555" and (rt[0]["area"], rt[0]["floor"], rt[0]["price_value"]) == (48, 5, 46000)
+assert rt[0]["district"] == "Юнусабад" and rt[0]["seller"] == "@Agent_Uz"
+# продавец по пометке сайта: без запросов к Uybor
+lj = dict(j); lj["price_usd"] = 45000
+assert rr.sale_reject(lj, ssx, xs, cfg) == ("", False) and lj["seller_kind"] == "owner"
+la = dict(r24[1]); SS.normalize(la, cfg)
+assert rr.sale_reject(la, ssx, xs, cfg) == ("", False) and la["seller_kind"] == "agency"
+# оценка: собственник + ипотека выше; ниже рынка — «сильный»
+sc_j, why_j, strong_j, _ = SS.score(xs, lj, cfg, ssx)
+assert "собственник" in why_j and "ипотека" in why_j and not strong_j
+with mock.patch("market.analyze", lambda *a: {"gap": -0.12, "flags": []}):
+    sc2, why2, strong2, _ = SS.score(xs, lj, cfg, ssx)
+assert strong2 and sc2 > sc_j and "-12% к рынку" in why2[0]
+# дубль с другого сайта: та же площадь, этаж, район, цена ±5%
+xs.save(dict(lj, key="sale:uybor:9", site="Uybor", price_usd=45500, phones=[]), notified=True)
+assert SS.structural_dup(xs, lj) == "sale:uybor:9"
+assert SS.structural_dup(xs, dict(lj, floor=7)) is None
+# подборка: лучшие сверху, 👍 → шортлист с ссылкой и телефоном продавца
+XT = []
+xtg = lambda c, m, pl, **k: (XT.append((m, pl)), {"ok": True})[1]
+lr = dict(rt[0], price_usd=46000)
+xs.save(lj, notified=False); xs.save(lr, notified=False)
+SS.queue_pick(xs, lj, 70, why_j); SS.queue_pick(xs, lr, 55, [])
+with mock.patch.object(rr, "tg_call", xtg):
+    assert SS.send_pick(cfg, xs) == 2
+pk = XT[-1][1]
+assert pk["text"].index("joymee.uz/announcements/77") < pk["text"].index("realting.uz/property/555")
+assert "L:s:sale:joymee:77" in pk["reply_markup"] and SS.pick_pending(xs) == []
+assert xs.conn.execute("SELECT notified FROM listings WHERE key='sale:joymee:77'").fetchone()[0] == 1
+with mock.patch.object(rr, "tg_call", xtg), mock.patch.object(rr, "SALE_DB_PATH", xdb):
+    t1, _ = rr.handle_callback("L:s:sale:joymee:77", rr.default_settings(), ys, cfg, 1)
+    t2, _ = rr.handle_callback("L:s:sale:joymee:77", rr.default_settings(), ys, cfg, 1)
+assert "В шортлисте" in t1 and t2 == "Уже в шортлисте"
+so = cg.get_offer(ys, ys.conn.execute("SELECT oid FROM broker_offers WHERE broker_chat='site:sale:joymee:77'").fetchone()[0])
+assert so["status"] == "shortlist" and so["price_usd"] == 45000 and so["extra"]["url"].endswith("/77")
+card = cg.offer_card(ys, cfg, so)
+assert "Открыть объявление" in card and "📞" in card and "объявление с Joymee" in card
+XT.clear()
+with mock.patch.object(rr, "tg_call", xtg):
+    cg.request_details(cfg, ys, [so["oid"]])
+man = [pl["text"] for m, pl in XT if "Позвоните или напишите" in pl.get("text", "")]
+assert man and "По вашему объявлению о продаже" in man[0] and "Продавец: 📞" in man[0]
+# подборка дня — только в 19:30–23:00 и раз в день
+SS.queue_pick(xs, dict(lr, key="sale:realting:999"), 50, [])
+with mock.patch.object(rr, "tg_call", xtg):
+    assert SS.maybe_daily_pick(cfg, xs, datetime(2026, 10, 8, 18, 0, tzinfo=cg.TZ)) == 0
+    assert SS.maybe_daily_pick(cfg, xs, datetime(2026, 10, 8, 19, 40, tzinfo=cg.TZ)) == 1
+    assert SS.maybe_daily_pick(cfg, xs, datetime(2026, 10, 8, 21, 0, tzinfo=cg.TZ)) == 0
+# экраны двух кнопок
+ys.set_kv("anketa", {"ans": {"deal": "buy", "object": "flat", "rooms": ["2"], "budget": "50000", "note": "нужна ипотека"}})
+SS.day_stats(xs, {"seen": 40, "fit": 6, "instant": 1})
+with mock.patch.object(rr, "SALE_DB_PATH", xdb):
+    scr = rr.rano_screen(cfg, ys)
+assert "Ищет Ra'no" in scr["text"] and "Realt24" in scr["text"] and "новых объявлений 40" in scr["text"]
+assert "нужна ипотека" in scr["text"] and "R:check" in json.dumps(scr["kb"])
+v = rr.via_screen(cfg, ys)
+assert "Через маклеров" in v["text"] and '"b"' in json.dumps(v["kb"]) and "10–15 в день" in v["text"]
+with mock.patch.object(rr, "SALE_DB_PATH", xdb):
+    snap = rr.ui_snapshot(cfg, ys, rr.default_settings())
+assert set(snap["screens"]) == {"/rano", "/via"}
+xdb.unlink(missing_ok=True); ydb.unlink(missing_ok=True)
+print("OK — Ищет Ra'no: Realt24/Joymee/Realting, цена за м², дубли между сайтами, подборка, 👍 → шортлист, экраны")

@@ -772,6 +772,40 @@ def mark_as_message(cfg, store, oid):
                 f"{rr.escape_html((o['text'] or '')[:800])}"})
 
 
+def is_site_offer(o) -> bool:
+    return str(o.get("broker_chat") or "").startswith("site:")
+
+
+def add_site_offer(cfg, store, l):
+    """Объявление с сайта → в шортлист как обычный вариант: этапы, просмотр, заметки — те же."""
+    key = l.get("key") or ""
+    r = store.conn.execute("SELECT oid, status FROM broker_offers WHERE broker_chat=?",
+                           (f"site:{key}",)).fetchone()
+    if r:
+        if r[1] in ("rejected", "new", "later"):
+            set_offer_status(store, r[0], "shortlist")
+            return r[0], True
+        return r[0], False
+    extra = {"url": l.get("url"), "phones": (l.get("phones") or [])[:2], "address": l.get("district_raw"),
+             "summary": ", ".join(l.get("why") or []) or None, "site_key": key,
+             "building": "new" if l.get("new_building") else None, "repair": l.get("repair"),
+             "mortgage": "yes" if l.get("mortgage") else None, "deal": "sale",
+             "seller": l.get("seller") or None}
+    extra = {k: v for k, v in extra.items() if v}
+    text = "\n".join(x for x in (l.get("title"), (l.get("text") or "")[:500]) if x)
+    pv = l.get("price_usd")
+    cur = store.conn.execute(
+        "INSERT INTO broker_offers(broker_chat, broker_name, text, photos, district, rooms, area, "
+        "price_usd, price_raw, floor, floors_total, created_at, status, extra) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?, 'shortlist', ?)",
+        (f"site:{key}", l.get("site") or l.get("source") or "сайт", text,
+         json.dumps((l.get("photo_urls") or [])[:4]), l.get("district"), l.get("rooms"), l.get("area"),
+         pv, f"{pv:g} USD" if pv else None, l.get("floor"), l.get("floors_total"),
+         datetime.now(timezone.utc).isoformat(), json.dumps(extra, ensure_ascii=False)))
+    store.conn.commit()
+    return cur.lastrowid, True
+
+
 def offers_by_status(store, status, limit=50):
     rows = store.conn.execute(
         "SELECT oid FROM broker_offers WHERE status=? ORDER BY oid", (status,)).fetchall()
@@ -868,13 +902,17 @@ def offer_card(store, cfg, o, idx=None, prefix="", pos=None, total=None):
         head.append("💼 " + rr.escape_html("; ".join(money)))
     if ex.get("summary"):
         head.append("✨ " + rr.escape_html(ex["summary"]))
+    if ex.get("phones"):
+        head.append("📞 " + ", ".join(rr.fmt_phone(p) for p in ex["phones"][:2]))
+    if ex.get("url"):
+        head.append(f'🔗 <a href="{rr.escape_html(ex["url"])}">Открыть объявление</a>')
     want = (get_anketa(store).get("ans") or {}).get("deal")
     got = ex.get("deal")
     if want and got and {"buy": "sale"}.get(want, want) != got:   # маклер прислал не то
         what = {"sale": "продажа", "rent": "аренда", "daily": "посуточная аренда"}
         wish = {"buy": "покупку", "rent": "аренду", "daily": "посуточную аренду"}
         head.append(f"⚠️ Это {what.get(got, got)}, а вы ищете {wish.get(want, want)}")
-    head.append(f"👤 от {rr.escape_html(o['broker_name'] or 'маклера')}")
+    head.append(f"👤 {'объявление с' if is_site_offer(o) else 'от'} {rr.escape_html(o['broker_name'] or 'маклера')}")
     body = (o["text"] or "").strip()
     if body:
         head.append("\n<i>" + rr.escape_html(body[:300 if ex else 400]) + "</i>")
@@ -1341,7 +1379,7 @@ def details_question(o, cfg=None, deal="rent"):
     cfg = cfg or {}
     a = cfg.get("assistant_name", "Ra'no")
     q = [f"Здравствуйте! Это {a}, ассистент по поиску жилья.",
-         "По варианту, который вы присылали"]
+         "По вашему объявлению о продаже" if is_site_offer(o) else "По варианту, который вы присылали"]
     tag = []
     if o["rooms"]:
         tag.append(f"{o['rooms']}-комн")
@@ -1403,8 +1441,15 @@ def request_details(cfg, store, oids=None):
                               "Ответы придут сюда же — прикреплю к карточкам. "
                               "Если кто-то промолчит сутки — предложу напомнить.")
     for o in manual:                         # готовый текст, чтобы отправить самому
-        rr.send_telegram(cfg, f"✍️ Вариант #{o['oid']} пришёл не через бота — уточните сами, "
-                              f"текст готов:\n\n<code>{rr.escape_html(details_question(o, cfg, deal))}</code>")
+        ex = o.get("extra") or {}
+        if is_site_offer(o):
+            who = ", ".join(rr.fmt_phone(p) for p in (ex.get("phones") or [])[:2])
+            head = (f"✍️ Вариант #{o['oid']} — объявление с {rr.escape_html(o['broker_name'] or 'сайта')}. "
+                    + (f"Продавец: 📞 {who}. " if who else "Контакт — в объявлении. ")
+                    + "Позвоните или напишите сами, текст готов:")
+        else:
+            head = f"✍️ Вариант #{o['oid']} пришёл не через бота — уточните сами, текст готов:"
+        rr.send_telegram(cfg, f"{head}\n\n<code>{rr.escape_html(details_question(o, cfg, deal))}</code>")
     return f"Отправлено: {sent}" + (f", вручную: {len(manual)}" if manual else "")
 
 
@@ -1490,8 +1535,8 @@ def webapp_url(store, cfg=None):
 
 
 # те же кнопки, что ставит воркер (worker/src/index.js · OWNER_KB)
-OWNER_KB = {"keyboard": [[{"text": "🔎 Мой поиск"}, {"text": "🏠 Варианты"}],
-                         [{"text": "📇 Маклерам"}, {"text": "⋯ Ещё"}]],
+OWNER_KB = {"keyboard": [[{"text": "🔎 Ищет Ra'no"}, {"text": "📇 Через маклеров"}],
+                         [{"text": "⋯ Ещё"}]],
             "resize_keyboard": True, "is_persistent": True,
             "input_field_placeholder": "Напишите, что ищете, или перешлите вариант"}
 

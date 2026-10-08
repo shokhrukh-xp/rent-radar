@@ -145,7 +145,7 @@ def digest_data(store, sale_store, now):
         "contacted_today": q("SELECT COUNT(*) FROM brokers WHERE status='contacted' AND last_contact>=?", day),
         "contacted_total": q("SELECT COUNT(*) FROM brokers WHERE status='contacted'"),
         "offers_today": q("SELECT COUNT(*) FROM broker_offers WHERE created_at>=? "
-                          "AND status NOT IN ('message')", day),
+                          "AND status NOT IN ('message') AND broker_chat NOT LIKE 'site:%'", day),
         "pending": q("SELECT COUNT(*) FROM broker_offers WHERE status IN ('new','later')"),
         "answers_today": q("SELECT COUNT(*) FROM broker_offers WHERE replied_at>=?", day),
         "silent": q("SELECT COUNT(*) FROM broker_offers WHERE status='asked' AND replied_at IS NULL "
@@ -154,10 +154,13 @@ def digest_data(store, sale_store, now):
         "listings_today": 0,
         "tomorrow": [x for x in viewings(store) if x[0].astimezone(TZ).date() == tomorrow],
     }
+    d["site_seen"] = d["site_fit"] = 0
     if sale_store is not None:
         try:
-            d["listings_today"] = sale_store.conn.execute(
-                "SELECT COUNT(*) FROM listings WHERE notified=1 AND first_seen>=?", (day,)).fetchone()[0]
+            import sale_sources
+            st = sale_sources.day_stats(sale_store)
+            d["listings_today"] = st.get("instant", 0) + st.get("picked", 0)
+            d["site_seen"], d["site_fit"] = st.get("seen", 0), st.get("fit", 0)
         except Exception:
             pass
     return d
@@ -182,8 +185,11 @@ def digest_text(d, now):
         lines.append(f"⏳ Молчат больше суток: {d['silent']}")
     if d["shortlist"]:
         lines.append(f"📋 В шортлисте: {d['shortlist']}")
-    if d["listings_today"]:
-        lines.append(f"🔎 Новых объявлений с сайтов прислала: {d['listings_today']}")
+    if d.get("site_seen"):
+        lines.append(f"🔎 Сайты и каналы: новых объявлений {d['site_seen']}, подошло {d.get('site_fit', 0)}, "
+                     f"прислала {d['listings_today']}")
+    elif d["listings_today"]:
+        lines.append(f"🔎 С сайтов прислала: {d['listings_today']}")
     if d["tomorrow"]:
         lines += ["", "📅 <b>Завтра просмотры</b>"] + [_viewing_line(*x) for x in d["tomorrow"]]
     tip = ""                                   # один следующий шаг — самый полезный

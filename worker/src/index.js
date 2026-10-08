@@ -387,17 +387,19 @@ export async function tg(env, method, body) {
 const say = (env, chat, text, extra = {}) => tg(env, "sendMessage", { chat_id: chat, text, ...extra });
 
 // ── Управление без команд: постоянные кнопки внизу + обычные фразы ──
-export const BTN = { search: "🔎 Мой поиск", offers: "🏠 Варианты", brokers: "📇 Маклерам", more: "⋯ Ещё",
+export const BTN = { rano: "🔎 Ищет Ra'no", via: "📇 Через маклеров", more: "⋯ Ещё",
+  search: "🔎 Мой поиск", offers: "🏠 Варианты", brokers: "📇 Маклерам",      // старые кнопки — тоже понимаем
   what: "🏠 Что ищет клиент" };
-export const OWNER_KB = { keyboard: [[{ text: BTN.search }, { text: BTN.offers }], [{ text: BTN.brokers }, { text: BTN.more }]],
+export const OWNER_KB = { keyboard: [[{ text: BTN.rano }, { text: BTN.via }], [{ text: BTN.more }]],
   resize_keyboard: true, is_persistent: true,
   input_field_placeholder: "Напишите, что ищете, или перешлите вариант" };
 export const BROKER_KB = { keyboard: [[{ text: BTN.what }]], resize_keyboard: true, is_persistent: true,
   input_field_placeholder: "Пришлите вариант: фото, адрес, этаж, цена" };
 const MORE_MENU = { inline_keyboard: [
+  [{ text: "✏️ Что ищем — посмотреть и поменять", callback_data: "cmd:/mysearch" }],
   [{ text: "💬 Маклер ответил мне в WhatsApp", callback_data: "cmd:/add" }],
   [{ text: "📋 Шортлист", callback_data: "cmd:/shortlist" }, { text: "📊 Цены рынка", callback_data: "cmd:/rynok" }],
-  [{ text: "🏷 Поиск на Uybor", callback_data: "cmd:/sale" }, { text: "📝 Текст запроса", callback_data: "cmd:/request" }],
+  [{ text: "🏷 Поиск по сайтам", callback_data: "cmd:/rano" }, { text: "📝 Текст запроса", callback_data: "cmd:/request" }],
   [{ text: "🔄 Начать поиск заново", callback_data: "q:again" }],
   [{ text: "❓ Как это работает", callback_data: "cmd:/help" }],
 ] };
@@ -416,6 +418,13 @@ async function instantText(env, chat, cmd) {
   }
   await say(env, chat, t, { parse_mode: "HTML", disable_web_page_preview: true });
   return true;
+}
+
+// ── Экраны двух кнопок поиска — из снимка; без снимка ответит Python ──
+async function showScreen(env, chat, cmd) {
+  const scr = ((await kvGet(env, "ui", null)) || {}).screens?.[cmd];
+  if (!scr) return asCommand(env, chat, cmd);
+  await say(env, chat, scr.text, { parse_mode: "HTML", disable_web_page_preview: true, reply_markup: scr.kb });
 }
 
 // ── Шортлист из снимка: номер открывает карточку варианта, сортировку ведёт воркер ──
@@ -617,7 +626,7 @@ async function nextBroker(env, chat) {
     const more = (ui.brokers_total || 0) - st.done.length;
     if (more > 0) {                                   // в снимке кончились — Python пришлёт ещё
       await wake(env);
-      await say(env, chat, `Ещё ${more} маклеров — подгружаю следующую порцию, пришлю через 1–2 минуты. Нажмите «📇 Маклерам» чуть позже.`);
+      await say(env, chat, `Ещё ${more} маклеров — подгружаю следующую порцию, пришлю через 1–2 минуты. Нажмите «📇 Через маклеров» чуть позже.`);
     } else {
       await say(env, chat, `✅ Рассылка закончена: написано ${st.sent}, пропущено ${st.skipped}. ` +
         "Новые маклеры добавляются сами — загляните через пару часов.");
@@ -819,7 +828,7 @@ async function startInterview(env, chat, fresh, lang = "ru") {
     return;
   }
   await say(env, chat, `С возвращением! Сейчас ищем: ${summary(iv.ans)}.\n` +
-    "Напишите, что поменять, — или нажмите «🔎 Мой поиск» → «Начать заново».", { reply_markup: OWNER_KB });
+    "Напишите, что поменять, — или нажмите «⋯ Ещё» → «Начать поиск заново».", { reply_markup: OWNER_KB });
 }
 
 // ───────────────────────────── разбор обновления ─────────────────────────────
@@ -901,6 +910,13 @@ export async function handleUpdate(env, upd) {
       await tg(env, "editMessageReplyMarkup", { chat_id: chat, message_id: cb.message.message_id, reply_markup: { inline_keyboard: [] } });
       return "cancel";
     }
+    if (/^L:[sn]:/.test(data) || data === "R:check") {     // объявление с сайта / «проверить сайты»
+      await tg(env, "answerCallbackQuery", { callback_query_id: cb.id,
+        text: data === "R:check" ? "🔄 Проверяю все сайты — 1–2 минуты" : data[2] === "s" ? "👍 Добавляю в шортлист" : "Убрала" });
+      upd.callback_query = { ...cb, _toast_done: true };
+      await queueAndWake(env, upd);
+      return "site";
+    }
     if (/^o:(ask|rem|quiet|vclr|seen):\d+/.test(data)) {
       const p = data.split(":");
       await tg(env, "answerCallbackQuery", { callback_query_id: cb.id,
@@ -928,6 +944,8 @@ export async function handleUpdate(env, upd) {
       const cmd = data.slice(4);
       await tg(env, "answerCallbackQuery", { callback_query_id: cb.id });
       if (cmd === "/add") return (await startAddMode(env, chat), "add_mode");
+      if (cmd === "/mysearch") return (await showMySearch(env, chat, "ru"), "my_search");
+      if (cmd === "/rano" || cmd === "/via") return (await showScreen(env, chat, cmd), "screen");
       if (cmd === "/brokers") return (await startOutreach(env, chat), "ui");
       if (cmd === "/offers") return (await showOffers(env, chat), "ui");
       if (cmd === "/done") {
@@ -977,6 +995,8 @@ export async function handleUpdate(env, upd) {
     if (ivA && /^await_(view|note)$/.test(ivA.mode)) { ivA.mode = ""; await kvSet(env, ivKey(chat), ivA); }
   }
   // кнопки внизу — обычный текст с подписью кнопки
+  if (text === BTN.rano || /^\/(rano|sites)(@\w+)?$/i.test(text)) return (await showScreen(env, chat, "/rano"), "rano");
+  if (text === BTN.via || /^\/via(@\w+)?$/i.test(text)) return (await showScreen(env, chat, "/via"), "via");
   if (text === BTN.search) return (await showMySearch(env, chat, L), "my_search");
   if (text === BTN.offers || /^\/(offers|varianty)(@\w+)?$/i.test(text)) return (await showOffers(env, chat), "ui");
   if (text === BTN.brokers || /^\/(brokers|makler|outreach)(@\w+)?$/i.test(text)) return (await startOutreach(env, chat), "ui");
@@ -1135,7 +1155,7 @@ export default {
         const cmds = await tg(env, "setMyCommands", { commands: ownerCmds, scope: { type: "chat", chat_id: +env.OWNER_CHAT } });
         const cmdsAll = await tg(env, "setMyCommands", { commands: [{ command: "start", description: "Как прислать вариант" }] });
         await tg(env, "sendMessage", { chat_id: +env.OWNER_CHAT, reply_markup: OWNER_KB,
-          text: "Кнопки — внизу: «🔎 Мой поиск», «🏠 Варианты», «📇 Маклерам», «⋯ Ещё». " +
+          text: "Кнопки — внизу: «🔎 Ищет Ra'no», «📇 Через маклеров», «⋯ Ещё». " +
                 "Команды запоминать не нужно — можно и просто написать, что хотите сделать." });
         const info = await tg(env, "getWebhookInfo", {});
         return json({ hook, menu, menuOwner, cmds, cmdsAll, info: info.result });
