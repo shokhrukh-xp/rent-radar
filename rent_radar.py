@@ -892,7 +892,7 @@ class Store:
             "seller", "seller_id", "is_business", "photo_urls", "lat", "lon", "area",
             "floor", "floors_total", "furnished", "house_type", "commission",
             "seller_ads", "premium", "seller_kind", "listed_since", "new_building", "repair",
-            "site", "seller_hint", "mortgage", "price_note", "score", "why")
+            "site", "seller_hint", "mortgage", "price_note", "score", "why", "alts")
 
     def pack(self, listing: dict) -> str:
         d = {k: listing.get(k) for k in self.KEEP}
@@ -2994,6 +2994,13 @@ def format_sale_message(l: dict, cfg: dict) -> str:
         lines.append("🔑 " + " · ".join(ev))
     if l.get("phones"):
         lines.append("📞 " + ", ".join(fmt_phone(x) for x in l["phones"][:2]))
+    alts = [a for a in (l.get("alts") or []) if a.get("price_usd") and a.get("url")]
+    if alts:
+        kinds = {"owner": ", собственник", "agency": ", маклер"}
+        refs = [f'<a href="{a["url"]}">${_money(a["price_usd"])}</a> ({escape_html(a.get("site") or "Uybor")}'
+                f'{kinds.get(a.get("kind"), "")})' for a in alts[:3]]
+        more = f" и ещё {len(alts) - 3}" if len(alts) > 3 else ""
+        lines.append("👥 Эту же квартиру продают ещё: " + ", ".join(refs) + more)
     dt = parse_iso(l.get("created_at") or "")
     if dt:
         lines.append(f'🕐 {dt.astimezone(TASHKENT_TZ).strftime("%d.%m %H:%M")}')
@@ -3130,10 +3137,20 @@ def run_sale_search(cfg: dict, store, settings: dict, force: bool = False) -> in
 
     # одна квартира, выложенная несколькими продавцами, — одно уведомление;
     # повтор пройдёт через find_dup в следующий проход, когда оригинал уже в базе
-    unique = []
+    # главной становится самая дешёвая копия, остальные — «👥 ещё у N» в её карточке
+    groups = []
     for l in candidates:
-        if not any(_same_sale(l, u, cfg) or sale_sources.same_flat(l, u) for u in unique):
-            unique.append(l)
+        g = next((g for g in groups if any(_same_sale(l, u, cfg) or sale_sources.same_flat(l, u) for u in g)), None)
+        if g is None:
+            groups.append([l])
+        else:
+            g.append(l)
+    unique = []
+    for g in groups:
+        rep = min(g, key=lambda x: x.get("price_usd") or 1e12)
+        if len(g) > 1:
+            rep["alts"] = sale_sources.merge_alts(rep.get("alts"), [x for x in g if x is not rep], rep)
+        unique.append(rep)
 
     if settings.get("paused"):
         return 0          # ничего не сохраняем — пришлём после /resume
@@ -3162,7 +3179,9 @@ def run_sale_search(cfg: dict, store, settings: dict, force: bool = False) -> in
     for l in unique[:ss.get("first_run_limit", 25) * 4]:
         dup = find_sale_dup(l, store, cfg) or sale_sources.structural_dup(store, l)
         if dup:
-            store.save(l, notified=False, dup_of=dup)
+            act = sale_sources.attach_dup(cfg, store, l, dup, ss)
+            sent += act == "cheaper"
+            queued += act == "queued"
             continue
         sc, why, strong, _ = sale_sources.score(store, l, cfg, ss)
         l["score"], l["why"] = sc, why

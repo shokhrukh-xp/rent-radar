@@ -439,6 +439,10 @@ def pick_line(l, why):
     if l.get("area") and p:
         price += f" (${p / l['area']:,.0f}/м²)".replace(",", " ")
     tail = (" — " + ", ".join(why)) if why else ""
+    ps = sorted(a["price_usd"] for a in (l.get("alts") or []) if a.get("price_usd"))
+    if ps:
+        rng = f"${ps[0]:,.0f}" if len(ps) == 1 or ps[0] == ps[-1] else f"${ps[0]:,.0f}–{ps[-1]:,.0f}"
+        tail += f" · 👥 ещё у {len(ps)}: {rng}".replace(",", " ")
     return (f"{price} · {' · '.join(bits)}{tail} · "
             f"<a href=\"{l.get('url')}\">{rr.escape_html(l.get('site') or 'Uybor')}</a>")
 
@@ -527,6 +531,84 @@ def remember_shown(store, l, why):
     store.set_kv("shown_recent", rec)
 
 
+KIND_RU = {"owner": "собственник", "agency": "маклер"}
+
+
+def alt_entry(l):
+    return {"key": l["key"], "price_usd": l.get("price_usd"), "site": l.get("site") or "Uybor",
+            "url": l.get("url"), "kind": l.get("seller_kind") or "", "seller": _seller(l)}
+
+
+def merge_alts(alts, extra, own):
+    """Другие продавцы той же квартиры: без повторов, без самой карточки и без перевыкладок
+    того же продавца (это не «ещё у одного маклера»), дешёвые сверху."""
+    out, seen = [], {own["key"]}
+    me = ((own.get("site") or "Uybor"), _seller(own))
+    for a in list(alts or []) + [alt_entry(x) for x in extra]:
+        if a.get("key") in seen or (me[1] and (a.get("site"), a.get("seller")) == me):
+            continue
+        seen.add(a["key"])
+        out.append(a)
+    return sorted(out, key=lambda a: a.get("price_usd") or 1e12)[:8]
+
+
+def _put_data(store, l):
+    store.conn.execute("UPDATE listings SET data=? WHERE key=?", (store.pack(l), l["key"]))
+    store.conn.commit()
+
+
+def attach_dup(cfg, store, l, dup, ss=None):
+    """Нашлась уже известная квартира у другого продавца.
+    Дороже или так же — тихо дописываем к ней «👥 ещё у N». Заметно дешевле — новая
+    становится главной: в подборке заменяет прежнюю, а если прежнюю уже присылали —
+    коротко сообщаем «та же квартира дешевле». Возвращает "alt" | "queued" | "cheaper"."""
+    rr = _rr()
+    row = store.conn.execute("SELECT data, notified FROM listings WHERE key=?", (dup,)).fetchone()
+    try:
+        o = json.loads(row[0]) if row and row[0] else {}
+    except ValueError:
+        o = {}
+    if not o:
+        store.save(l, notified=False, dup_of=dup)
+        return "alt"
+    q = store.get_kv("sale_pick") or []
+    queued = any(x["key"] == dup for x in q)
+    lp, op = l.get("price_usd") or 0, o.get("price_usd") or 0
+    cheaper = bool(lp and op and lp <= op * 0.98 and op - lp >= 500)
+    if not cheaper:
+        o["alts"] = merge_alts(o.get("alts"), [l], o)
+        _put_data(store, o)
+        if queued:
+            for x in q:
+                if x["key"] == dup:
+                    x["line"] = pick_line(o, o.get("why"))
+            store.set_kv("sale_pick", q)
+        store.save(l, notified=False, dup_of=dup)
+        return "alt"
+    l["alts"] = merge_alts(o.get("alts"), [o], l)
+    sc, why, _, _ = score(store, l, cfg, ss or cfg.get("sale_search") or {})
+    l["score"], l["why"] = sc, why
+    if not row[1]:                               # прежняя ещё ждёт в подборке — заменяем дешёвой
+        store.set_kv("sale_pick", [x for x in q if x["key"] != dup])
+        store.save(l, notified=False)
+        store.conn.execute("UPDATE listings SET dup_of=? WHERE key=?", (l["key"], dup))
+        store.conn.commit()
+        queue_pick(store, l, sc, why)
+        return "queued"
+    text = (f"💸 <b>Та же квартира — дешевле на ${op - lp:,.0f}</b>\n{pick_line(l, why)}\n"
+            f"Раньше присылала её за ${op:,.0f} ({rr.escape_html(o.get('site') or 'Uybor')}"
+            f"{', ' + KIND_RU[o['seller_kind']] if o.get('seller_kind') in KIND_RU else ''}).").replace(",", " ")
+    kb = {"inline_keyboard": [[{"text": "📷 Фото и разбор", "callback_data": f"L:v:{l['key']}"[:64]},
+                               {"text": "👍 В шортлист", "callback_data": f"L:s:{l['key']}"[:64]}]]}
+    ok = rr.tg_call(cfg, "sendMessage", {
+        "chat_id": cfg["telegram_chat_id"], "text": text, "parse_mode": "HTML",
+        "disable_web_page_preview": True, "reply_markup": json.dumps(kb, ensure_ascii=False)})
+    store.save(l, notified=ok is not None, dup_of=dup)
+    if ok is not None:
+        remember_shown(store, l, why)
+    return "cheaper"
+
+
 def maybe_daily_pick(cfg, store, now=None):
     """В 19:30 по Ташкенту — подборка дня (до вечерних итогов в 20:00)."""
     import concierge as cg
@@ -552,10 +634,32 @@ def day_stats(store, add=None):
     return st
 
 
+_BLOCK_NAMED = re.compile(
+    r"(?:юнусабад|юнусобод|yunusobod|yunusabad|чиланзар|чилонзор|chilonzor|chilanzar|сергели|sergeli|"
+    r"куйлюк|қўйлиқ|qo'?yliq|кушбеги|qo'?shbegi)\w*\s*[-–]?\s*(\d{1,2})(?!\d|/|[.,]\d)", re.I)
+_BLOCK_WORD = re.compile(r"(?<![\d/])(\d{1,2})\s*[-–]?\s*(?:й\s*|ый\s*)?(?:квартал|kvartal|kvartl|kvrtal|кв-л|массив|massiv)", re.I)
+
+
+def block_no(l):
+    """Номер квартала/массива из адреса и текста («Юнусабад-14», «2 квартал», «6кв») — или None."""
+    src = " ".join(str(l.get(k) or "") for k in ("title", "district_raw")) + " " + (l.get("text") or "")[:300]
+    for rx in (_BLOCK_NAMED, _BLOCK_WORD):
+        m = rx.search(src)
+        if m and 0 < int(m.group(1)) <= 40:
+            return int(m.group(1))
+    return None
+
+
+def _seller(l):
+    return str(l.get("seller_id") or l.get("seller") or "").strip().lower()
+
+
 def same_flat(a, b):
-    """Похоже на одну квартиру: комнаты, этаж и этажность, район, площадь и цена.
-    С разных сайтов — площадь ±3%, цена ±5%; на одном сайте строже (±1%), чтобы
-    одинаковые планировки разных квартир в одном ЖК не склеились."""
+    """Похоже на одну квартиру: комнаты, этаж и этажность, район, квартал, площадь и цена.
+    Разные продавцы (другой сайт или другой маклер на том же сайте) — площадь ±3%, цена ±12%:
+    маклеры перевыкладывают квартиру собственника со своей наценкой 5–10%.
+    Тот же продавец или продавец неизвестен на том же сайте — строже (±1%), чтобы одинаковые
+    планировки разных квартир в одном ЖК не склеились."""
     if not (a.get("area") and b.get("area") and a.get("price_usd") and b.get("price_usd")):
         return False
     if not (a.get("floor") and b.get("floor")) or a["floor"] != b["floor"]:
@@ -563,8 +667,15 @@ def same_flat(a, b):
     for k in ("rooms", "district", "floors_total"):
         if a.get(k) and b.get(k) and a[k] != b[k]:
             return False
+    ba, bb = block_no(a), block_no(b)
+    if ba and bb and ba != bb:
+        return False
     same_site = (a.get("site") or "Uybor") == (b.get("site") or "Uybor")
-    da, dp = (0.01, 0.01) if same_site else (0.03, 0.05)
+    sa, sb = _seller(a), _seller(b)
+    strict = same_site and (not sa or not sb or sa == sb)
+    if not strict and not (a.get("district") and a.get("district") == b.get("district")):
+        strict = True                       # район неизвестен — мягкое сравнение рискованно
+    da, dp = (0.01, 0.01) if strict else (0.03, 0.12)
     return abs(a["area"] - b["area"]) / a["area"] <= da and \
         abs(a["price_usd"] - b["price_usd"]) / a["price_usd"] <= dp
 
@@ -576,7 +687,7 @@ def structural_dup(store, l, days=45):
     queued = {x["key"] for x in (store.get_kv("sale_pick") or [])}
     rows = store.conn.execute(
         "SELECT key, data, notified FROM listings WHERE price_usd BETWEEN ? AND ? AND key != ?",
-        (l["price_usd"] * 0.95, l["price_usd"] * 1.05, l["key"])).fetchall()
+        (l["price_usd"] * 0.88, l["price_usd"] * 1.14, l["key"])).fetchall()
     for key, data, notified in rows:
         if not notified and key not in queued:      # отсеянное раньше — не «уже показанное»
             continue

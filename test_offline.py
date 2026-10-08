@@ -2091,3 +2091,50 @@ with mock.patch.object(rr, "tg_call", ztg):
     assert not fu.broker_offer(cfg, zs, None, noon)
 zdb.unlink(missing_ok=True); sdbz.unlink(missing_ok=True)
 print("OK — сначала ищет сама: маклеры — только если на сайтах пусто (покупка, аренда), посуточно — сразу")
+
+# ============ одна квартира у разных маклеров — одна карточка + «👥 ещё у N» ============
+ddb = Path("/tmp/test_dups_sale.db"); ddb.unlink(missing_ok=True); ds = rr.Store(ddb)
+DT = []
+dtg = lambda c, m, pl, **k: (DT.append((m, pl)), {"ok": True})[1]
+base = {"source": "Joymee · продажа", "site": "Joymee", "rooms": 2, "area": 36.0, "floor": 1, "floors_total": 4,
+        "district": "Юнусабад", "phones": [], "text": "", "seller_kind": "owner"}
+own = dict(base, key="sale:joymee:1", url="https://joymee.uz/announcements/1", seller="Umidjon", price_usd=43000,
+           title="Юнусабад 2 квартал 1 в 2 /1/4 2 комнаты")
+agt = dict(base, key="sale:joymee:2", url="https://joymee.uz/announcements/2", seller="Санжар", price_usd=47000,
+           title="Yunusobod 2    2/1/4", seller_kind="agency")
+assert SS.block_no(own) == 2 and SS.block_no(agt) == 2
+assert SS.block_no({"title": "Юнусобод -13", "text": "36 кв м"}) == 13 and SS.block_no({"text": "43 kv 9 qavat"}) is None
+assert SS.block_no({"district_raw": "14-й квартал"}) == 14
+assert SS.same_flat(own, agt)                                              # разные маклеры: наценка 9% — та же квартира
+assert not SS.same_flat(own, dict(agt, seller="Umidjon"))                  # тот же продавец — строго
+assert not SS.same_flat(own, dict(agt, seller=""))                         # продавец неизвестен — строго
+assert not SS.same_flat(own, dict(agt, title="Юнусобод 6кв"))              # другой квартал
+assert not SS.same_flat(own, dict(agt, price_usd=50000))                   # +16% — уже другое
+with mock.patch.object(rr, "tg_call", dtg):
+    # дороже у маклера — тихо дописываем к показанной
+    ds.save(own, notified=True)
+    assert SS.structural_dup(ds, agt) == "sale:joymee:1"
+    assert SS.attach_dup(cfg, ds, dict(agt), "sale:joymee:1", {}) == "alt" and not DT
+    o = json.loads(ds.conn.execute("SELECT data FROM listings WHERE key='sale:joymee:1'").fetchone()[0])
+    assert o["alts"][0]["key"] == "sale:joymee:2" and o["alts"][0]["kind"] == "agency"
+    card = rr.format_sale_message(o, cfg)
+    assert "👥 Эту же квартиру продают ещё" in card and "$47 000" in card and "маклер" in card
+    assert "👥 ещё у 1: $47 000" in SS.pick_line(o, [])
+    # дешевле, а прежнюю уже присылали — короткое «та же квартира дешевле»
+    cheap = dict(own, key="sale:uybor:3", site="Uybor", seller="Нигора", price_usd=41000, url="https://uybor.uz/3")
+    assert SS.attach_dup(cfg, ds, cheap, "sale:joymee:1", {}) == "cheaper"
+    m = DT[-1][1]
+    assert "дешевле на $2 000" in m["text"] and "L:v:sale:uybor:3" in m["reply_markup"] and "$43 000" in m["text"]
+    c = json.loads(ds.conn.execute("SELECT data FROM listings WHERE key='sale:uybor:3'").fetchone()[0])
+    assert {a["key"] for a in c["alts"]} == {"sale:joymee:1", "sale:joymee:2"}
+    # дешевле, а прежняя ждёт в подборке — заменяем её
+    q1 = dict(own, key="sale:joymee:10", url="https://joymee.uz/announcements/10", area=50.0, floor=3, price_usd=48000)
+    ds.save(q1, notified=False); SS.queue_pick(ds, q1, 50, [])
+    q2 = dict(q1, key="sale:joymee:11", url="https://joymee.uz/announcements/11", seller="Другой", price_usd=45000)
+    assert SS.attach_dup(cfg, ds, q2, "sale:joymee:10", {}) == "queued"
+    pk = ds.get_kv("sale_pick")
+    assert [x["key"] for x in pk] == ["sale:joymee:11"] and "👥 ещё у 1: $48 000" in pk[0]["line"]
+ddb.unlink(missing_ok=True)
+print("OK — дубли от разных маклеров: одна карточка, «👥 ещё у N», «та же квартира дешевле»")
+assert SS.merge_alts([], [dict(own, key="sale:joymee:99", price_usd=43500)], own) == []          # перевыкладка того же продавца — не «ещё у 1»
+print("OK — перевыкладка тем же продавцом не считается другим продавцом")
