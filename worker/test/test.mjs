@@ -80,7 +80,7 @@ assert.equal(r.status, 403);
 
 // ── /start → приветствие и снятие старой клавиатуры
 await handleUpdate(env, msg("/start"));
-assert.match(texts().at(-1), /Ra'no, ИИ-ассистент/);
+assert.match(texts().at(-1), /Я Ra'no 👋 — ИИ-ассистент/);
 assert.deepEqual(sent.at(-1).reply_markup, OWNER_KB);              // постоянные кнопки внизу
 assert.doesNotMatch(texts().at(-1), /\/new/);                       // команды учить не нужно
 
@@ -106,7 +106,7 @@ await env.DB.prepare("DELETE FROM kv WHERE k='py_alive'").run();
 geminiQueue.push({ reply: "Собрала: аренда, 3-комн., Мирабад, до $1400.", ready: true,
   set: { budget: 1400, class: "premium", pets: "cat" } });
 await handleUpdate(env, msg("до 1400, ремонт дизайнерский, есть кошка"));
-assert.match(texts().at(-1), /Собрала.*\n\n📝 Текст запроса пришлю на проверку через 1–2 минуты\./s);
+assert.match(texts().at(-1), /Собрала.*\n\n📝 Текст запроса пришлю через минуту-две/s);
 assert.equal(gh.length, 1);
 assert.match(gh[0], /actions\/workflows\/radar\.yml\/dispatches/);
 q = await (await svc("/svc/updates?after=0&until=" + Math.floor(Date.now() / 1000 + 600))).json();
@@ -128,7 +128,7 @@ assert.equal(texts().at(-1), "Всё так же.");
 // ── правка словами → новый набор; Python жив → не будим, текст без «1–2 минуты»
 geminiQueue.push({ reply: "Поменяла бюджет на $1200.", ready: true, set: { budget: 1200 } });
 await handleUpdate(env, msg("бюджет 1200"));
-assert.match(texts().at(-1), /Поменяла бюджет на \$1200\.\n\n📝 Сейчас пришлю текст запроса на проверку…$/);
+assert.match(texts().at(-1), /Поменяла бюджет на \$1200\.\n\n📝 Сейчас покажу текст запроса — гляньте, всё ли так…$/);
 assert.equal(gh.length, 1);
 q = await (await svc(`/svc/updates?after=${id1}`)).json();
 assert.equal(JSON.parse(q.result[0].message.web_app_data.data).ans.budget, "1200");
@@ -170,7 +170,7 @@ assert.equal(q.result[0].message.text, "/start p1DBB");
 
 // ── ошибка Gemini → вежливое сообщение, без падения
 await handleUpdate(env, msg("ещё что-то"));
-assert.match(texts().at(-1), /попробуйте ещё раз/);
+assert.match(texts().at(-1), /опробуйте ещё раз/);
 
 // ── маклер: мгновенный ответ (не на /start), не чаще раза в 20 минут; пометка _acked для Python
 let qq = await (await svc("/svc/updates?after=0")).json();
@@ -237,7 +237,7 @@ await handleUpdate(env, msg("давай начнём заново"));
 assert.match(texts().at(-1), /Ищу двумя способами/);                 // без деталей — приветствие
 geminiQueue.push({ reply: "Ищем аренду. В каком районе?", ready: false, set: [{ k: "deal", v: "rent" }], intent: "restart" });
 await handleUpdate(env, msg("давай заново, теперь аренда"));
-assert.match(texts().at(-1), /Начинаем новый поиск\.\n\nИщем аренду/);
+assert.match(texts().at(-1), /С чистого листа!\n\nИщем аренду/);
 const ivR = JSON.parse((await env.DB.prepare("SELECT v FROM kv WHERE k=?").bind("iv:" + OWNER).first()).v);
 assert.deepEqual(ivR.ans, { deal: "rent" });                       // старое забыто, новое сохранено
 geminiQueue.push({ reply: "Ок.", ready: false, set: [], intent: "add_offer" });
@@ -287,7 +287,7 @@ await handleUpdate(env, { update_id: ++uid, callback_query: { id: "w1", data: "b
 assert.match(texts().at(-1), /📇 <b>Б<\/b>[\s\S]*Написано 1/);
 assert.ok(sent.some(x => x.m === "editMessageReplyMarkup" && x.message_id === 8));
 await handleUpdate(env, { update_id: ++uid, callback_query: { id: "w2", data: "bx:tel:2", message: { message_id: 9, chat: { id: +OWNER } } } });
-assert.match(texts().at(-1), /Рассылка закончена: написано 1, пропущено 1/);
+assert.match(texts().at(-1), /Всех прошли: написали 1, пропустили 1/);
 got = await drain();
 assert.deepEqual(got.map(u => [u.callback_query.data, u.callback_query._worker_done]), [["bw:tel:1", true], ["bx:tel:2", true]]);
 // запрос поменялся после снимка — к Python, чтобы ссылки не ушли со старым текстом
@@ -336,10 +336,10 @@ assert.match(ed.text, /^📋[\s\S]*1\. <b>\$41000[\s\S]*2\. <b>\$44000/);       
 await handleUpdate(env, { update_id: ++uid, callback_query: { id: "m5", data: "s:go", message: { message_id: 40, chat: { id: +OWNER } } } });
 got = await drain();
 assert.equal(got.at(-1).callback_query.data, "s:go"); assert.equal(got.at(-1).callback_query._toast_done, true);
-assert.match(sent.filter(x => x.m === "answerCallbackQuery").at(-1).text, /Спрошу 2/);
+assert.match(sent.filter(x => x.m === "answerCallbackQuery").at(-1).text, /Спрашиваю 2/);
 // просмотр: кнопка → фраза → время разобрано сразу, Python получает готовое
 await handleUpdate(env, { update_id: ++uid, callback_query: { id: "m7", data: "o:view:22", message: { message_id: 41, chat: { id: +OWNER } } } });
-assert.match(texts().at(-1), /Когда просмотр варианта #22/);
+assert.match(texts().at(-1), /Когда идём смотреть вариант #22/);
 await handleUpdate(env, msg("непонятно когда"));
 assert.match(texts().at(-1), /Не поняла дату/);
 await handleUpdate(env, msg("завтра в 18:30"));
@@ -349,7 +349,7 @@ assert.equal(got.at(-1).message._view.oid, 22); assert.match(got.at(-1).message.
 // заметка
 await handleUpdate(env, { update_id: ++uid, callback_query: { id: "m8", data: "o:note:22", message: { message_id: 41, chat: { id: +OWNER } } } });
 await handleUpdate(env, msg("Двор хороший, торг 2000"));
-assert.match(texts().at(-1), /Заметку к варианту #22 сохранила/);
+assert.match(texts().at(-1), /Записала в заметки к варианту #22/);
 got = await drain();
 assert.deepEqual(got.at(-1).message._note, { oid: 22 });
 // «посмотрел» — подсказка сразу, сохранит Python

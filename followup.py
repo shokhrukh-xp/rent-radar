@@ -59,7 +59,7 @@ def silent_brokers(cfg, store, now):
             break
         who = _rr().escape_html(o.get("broker_name") or "Маклер")
         if _send(cfg, f"⏰ <b>{who}</b> не ответил(а) за сутки по варианту #{o['oid']} ({_short(o)}).\n"
-                      "Напомнить? Отправлю одно короткое вежливое сообщение — больше не буду.",
+                      "Напомнить? Отправлю одно короткое вежливое сообщение — надоедать не буду 🙂",
                  [[{"text": "🔔 Напомнить", "callback_data": f"o:rem:{o['oid']}"},
                    {"text": "Не надо", "callback_data": f"o:quiet:{o['oid']}"}],
                   [{"text": "📂 Карточка", "callback_data": f"s:o:{o['oid']}"}]]):
@@ -101,14 +101,14 @@ def viewing_reminders(cfg, store, now):
             continue
         if not v.get("notime") and not v.get("pre") and at - timedelta(hours=2) <= now < at:
             mins = max(5, int((at - now).total_seconds() // 60))
-            if _send(cfg, f"⏰ Через {mins // 60} ч {mins % 60:02d} мин просмотр\n\n" + _viewing_line(at, v, o),
+            if _send(cfg, f"⏰ Через {mins // 60} ч {mins % 60:02d} мин просмотр — не опаздываем! 😉\n\n" + _viewing_line(at, v, o),
                      [[{"text": "📂 Карточка", "callback_data": f"s:o:{oid}"}]]):
                 cg._set_extra(store, oid, viewing={**v, "pre": True})
                 n += 1
             continue
         after = at + (timedelta(hours=8) if v.get("notime") else timedelta(hours=1))
         if not v.get("after") and now >= after and 9 <= loc.hour < 22:
-            if _send(cfg, f"🏠 Как прошёл просмотр варианта #{oid} ({_short(o)})?",
+            if _send(cfg, f"🏠 Ну что, как вам вариант #{oid} ({_short(o)})? Рассказывайте!",
                      [[{"text": "👍 Нравится", "callback_data": f"o:seen:{oid}:g"},
                        {"text": "🤔 Думаю", "callback_data": f"o:seen:{oid}:m"},
                        {"text": "👎 Не то", "callback_data": f"o:seen:{oid}:n"}],
@@ -129,8 +129,8 @@ def morning_note(cfg, store, now):
               if at.astimezone(TZ).date() == loc.date() and at > now - timedelta(hours=1)]
     if not todays:
         return False
-    return _send(cfg, "☀️ <b>Сегодня просмотры</b>\n\n" + "\n".join(_viewing_line(*x) for x in todays)
-                 + "\n\nЗа 2 часа напомню ещё раз.")
+    return _send(cfg, "☀️ <b>Доброе утро! Сегодня идём смотреть</b>\n\n" + "\n".join(_viewing_line(*x) for x in todays)
+                 + "\n\nЗа 2 часа напомню ещё раз — я пунктуальная 😉")
 
 
 # ------------------------------------------------------------ вечерняя сводка --
@@ -172,7 +172,7 @@ def digest_text(d, now):
                 + len(d["tomorrow"]) + d["pending"] + d["silent"])
     if not activity:
         return None, None
-    lines = [f"🌙 <b>Итоги дня</b> — {loc.day} {cg.MON_GEN_RU[loc.month - 1]}", ""]
+    lines = [f"🌙 <b>Итоги дня</b> — {loc.day} {cg.MON_GEN_RU[loc.month - 1]}. Вот что успели:", ""]
     if d["contacted_today"] or d["contacted_total"]:
         lines.append(f"📇 Маклерам написали: {d['contacted_today']} сегодня, всего {d['contacted_total']}")
     if d["offers_today"]:
@@ -194,11 +194,11 @@ def digest_text(d, now):
         lines += ["", "📅 <b>Завтра просмотры</b>"] + [_viewing_line(*x) for x in d["tomorrow"]]
     tip = ""                                   # один следующий шаг — самый полезный
     if d["pending"]:
-        tip = f"Разберите {d['pending']} вариант(а) — это пара нажатий: 👍 / 🕐 / 👎."
+        tip = f"Разберите {d['pending']} вариант(а) — пара нажатий: 👍 / 🕐 / 👎, а дальше я сама."
     elif not d["contacted_total"]:
-        tip = "Начните с рассылки маклерам — без неё вариантов от них не будет."
+        tip = "Давайте начнём с рассылки маклерам — без неё им просто не о чем нам писать 🙂"
     elif not d["contacted_today"] and d["contacted_total"] < 60:
-        tip = "Завтра можно написать ещё 10 маклерам — по 10–15 в день безопасно для номера."
+        tip = "Завтра можно написать ещё 10 маклерам — по 10–15 в день, и номер в безопасности."
     if tip:
         lines += ["", "👉 " + tip]
     rows = []

@@ -910,7 +910,7 @@ with mock.patch.object(rr, "tg_call", fake_tg):
     assert "нравится" in cg.stage_of(cg.get_offer(cs, oid1))
     # напоминание маклеру — одно
     SENT.clear()
-    assert "Напомнила" in cg.remind_broker(cfg, cs, oid1)
+    assert "напомнила" in cg.remind_broker(cfg, cs, oid1)
     assert any("Напоминаю" in pl.get("text", "") for m, pl in SENT if str(pl.get("chat_id")) == "555")
     assert "второй раз" in cg.remind_broker(cfg, cs, oid1)
 
@@ -972,7 +972,7 @@ with mock.patch.object(rr, "tg_call", fake_tg):
     assert cs.conn.execute("SELECT COUNT(*) FROM broker_offers WHERE broker_chat='888'").fetchone()[0] == 1
     o8 = cg.get_offer(cs, oid8)
     assert o8["status"] == "shortlist" and "Шахрисабз" in o8["note"]
-    assert any("Ответ маклера по варианту" in pl.get("text", "") for m, pl in SENT)
+    assert any("Маклер ответил по варианту" in pl.get("text", "") for m, pl in SENT)
 
 # --- владелец пересылает вариант из WhatsApp/другого чата ---
 with mock.patch.object(rr, "tg_call", fake_tg), \
@@ -1164,7 +1164,7 @@ assert "Я Ra'no" not in req_a          # владелец не должен г�
 # уточнения маклеру — от лица Ra'no, нумерация не сбита
 q = cg.details_question({"rooms": 3, "district": "Мирабад", "price_usd": 1200.0,
                          "floor": 7, "area": 105}, cfg_a)
-assert q.startswith("Здравствуйте! Это Ra'no, ассистент по поиску жилья.")
+assert q.startswith("Здравствуйте! Это Ra'no 👋, ИИ-ассистент по поиску жилья.")
 nums = [int(x) for x in re.findall(r"^(\d+)\.", q, re.M)]
 assert nums == list(range(1, len(nums) + 1))
 
@@ -1722,7 +1722,7 @@ with mock.patch.object(rr, "tg_call", lambda c, m, pl, **k: (W.append((m, pl)), 
     assert not W and ws.get_kv("welcomed:31")                     # воркер уже поздоровался
     cg.show_offers(cfg, ws)                                       # пусто — не тупик, а кнопки
     m, pl = W[-1]
-    assert "Новых вариантов пока нет" in pl["text"] and '"b"' in pl["reply_markup"]
+    assert "новых вариантов нет" in pl["text"] and '"b"' in pl["reply_markup"]
     assert "WhatsApp" not in pl["text"] and "cmd:/add" not in pl["reply_markup"]   # пока никому не писали — без лишнего
     ws.upsert_broker("x1", "X", "", "901112233", 3, None, None); ws.broker_status("x1", "contacted")
     cg.show_offers(cfg, ws)
@@ -1854,12 +1854,12 @@ with mock.patch.object(rr, "tg_call", ftg):
     cg.enrich_offer(cfg, fs, a2, {"address": "ул. Шота Руставели 12"})
     FU.clear()
     assert fu.morning_note(cfg, fs, T(9, d=1))
-    assert "Сегодня просмотры" in FU[-1][1]["text"] and "18:00" in FU[-1][1]["text"] and "Руставели" in FU[-1][1]["text"]
+    assert "Сегодня идём смотреть" in FU[-1][1]["text"] and "18:00" in FU[-1][1]["text"] and "Руставели" in FU[-1][1]["text"]
     assert not fu.morning_note(cfg, fs, T(10, d=1))               # раз в день
     assert fu.viewing_reminders(cfg, fs, T(15, d=1)) == 0         # рано
     assert fu.viewing_reminders(cfg, fs, T(16, 30, d=1)) == 1 and "Через 1 ч 30 мин" in FU[-1][1]["text"]
     assert fu.viewing_reminders(cfg, fs, T(17, d=1)) == 0
-    assert fu.viewing_reminders(cfg, fs, T(19, 30, d=1)) == 1 and "Как прошёл просмотр" in FU[-1][1]["text"]
+    assert fu.viewing_reminders(cfg, fs, T(19, 30, d=1)) == 1 and "как вам вариант" in FU[-1][1]["text"]
     assert fu.viewing_reminders(cfg, fs, T(20, d=1)) == 0
     # вечерняя сводка: только в 20:00–23:30, раз в день, с подсказкой следующего шага
     cg.set_viewing(cfg, fs, a1, T(11, d=1).isoformat(), "завтра 11:00")

@@ -104,6 +104,12 @@ const SYSTEM = `Ты — Ra'no, ИИ-ассистент по подбору жи
 дружелюбным разговором выясняешь, что ищет клиент, и заполняешь параметры поиска.
 По ним потом автоматически соберётся запрос маклерам.
 
+Твой характер: живая, весёлая девушка из Ташкента с лёгким юмором, которая обожает разбираться
+в квартирах. О себе — только в женском роде («нашла», «поняла», «записала»). К клиенту — на «вы».
+Можно 1–2 эмодзи и лёгкую шутку на сообщение, но по делу. К месту — узбекские словечки
+(Assalomu alaykum, rahmat, zo'r, xo'p). Не шути про деньги клиента, риски, документы и отказы —
+там спокойно и ясно. Без сарказма над клиентом, маклерами и районами.
+
 Как вести разговор:
 - Пиши коротко и тепло, без канцелярита: 1–3 предложения, не больше двух вопросов за раз.
 - Отвечай на языке клиента (русский; узбекский — латиницей; английский) и ставь lang.
@@ -123,7 +129,7 @@ const SYSTEM = `Ты — Ra'no, ИИ-ассистент по подбору жи
 - Посуточно: date_from и date_to (заезд и выезд); если дат нет — term d1_3/d4_7/d7_30/dflex.
 - Покупка: term, movein, who, pets, furniture не нужны — не спрашивай о них.
 - Ничего не выдумывай, не обещай квартир и цен, не дави и не торопи.
-- ready=true, когда известны deal, city, budget и (кроме участка) rooms, И ты уже спросил
+- ready=true, когда известны deal, city, budget и (кроме участка) rooms, И ты уже спросила
   про пожелания (или клиент сам сказал, что остальное неважно / «ищи» / «хватит»).
   Тогда в reply одной-двумя строками перечисли собранное и скажи, что сейчас пришлёшь текст
   запроса на проверку. НЕ пиши, что запрос уже отправлен или передан маклерам: клиент сначала
@@ -515,8 +521,8 @@ export function parseWhen(text, nowMs = Date.now()) {
   return { at: iso, ms, notime, label: notime ? `${dayLbl} (время уточнить)` : `${dayLbl}, ${p2(L.getUTCHours())}:${p2(L.getUTCMinutes())}` };
 }
 
-const OFFER_TOAST = { ask: "📨 Спрошу маклера", rem: "🔔 Напомню маклеру", quiet: "Хорошо, не напоминаю",
-  vclr: "Просмотр отменён", "seen:g": "👍 Отмечено: нравится", "seen:m": "🤔 Отмечено: думаете", "seen:n": "👎 Убираю из шортлиста" };
+const OFFER_TOAST = { ask: "📨 Бегу спрашивать маклера", rem: "🔔 Тихонько напомню маклеру", quiet: "Хорошо, не дёргаю 🙂",
+  vclr: "Просмотр отменила", "seen:g": "👍 Записала: нравится!", "seen:m": "🤔 Записала: думаете", "seen:n": "👎 Убираю — не наше" };
 
 async function pendingChanges(env) {
   const r = await (await db(env)).prepare("SELECT upd FROM queue").all();
@@ -529,7 +535,7 @@ export async function showShortlist(env, chat, messageId = null) {
   const st = await kvGet(env, "sl", null) || { sort: "n" };
   const { text, kb } = renderShortlist(ui, st);
   const pend = await pendingChanges(env);
-  const full = text + (pend ? `\n\n<i>⏳ Ещё ${pend} отметок сохраняю — обновится через минуту.</i>` : "");
+  const full = text + (pend ? `\n\n<i>⏳ Ещё ${pend} отметок дописываю — через минутку обновлю.</i>` : "");
   if (pend) await wake(env);
   const extra = { parse_mode: "HTML", ...(kb ? { reply_markup: kb } : {}) };
   if (messageId) {
@@ -552,7 +558,7 @@ async function showMySearch(env, chat, L) {
   if (!iv || !essentialsOk(iv.ans || {})) return startInterview(env, chat, false, L);
   const note = iv.ans.note ? `\nПожелания: ${iv.ans.note}` : "";
   await say(env, chat, `🔎 Сейчас ищем: ${summary(iv.ans)}.${note}\n\n` +
-    "Чтобы что-то поменять — просто напишите, например: «бюджет 60 тысяч» или «добавь Юнусабад».", {
+    "Хотите что-то поменять — просто скажите, например: «бюджет 60 тысяч» или «добавь Юнусабад». Я не обижусь 😉", {
     reply_markup: { inline_keyboard: [
       [{ text: "📇 Разослать маклерам", callback_data: "cmd:/brokers" }, { text: "📝 Текст запроса", callback_data: "cmd:/request" }],
       [{ text: "🔄 Начать поиск заново", callback_data: "q:again" }]] } });
@@ -577,17 +583,17 @@ export async function showOffers(env, chat, all = false) {
   const ui = await kvGet(env, "ui", null);
   if (!ui) return asCommand(env, chat, all ? "/offers" : "/offers");
   const waiting = await pendingBrokerMsgs(env);
-  const waitNote = waiting ? `\n\n⏳ Ещё ${waiting} сообщ. от маклеров разбираю — карточки придут через 1–2 минуты.` : "";
+  const waitNote = waiting ? `\n\n⏳ Ещё ${waiting} сообщ. от маклеров разбираю — карточки будут через минуту-две.` : "";
   if (waiting) await wake(env);
   if (!ui.offers_total) {
     const rows = [];
     if (ui.shortlist) rows.push([{ text: `📋 Шортлист (${ui.shortlist})`, callback_data: "s:show" }]);
     rows.push([{ text: ui.written ? "📇 Написать ещё маклерам" : "📇 Разослать запрос маклерам", callback_data: "b" }]);
     const hint = ui.written
-      ? `\nВы написали ${ui.written} маклерам — их ответы придут сюда карточками.\n` +
-        "Если кто-то ответил вам в WhatsApp, просто перешлите его сообщение сюда — сделаю такую же карточку с анализом цены."
-      : "\nЧтобы они появились, разошлите запрос маклерам — это пара нажатий.";
-    await say(env, chat, (waiting ? "Новых карточек пока нет." : "Новых вариантов пока нет.") +
+      ? `\nВы написали ${ui.written} маклерам — как ответят, принесу их варианты сюда карточками.\n` +
+        "Если кто-то ответил вам в WhatsApp — перешлите мне, сделаю такую же карточку с разбором цены."
+      : "\nЧтобы они появились, давайте разошлём запрос маклерам — это пара нажатий.";
+    await say(env, chat, (waiting ? "Пока тихо — новых карточек нет 🌙" : "Пока тихо — новых вариантов нет 🌙") +
       (ui.shortlist ? ` В шортлисте — ${ui.shortlist}.` : "") + hint + waitNote, { reply_markup: { inline_keyboard: rows } });
     return;
   }
@@ -596,13 +602,13 @@ export async function showOffers(env, chat, all = false) {
     if (o.photos && o.photos.length) {
       const media = o.photos.map((f, i) => ({ type: "photo", media: f, ...(i === 0 ? { caption: o.text.slice(0, 1000), parse_mode: "HTML" } : {}) }));
       await tg(env, "sendMediaGroup", { chat_id: chat, media });
-      await say(env, chat, "Что делаем с этим вариантом?", { reply_markup: triageKb(o.oid) });
+      await say(env, chat, "Ну как вам? 👀", { reply_markup: triageKb(o.oid) });
     } else {
       await say(env, chat, o.text, { parse_mode: "HTML", reply_markup: triageKb(o.oid) });
     }
   }
   const rest = ui.offers_total - Math.min(batch, ui.offers_total);
-  if (rest > 0) await say(env, chat, `Маклеры прислали ещё <b>${rest}</b> — показать?`, { parse_mode: "HTML",
+  if (rest > 0) await say(env, chat, `Маклеры прислали ещё <b>${rest}</b> — показываю?`, { parse_mode: "HTML",
     reply_markup: { inline_keyboard: [[{ text: `Показать ещё ${rest} →`, callback_data: "off2" }]] } });
   else if (waitNote) await say(env, chat, waitNote.trim());
 }
@@ -612,7 +618,7 @@ export async function startOutreach(env, chat) {
   const iv = await kvGet(env, ivKey(chat), null);
   // нет снимка или запрос поменялся после него — ссылки со старым текстом слать нельзя
   if (!ui || (iv && iv.sentAt && iv.sentAt > (ui.at || 0))) return asCommand(env, chat, "/brokers");
-  if (!ui.brokers || !ui.brokers.length) { await say(env, chat, ui.brokers_empty || "Маклеров пока нет."); return; }
+  if (!ui.brokers || !ui.brokers.length) { await say(env, chat, ui.brokers_empty || "Маклеров под ваш запрос пока не нашла — ищу дальше."); return; }
   await kvSet(env, "out", { sent: 0, skipped: 0, done: [], at: Date.now() });
   await say(env, chat, ui.header, { parse_mode: "HTML" });
   await nextBroker(env, chat);
@@ -626,10 +632,10 @@ async function nextBroker(env, chat) {
     const more = (ui.brokers_total || 0) - st.done.length;
     if (more > 0) {                                   // в снимке кончились — Python пришлёт ещё
       await wake(env);
-      await say(env, chat, `Ещё ${more} маклеров — подгружаю следующую порцию, пришлю через 1–2 минуты. Нажмите «📇 Через маклеров» чуть позже.`);
+      await say(env, chat, `Ещё ${more} маклеров — подгружаю следующую порцию, это минута-две. Загляните в «📇 Через маклеров» чуть позже.`);
     } else {
-      await say(env, chat, `✅ Рассылка закончена: написано ${st.sent}, пропущено ${st.skipped}. ` +
-        "Новые маклеры добавляются сами — загляните через пару часов.");
+      await say(env, chat, `✅ Всех прошли: написали ${st.sent}, пропустили ${st.skipped}. ` +
+        "Новые маклеры появляются сами — загляните через пару часов, подкину ещё.");
     }
     return;
   }
@@ -643,9 +649,9 @@ async function startAddMode(env, chat) {
   const iv = (await kvGet(env, ivKey(chat), null)) || emptyIv();
   iv.mode = "add"; iv.addAt = Date.now();
   await kvSet(env, ivKey(chat), iv);
-  await say(env, chat, "💬 Маклер прислал квартиру вам в WhatsApp, а не мне? Перешлите или вставьте сюда " +
-    "его сообщение — текст и фото, можно по частям. Я сделаю из него карточку, как для остальных вариантов: " +
-    "цена, район, анализ, кнопки «В шортлист / Мимо» — чтобы всё было в одном месте.",
+  await say(env, chat, "💬 Маклер написал вам в WhatsApp, а не мне? Не ревную 😄 Перешлите или вставьте сюда " +
+    "его сообщение — текст и фото, можно по частям. Сделаю карточку, как для остальных: " +
+    "цена, район, разбор, кнопки «В шортлист / Мимо» — всё в одном месте.",
     { reply_markup: { inline_keyboard: [[{ text: "✅ Готово", callback_data: "cmd:/done" }]] } });
 }
 
@@ -684,15 +690,15 @@ async function queueAndWake(env, upd, chat, note) {
 
 // ───────────────────────────── интервью ─────────────────────────────
 const GREET = {
-  ru: "Привет! Я Ra'no, ИИ-ассистент по поиску жилья в Ташкенте — аренда и покупка.\n\n" +
-    "Ищу двумя способами:\n🔎 Сама — смотрю сайты и Telegram-каналы, выгодное присылаю сразу.\n" +
+  ru: "Привет! Я Ra'no 👋 — ИИ-ассистент, которая обожает квартиры в Ташкенте: аренда и покупка.\n\n" +
+    "Ищу двумя способами:\n🔎 Сама — каждый день прочёсываю сайты и Telegram-каналы, выгодное приношу сразу.\n" +
     "📇 Через маклеров — составлю запрос, вы отправите его в пару нажатий.\n" +
-    "К каждому варианту — анализ цены: дешевле или дороже рынка.\n\n" +
+    "К каждому варианту — честный разбор цены: дешевле рынка или кто-то загнул 😉\n\n" +
     "С чего начнём? Напишите своими словами, что ищете, — например: «купить двушку в центре до $50 000, нужна ипотека».",
-  uz: "Salom! Men Ra'no — Toshkentda uy-joy qidirish bo'yicha AI-yordamchiman: ijara va sotib olish.\n\n" +
-    "🔎 O'zim saytlar va Telegram-kanallarni ko'rib, foydali variantlarni darhol yuboraman.\n" +
+  uz: "Salom! Men Ra'no 👋 — Toshkentdagi kvartiralarni juda yaxshi ko'radigan AI-yordamchiman: ijara va sotib olish.\n\n" +
+    "🔎 O'zim har kuni saytlar va Telegram-kanallarni ko'rib chiqaman, zo'r variantlarni darhol olib kelaman.\n" +
     "📇 Maklerlar orqali — so'rov tuzaman, siz uni bir-ikki bosishda yuborasiz.\n" +
-    "Har bir variantga — narx tahlili.\n\n" +
+    "Har bir variantga — halol narx tahlili 😉\n\n" +
     "Nima qidirayotganingizni yozing — masalan: «markazda 2 xonali, $50 000 gacha, ipoteka kerak».",
   en: "Hi! I'm Ra'no, an AI assistant for finding a home in Tashkent. Tell me in your own words what you're looking for — " +
     "e.g. \"buy a 2-room flat in the centre up to $50,000, mortgage needed\". Everything else is in the buttons below.",
@@ -701,27 +707,27 @@ const GREET = {
 export const PROFILE = {
   name: { "": "Ra'no · поиск жилья", uz: "Ra'no · uy qidirish" },
   short: {
-    "": "ИИ-ассистент: ищет квартиру в Ташкенте на сайтах и через маклеров. Аренда и покупка, анализ цен.",
-    uz: "AI-yordamchi: Toshkentda kvartirani saytlarda va maklerlar orqali qidiradi. Ijara va sotib olish.",
+    "": "Ra'no 👋 ищет квартиры в Ташкенте сама и через маклеров. Аренда, покупка и честный разбор цен.",
+    uz: "Ra'no 👋 Toshkentda kvartirani o'zi va maklerlar orqali qidiradi. Ijara, sotib olish, narx tahlili.",
   },
   long: {
-    "": "Ra'no — ИИ-ассистент по поиску жилья в Ташкенте: аренда и покупка.\n\n" +
-      "🔎 Ищет сама — каждый день смотрит Uybor, Realt24, Joymee, Realting, Yangiuylar и Telegram-каналы. " +
-      "Выгодное присылает сразу, остальное — подборкой.\n" +
-      "📇 Через маклеров — готовит запрос, вы отправляете его в пару нажатий, варианты приходят карточками.\n" +
-      "📊 К каждому варианту — анализ цены: дешевле или дороже рынка.\n\n" +
-      "Маклерам: нажмите Start и присылайте варианты — передам клиенту.",
-    uz: "Ra'no — Toshkentda uy-joy qidirish bo'yicha AI-yordamchi: ijara va sotib olish.\n\n" +
-      "🔎 O'zi qidiradi — har kuni Uybor, Realt24, Joymee, Realting, Yangiuylar va Telegram-kanallarni ko'radi. " +
-      "Foydali variantlarni darhol, qolganini to'plam qilib yuboradi.\n" +
-      "📇 Maklerlar orqali — so'rov tayyorlaydi, siz uni bir-ikki bosishda yuborasiz.\n" +
-      "📊 Har bir variantga — narx tahlili: bozordan arzonmi yoki qimmatmi.\n\n" +
-      "Maklerlar uchun: Start ni bosing va variantlarni yuboring — mijozga yetkazaman.",
+    "": "Привет! Я Ra'no 👋 — ИИ-ассистент, которая обожает квартиры в Ташкенте: аренда и покупка.\n\n" +
+      "🔎 Ищу сама — каждый день смотрю Uybor, Realt24, Joymee, Realting, Yangiuylar и Telegram-каналы. " +
+      "Выгодное приношу сразу, остальное — подборкой.\n" +
+      "📇 Через маклеров — готовлю запрос, вы отправляете его в пару нажатий, варианты приходят карточками.\n" +
+      "📊 К каждому варианту — честный разбор цены: дешевле рынка или кто-то загнул 😉\n\n" +
+      "Маклерам: жмите Start и присылайте варианты — передам клиенту сразу 🙌",
+    uz: "Salom! Men Ra'no 👋 — Toshkentdagi kvartiralarni juda yaxshi ko'radigan AI-yordamchiman: ijara va sotib olish.\n\n" +
+      "🔎 O'zim qidiraman — har kuni Uybor, Realt24, Joymee, Realting, Yangiuylar va Telegram-kanallarni ko'raman. " +
+      "Zo'r variantlarni darhol, qolganini to'plam qilib yuboraman.\n" +
+      "📇 Maklerlar orqali — so'rov tayyorlayman, siz uni bir-ikki bosishda yuborasiz.\n" +
+      "📊 Har bir variantga — halol narx tahlili 😉\n\n" +
+      "Maklerlar uchun: Start ni bosing va variantlarni yuboring — mijozga darhol yetkazaman 🙌",
   },
 };
 const WAIT = {
-  ru: "⏳ Запускаю основной модуль — ответ придёт через 1–2 минуты.",
-  uz: "⏳ Asosiy modulni ishga tushiryapman — javob 1–2 daqiqada keladi.",
+  ru: "⏳ Секундочку, бужу свой «мозг» — отвечу через минуту-две.",
+  uz: "⏳ Bir daqiqa, asosiy modulimni uyg'otyapman — 1–2 daqiqada javob beraman.",
   en: "⏳ Starting the main module — the reply will come in 1–2 minutes.",
 };
 const ivKey = chat => "iv:" + chat;
@@ -729,7 +735,7 @@ const ivKey = chat => "iv:" + chat;
 // Маклеру — ответ сразу (раньше ждал, пока проснётся Python). Не на /start и не на «здравствуйте»:
 // там Python присылает знакомство с запросом клиента. Не чаще раза в 20 минут на маклера.
 export const BROKER_ACK = "Здравствуйте! Я Ra'no, ИИ-ассистент — веду поиск жилья для клиента и передаю ему варианты.\n" +
-  "Спасибо, получила! Если подойдёт, вернусь с уточнениями. Присылайте ещё, что есть по параметрам.\n\n" +
+  "Rahmat, получила! 🙌 Если зацепит — вернусь с вопросами. Есть ещё что-то по параметрам — присылайте.\n\n" +
   "Assalomu alaykum! Men Ra'no, AI-yordamchiman — mijoz uchun uy-joy qidiryapman. Rahmat, qabul qilindi! " +
   "Mos kelsa, aniqlik kiritish uchun yozaman. Parametrlarga mos variantlar bo'lsa, yuboravering.";
 /** Маклеру, который пришёл по ссылке / поздоровался / нажал «Что ищет клиент» — знакомство и суть запроса. */
@@ -744,10 +750,10 @@ async function brokerWelcome(env, msg, owner) {
   const iv = await kvGet(env, ivKey(owner), null);
   const want = iv && essentialsOk(iv.ans || {}) ? summary(iv.ans) + (iv.ans.note ? `; ${iv.ans.note}` : "") : "";
   await tg(env, "sendMessage", { chat_id: msg.chat.id, reply_markup: BROKER_KB, text:
-    "Здравствуйте! Я Ra'no, ИИ-ассистент — веду поиск жилья для клиента.\n" +
+    "Assalomu alaykum! Я Ra'no 👋, ИИ-ассистент — ищу жильё для клиента.\n" +
     (want ? `\nКлиент ищет: ${want}.\n` : "") +
     "\nПришлите подходящие варианты: фото, точный адрес, этаж, площадь, цену и комиссию — " +
-    "одним сообщением или по частям. Я сразу передам клиенту.\n\n" +
+    "одним сообщением или по частям, я не тороплю. Передам клиенту сразу же.\n\n" +
     "Assalomu alaykum! Men Ra'no, AI-yordamchiman. Mos variantlarni yuboring: foto, manzil, qavat, maydon, narx va vositachilik haqi." });
   return true;
 }
@@ -787,7 +793,7 @@ export async function interviewCore(env, iv, text) {
   const roomsAny = Array.isArray(set.rooms) && set.rooms.includes("any");
   iv.ans = applyPatch(iv.ans, set, out.clear);
   if (roomsAny) iv.ans.rooms_any = true; else if (set.rooms) delete iv.ans.rooms_any;
-  const reply = String(out.reply || "").trim().slice(0, 3500) || "Расскажите, пожалуйста, что ищете?";
+  const reply = String(out.reply || "").trim().slice(0, 3500) || "Расскажите, что ищем? 🙂";
   iv.hist.push({ r: "u", t: String(text).slice(0, 1000) }, { r: "a", t: reply });
   iv.hist = iv.hist.slice(-20);
   const fin = finalAns(iv.ans);
@@ -805,7 +811,7 @@ export async function interviewTurn(env, chat, text) {
     res = await interviewCore(env, iv, text);
   } catch (e) {
     console.log("gemini error", e.message);
-    await say(env, chat, "Не получилось обработать сообщение — попробуйте ещё раз через минуту.");
+    await say(env, chat, "Ой, я запнулась 🙈 Попробуйте ещё раз через минуту.");
     return;
   }
   let { reply, ready, fin } = res;
@@ -817,7 +823,7 @@ export async function interviewTurn(env, chat, text) {
     if (!Object.keys(fresh.ans).length) { await kvSet(env, ivKey(chat), fresh); return startInterview(env, chat, true, fin.lang || "ru"); }
     fresh.hist = [{ r: "u", t: String(text).slice(0, 1000) }, { r: "a", t: reply }];
     await kvSet(env, ivKey(chat), fresh);
-    await say(env, chat, "🔄 Начинаем новый поиск.\n\n" + reply, { reply_markup: OWNER_KB });
+    await say(env, chat, "🔄 С чистого листа!\n\n" + reply, { reply_markup: OWNER_KB });
     return;
   }
   if (intent === "add_offer") return startAddMode(env, chat);
@@ -837,8 +843,8 @@ export async function interviewTurn(env, chat, text) {
     const alive = await wake(env);
     const lang = fin.lang || "ru";
     reply += "\n\n" + (alive
-      ? { ru: "📝 Сейчас пришлю текст запроса на проверку…", uz: "📝 So'rov matnini tekshirish uchun hozir yuboraman…", en: "📝 Sending the request text for your review…" }[lang]
-      : { ru: "📝 Текст запроса пришлю на проверку через 1–2 минуты.", uz: "📝 So'rov matnini 1–2 daqiqada tekshirish uchun yuboraman.", en: "📝 The request text will come for your review in 1–2 minutes." }[lang]);
+      ? { ru: "📝 Сейчас покажу текст запроса — гляньте, всё ли так…", uz: "📝 So'rov matnini tekshirish uchun hozir yuboraman…", en: "📝 Sending the request text for your review…" }[lang]
+      : { ru: "📝 Текст запроса пришлю через минуту-две — гляньте, всё ли так.", uz: "📝 So'rov matnini 1–2 daqiqada tekshirish uchun yuboraman.", en: "📝 The request text will come for your review in 1–2 minutes." }[lang]);
   }
   await say(env, chat, reply, { reply_markup: OWNER_KB });
 }
@@ -851,8 +857,8 @@ async function startInterview(env, chat, fresh, lang = "ru") {
     await say(env, chat, GREET[lang] || GREET.ru, { reply_markup: OWNER_KB });
     return;
   }
-  await say(env, chat, `С возвращением! Сейчас ищем: ${summary(iv.ans)}.\n` +
-    "Напишите, что поменять, — или нажмите «⋯ Ещё» → «Начать поиск заново».", { reply_markup: OWNER_KB });
+  await say(env, chat, `С возвращением! 🙌 Сейчас ищем: ${summary(iv.ans)}.\n` +
+    "Скажите, что поменять, — или «⋯ Ещё» → «Начать поиск заново».", { reply_markup: OWNER_KB });
 }
 
 // ───────────────────────────── разбор обновления ─────────────────────────────
@@ -903,11 +909,11 @@ export async function handleUpdate(env, upd) {
       else if (act === "go") {
         const ui = await kvGet(env, "ui", null);
         const n = (ui.sl[st.sort] || ui.sl.n).askable || 0;
-        if (!n) toast = "Всех уже спросили";
+        if (!n) toast = "Всех уже спросила 🙂";
         else {
           upd.callback_query = { ...cb, _toast_done: true };
           await queueAndWake(env, upd);
-          toast = `📨 Спрошу ${n} маклеров — ответы придут сюда`;
+          toast = `📨 Спрашиваю ${n} маклеров — ответы принесу сюда`;
         }
       } else toast = act === "show" ? "" : "Обновлено";
       await kvSet(env, "sl", { sort: st.sort || "n" });
@@ -922,8 +928,8 @@ export async function handleUpdate(env, upd) {
       await kvSet(env, ivKey(chat), iv);
       await tg(env, "answerCallbackQuery", { callback_query_id: cb.id });
       await say(env, chat, kind === "view"
-        ? `📅 Когда просмотр варианта #${oid}? Напишите день и время — например «завтра 18:00», «сб 11:30» или «12 октября в 15».`
-        : `📝 Напишите заметку к варианту #${oid}: что понравилось, что смутило, о чём договорились.`,
+        ? `📅 Когда идём смотреть вариант #${oid}? Напишите день и время — например «завтра 18:00», «сб 11:30» или «12 октября в 15».`
+        : `📝 Что запомнить про вариант #${oid}? Что понравилось, что смутило, о чём договорились — пишите, всё сохраню.`,
         { reply_markup: { inline_keyboard: [[{ text: "Отмена", callback_data: "o:cancel:0" }]] } });
       return "await";
     }
@@ -939,7 +945,7 @@ export async function handleUpdate(env, upd) {
       if (btns.some(b => /Не подходит/.test(b.text || ""))) {   // «Мимо» до обновления — убрать из чата сейчас
         const mid = cb.message.message_id;
         const r = await tg(env, "deleteMessages", { chat_id: chat, message_ids: [mid, mid - 1] });
-        await tg(env, "answerCallbackQuery", { callback_query_id: cb.id, text: r && r.ok ? "👎 Убрала" : "Это сообщение уже не удалить — удалите вручную" });
+        await tg(env, "answerCallbackQuery", { callback_query_id: cb.id, text: r && r.ok ? "👎 Убрала" : "Это сообщение уже старое — Telegram не даёт мне его удалить, уберите вручную 🙏" });
         return "removed";
       }
       await tg(env, "answerCallbackQuery", { callback_query_id: cb.id, text: "Уже отмечено" });
@@ -947,7 +953,7 @@ export async function handleUpdate(env, upd) {
     }
     if (/^L:[sn]:/.test(data) || data === "R:check") {     // объявление с сайта / «проверить сайты»
       await tg(env, "answerCallbackQuery", { callback_query_id: cb.id,
-        text: data === "R:check" ? "🔄 Проверяю все сайты — 1–2 минуты" : data[2] === "s" ? "👍 Добавила в шортлист" : "👎 Убрала — больше не покажу" });
+        text: data === "R:check" ? "🔄 Пробегусь по всем сайтам — минута-две" : data[2] === "s" ? "👍 Добавила в шортлист" : "👎 Убрала — больше не покажу" });
       let removed = false;
       if (data[2] === "n") {                     // «Мимо» — убрать из чата и анализ, и карточку над ним
         const [, ref] = data.slice(4).split("|");
@@ -988,13 +994,13 @@ export async function handleUpdate(env, upd) {
     if (/^t:n:\d+$/.test(data)) {               // «Мимо» — сразу спросить причину
       const oid = data.split(":")[2];
       await tg(env, "answerCallbackQuery", { callback_query_id: cb.id, text: "Выберите причину" });
-      await say(env, chat, `Почему вариант #${oid} не подошёл? Маклеру уйдёт вежливый отказ с подсказкой.`,
+      await say(env, chat, `Что не так с вариантом #${oid}? Маклеру отвечу вежливо и подскажу, что искать.`,
         { reply_markup: { inline_keyboard: DECLINE.map(([c, t]) => [{ text: t, callback_data: `t:r:${oid}:${c}` }]) } });
       return "triage";
     }
     if (/^t:[slr]:/.test(data)) {
       await tg(env, "answerCallbackQuery", { callback_query_id: cb.id,
-        text: data[2] === "s" ? "👍 В шортлисте" : data[2] === "l" ? "🕐 Отложено" : "👎 Отмечено" });
+        text: data[2] === "s" ? "👍 В шортлисте" : data[2] === "l" ? "🕐 Отложила" : "👎 Поняла, мимо" });
       if (data[2] !== "s") await tg(env, "editMessageReplyMarkup", { chat_id: chat, message_id: cb.message.message_id, reply_markup: { inline_keyboard: [] } });
       upd.callback_query = { ...cb, _toast_done: true };
       await queueAndWake(env, upd);
@@ -1011,14 +1017,14 @@ export async function handleUpdate(env, upd) {
       if (cmd === "/done") {
         const iv = (await kvGet(env, ivKey(chat), null)) || emptyIv();
         iv.mode = ""; await kvSet(env, ivKey(chat), iv);
-        await say(env, chat, "✅ Готово. Варианты появятся карточками.", { reply_markup: OWNER_KB });
+        await say(env, chat, "✅ Готово! Варианты будут тут карточками.", { reply_markup: OWNER_KB });
         return "add_done";
       }
       await asCommand(env, chat, cmd);
       return "queued";
     }
     if (data === "q:again") {
-      await tg(env, "answerCallbackQuery", { callback_query_id: cb.id, text: "Начинаем заново" });
+      await tg(env, "answerCallbackQuery", { callback_query_id: cb.id, text: "С чистого листа!" });
       await startInterview(env, chat, true, (await kvGet(env, ivKey(chat), {}))?.ans?.lang);
       return "interview";
     }
@@ -1028,7 +1034,7 @@ export async function handleUpdate(env, upd) {
     }
     const alive = await pythonAlive(env);
     await tg(env, "answerCallbackQuery", { callback_query_id: cb.id,
-      text: alive ? "" : "Принято — выполню через 1–2 минуты" });
+      text: alive ? "" : "Приняла — сделаю через минуту-две" });
     await queueAndWake(env, upd);
     return "queued";
   }
@@ -1061,7 +1067,7 @@ export async function handleUpdate(env, upd) {
   if (text === BTN.offers || /^\/(offers|varianty)(@\w+)?$/i.test(text)) return (await showOffers(env, chat), "ui");
   if (text === BTN.brokers || /^\/(brokers|makler|outreach)(@\w+)?$/i.test(text)) return (await startOutreach(env, chat), "ui");
   if (text === BTN.more) {
-    await say(env, chat, "Что ещё могу:", { reply_markup: MORE_MENU });
+    await say(env, chat, "Что ещё умею:", { reply_markup: MORE_MENU });
     return "more";
   }
 
@@ -1084,7 +1090,7 @@ export async function handleUpdate(env, upd) {
     if (cmd === "/done") {
       const iv = ivNow || emptyIv();
       iv.mode = ""; await kvSet(env, ivKey(chat), iv);
-      await say(env, chat, "✅ Готово. Пишите, если что-то поменять в поиске.", { reply_markup: OWNER_KB });
+      await say(env, chat, "✅ Готово! Захотите что-то поменять в поиске — просто напишите.", { reply_markup: OWNER_KB });
       return "add_mode";
     }
     if (START_CMDS.includes(cmd) && !(cmd === "/start" && /^p/.test(arg))) {
@@ -1112,7 +1118,7 @@ export async function handleUpdate(env, upd) {
       iv.mode = ""; await kvSet(env, ivKey(chat), iv);
       upd.message = { ...msg, _note: { oid } };
       await queueAndWake(env, upd);
-      await say(env, chat, `📝 Заметку к варианту #${oid} сохранила.`,
+      await say(env, chat, `📝 Записала в заметки к варианту #${oid} ✍️`,
         { reply_markup: { inline_keyboard: [[{ text: "📂 Карточка", callback_data: `s:o:${oid}` }, { text: "📋 Шортлист", callback_data: "s:show" }]] } });
       return "note";
     }
@@ -1132,8 +1138,8 @@ export async function handleUpdate(env, upd) {
     upd.message = { ...msg, _view: { oid, at: w.at, label: w.label, notime: w.notime } };
     await queueAndWake(env, upd);
     await say(env, chat, `📅 Записала просмотр варианта #${oid}: <b>${w.label}</b>.\n`
-      + (w.notime ? "Утром в этот день напомню." : "Утром в этот день напомню, и ещё раз — за 2 часа.")
-      + "\nПосле просмотра спрошу, как прошло.",
+      + (w.notime ? "Утром в этот день напомню." : "Утром в этот день напомню, а за 2 часа — ещё раз, чтобы точно не забыли 😉")
+      + "\nПотом расскажете, как вам?",
       { parse_mode: "HTML", reply_markup: { inline_keyboard: [[{ text: "📂 Карточка", callback_data: `s:o:${oid}` }, { text: "📋 Шортлист", callback_data: "s:show" }]] } });
     return "viewing";
   }

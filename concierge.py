@@ -678,7 +678,7 @@ def attach_answer(cfg, store, oid, text):
     o = get_offer(store, oid)
     rr.tg_call(cfg, "sendMessage", {
         "chat_id": cfg["telegram_chat_id"], "parse_mode": "HTML",
-        "text": f"💬 <b>Ответ маклера по варианту #{oid}</b>\n\n"
+        "text": f"💬 <b>Маклер ответил по варианту #{oid}</b> — принесла:\n\n"
                 f"{rr.escape_html((text or '').strip()[:800])}\n\n"
                 + offer_card(store, cfg, o)[:1500],
         "reply_markup": json.dumps({"inline_keyboard": [[
@@ -701,10 +701,10 @@ def request_summary(store) -> str:
 def broker_welcome(cfg, store) -> str:
     a = cfg.get("assistant_name", "Ra'no")
     want = request_summary(store)
-    return (f"Здравствуйте! Я {a}, ИИ-ассистент — веду поиск жилья для клиента.\n"
+    return (f"Assalomu alaykum! Я {a} 👋, ИИ-ассистент — ищу жильё для клиента.\n"
             + (f"\nКлиент ищет:\n{want}\n" if want else "")
             + "\nПришлите подходящие варианты: фото, точный адрес, этаж, площадь, цену и "
-              "комиссию — одним сообщением или альбомом. Я сразу передам клиенту.\n\n"
+              "комиссию — одним сообщением или альбомом, я не тороплю. Передам клиенту сразу же.\n\n"
               f"Assalomu alaykum! Men {a}, AI-yordamchiman. Mos variantlarni yuboring: foto, "
               "manzil, qavat, maydon, narx va vositachilik haqi.")
 
@@ -944,7 +944,7 @@ def notify_offer(cfg, store, oid, pos=None, total=None):
             "chat_id": cfg["telegram_chat_id"],
             "media": json.dumps(media, ensure_ascii=False)})
         rr.tg_call(cfg, "sendMessage", {
-            "chat_id": cfg["telegram_chat_id"], "text": "Что делаем с этим вариантом?",
+            "chat_id": cfg["telegram_chat_id"], "text": "Ну как вам? 👀",
             "reply_markup": kb})
     else:
         rr.tg_call(cfg, "sendMessage", {
@@ -970,15 +970,15 @@ def show_offers(cfg, store, batch=None):
             rows.append([{"text": f"📋 Шортлист ({sl})", "callback_data": "s:show"}])
         if not written:                      # ещё никому не писали — главное действие одно
             rows.append([{"text": "📇 Разослать запрос маклерам", "callback_data": "b"}])
-            hint = "\nЧтобы они появились, разошлите запрос маклерам — это пара нажатий."
+            hint = "\nЧтобы они появились, давайте разошлём запрос маклерам — это пара нажатий."
         else:                                # писали — ждём; подсказка про WhatsApp только здесь
             rows.append([{"text": "📇 Написать ещё маклерам", "callback_data": "b"}])
-            hint = (f"\nВы написали {written} маклерам — их ответы придут сюда карточками.\n"
-                    "Если кто-то ответил вам в WhatsApp, просто перешлите его сообщение сюда — "
-                    "сделаю такую же карточку с анализом цены.")
+            hint = (f"\nВы написали {written} маклерам — как ответят, принесу их варианты сюда карточками.\n"
+                    "Если кто-то ответил вам в WhatsApp — перешлите мне, "
+                    "сделаю такую же карточку с разбором цены.")
         rr.tg_call(cfg, "sendMessage", {
             "chat_id": cfg["telegram_chat_id"],
-            "text": ("Новых вариантов пока нет." + (f" В шортлисте — {sl}." if sl else "") + hint),
+            "text": ("Пока тихо — новых вариантов нет 🌙" + (f" В шортлисте — {sl}." if sl else "") + hint),
             "reply_markup": json.dumps({"inline_keyboard": rows}, ensure_ascii=False)})
         return 0
     for i, o in enumerate(pool[:batch]):
@@ -1000,8 +1000,8 @@ def _more_teaser(cfg, remaining):
         {"text": f"Показать ещё {remaining} →", "callback_data": "off2"}]]}
     rr.tg_call(cfg, "sendMessage", {
         "chat_id": cfg["telegram_chat_id"],
-        "text": (f"✅ Это проверенные варианты, ближе всего к вашим параметрам.\n\n"
-                 f"Маклеры прислали ещё <b>{remaining} {word}</b> — показать?"),
+        "text": (f"✅ Это самые близкие к вашим параметрам.\n\n"
+                 f"Маклеры прислали ещё <b>{remaining} {word}</b> — показываю?"),
         "parse_mode": "HTML",
         "reply_markup": json.dumps(kb, ensure_ascii=False)})
 
@@ -1018,8 +1018,8 @@ DECLINE_REASONS = [
 def decline_text(cfg, reason=""):
     a = cfg.get("assistant_name", "Ra'no")
     why = next((w for c, _, w in DECLINE_REASONS if c == reason), "")
-    return (f"Спасибо! Этот вариант клиенту не подошёл" + (f": {why}" if why else "") + ". "
-            f"Если появится что-то ближе к параметрам — присылайте, посмотрю. "
+    return (f"Rahmat за вариант! 🙏 Клиенту, увы, не подошёл" + (f": {why}" if why else "") + ". "
+            f"Если найдётся что-то ближе к параметрам — присылайте, с радостью посмотрю. "
             f"({a})")
 
 
@@ -1041,13 +1041,13 @@ def handle_triage_cb(data, cfg, store):
         return f"В шортлисте: {n}", True
     if kind == "l":
         set_offer_status(store, oid, "later")
-        return "Отложено", True
+        return "🕐 Отложила", True
     if kind == "n":                          # сначала причина — от неё зависит подсказка маклеру
         rows = [[{"text": t, "callback_data": f"t:r:{oid}:{c}"}] for c, t, _ in DECLINE_REASONS]
         rr.tg_call(cfg, "sendMessage", {
             "chat_id": cfg["telegram_chat_id"],
-            "text": f"Почему вариант #{oid} не подошёл?"
-                    + (" Маклеру уйдёт вежливый отказ с подсказкой." if can_message_broker(o) else ""),
+            "text": f"Что не так с вариантом #{oid}?"
+                    + (" Маклеру отвечу вежливо и подскажу, что искать." if can_message_broker(o) else ""),
             "reply_markup": json.dumps({"inline_keyboard": rows}, ensure_ascii=False)})
         return "Выберите причину", True
     reason = sid.partition(":")[2] if kind == "r" else ""
@@ -1059,8 +1059,8 @@ def handle_triage_cb(data, cfg, store):
     if can_message_broker(o):
         rr.tg_call(cfg, "sendMessage",
                    {"chat_id": o["broker_chat"], "text": decline_text(cfg, reason)})
-        return "Отказ отправлен маклеру", True
-    return "Отмечено: мимо", True
+        return "Маклеру ответила вежливо 🙏", True
+    return "👎 Поняла, мимо", True
 
 
 # ============================================== ШОРТЛИСТ И ЗАПРОСЫ ======
@@ -1142,13 +1142,13 @@ def shortlist_items(store, cfg, sort="n"):
         rows.append({"oid": o["oid"], "line": f"<b>{price}</b> · {' · '.join(bits) or '—'}",
                      "stage": st, "note": price_note(o, idx)})
     title = (f"📋 <b>Шортлист</b> — {len(rows)} вариантов ({SORTS.get(sort, SORTS['n'])[0]})\n"
-             f"<i>Нажмите номер — откроется карточка: уточнить, назначить просмотр, заметка.</i>\n"
+             f"<i>Нажмите номер — открою карточку: уточнить, назначить просмотр, заметка.</i>\n"
              if rows else "")
     return title, rows, sum(1 for o in items if askable(o))
 
 
-SL_EMPTY = ("📋 <b>Шортлист пуст</b>\n\nВарианты попадают сюда по кнопке "
-            "«👍 В шортлист» под карточкой от маклера.")
+SL_EMPTY = ("📋 <b>Шортлист пока пуст</b> — но это ненадолго 😉\n\nВарианты попадают сюда по кнопке "
+            "«👍 В шортлист» под карточкой.")
 
 
 def shortlist_view(store, cfg):
@@ -1202,7 +1202,7 @@ def offer_view(store, cfg, o, idx=None):
                      {"text": "✖️ Отменить", "callback_data": f"o:vclr:{oid}"}])
     else:
         rows.append([{"text": "📅 Назначить просмотр", "callback_data": f"o:view:{oid}"}])
-    rows.append([{"text": "👍 Посмотрел, нравится", "callback_data": f"o:seen:{oid}:g"},
+    rows.append([{"text": "👍 Посмотрели, нравится", "callback_data": f"o:seen:{oid}:g"},
                  {"text": "🤔 Думаю", "callback_data": f"o:seen:{oid}:m"}])
     rows.append([{"text": "📝 Заметка", "callback_data": f"o:note:{oid}"},
                  {"text": "👎 Не то — убрать", "callback_data": f"o:seen:{oid}:n"}])
@@ -1283,8 +1283,8 @@ def _offer_tag(o):
 def remind_text(o, cfg=None):
     a = (cfg or {}).get("assistant_name", "Ra'no")
     tag = _offer_tag(o)
-    return (f"Здравствуйте! Это {a}. Напоминаю про вопрос по варианту" + (f" ({tag})" if tag else "")
-            + ". Подскажите, пожалуйста, он ещё актуален? Если уже нет — просто напишите «нет», "
+    return (f"Здравствуйте! Это снова {a} 🙂 Напоминаю про вариант" + (f" ({tag})" if tag else "")
+            + " — он ещё актуален? Если уже нет, просто напишите «нет», "
               "больше не побеспокою.")
 
 
@@ -1295,7 +1295,7 @@ def remind_broker(cfg, store, oid):
     if not o:
         return "Вариант не найден"
     if (o.get("extra") or {}).get("reminded"):
-        return "Уже напоминала — второй раз не пишу"
+        return "Уже напоминала — второй раз не буду надоедать"
     if not can_message_broker(o):
         rr.send_telegram(cfg, f"✍️ Маклер по варианту #{oid} не в боте — напомните сами, текст готов:\n\n"
                               f"<code>{rr.escape_html(remind_text(o, cfg))}</code>")
@@ -1307,7 +1307,7 @@ def remind_broker(cfg, store, oid):
     store.conn.execute("UPDATE broker_offers SET asked_at=? WHERE oid=?", (now, oid))
     store.conn.commit()
     _set_extra(store, oid, reminded=now)
-    return "🔔 Напомнила маклеру"
+    return "🔔 Тихонько напомнила маклеру"
 
 
 def handle_offer_cb(data, cfg, store, message_id=None):
@@ -1330,10 +1330,10 @@ def handle_offer_cb(data, cfg, store, message_id=None):
         toast = remind_broker(cfg, store, oid)
     elif act == "quiet":
         _set_extra(store, oid, no_remind=True)
-        toast = "Хорошо, не напоминаю"
+        toast = "Хорошо, не дёргаю 🙂"
     elif act == "vclr":
         _set_extra(store, oid, viewing=None)
-        toast = "Просмотр отменён"
+        toast = "Просмотр отменила"
     elif act == "seen" and arg in ("g", "m", "n"):
         _set_extra(store, oid, seen=arg, seen_at=datetime.now(TZ).isoformat())
         if arg == "n":
@@ -1349,8 +1349,8 @@ def handle_offer_cb(data, cfg, store, message_id=None):
                 rr.tg_call(cfg, "editMessageText", {**done, "message_id": message_id})
             else:
                 rr.tg_call(cfg, "sendMessage", done)
-            return "Убрала из шортлиста", True
-        toast = "👍 Отмечено: нравится" if arg == "g" else "🤔 Отмечено: думаете"
+            return "👎 Убрала — не наше", True
+        toast = "👍 Записала: нравится!" if arg == "g" else "🤔 Записала: думаете"
     elif act in ("view", "note"):             # ввод текста ведёт воркер; сюда — только если его нет
         rr.send_telegram(cfg, "Напишите день и время просмотра, например «завтра 18:00»."
                          if act == "view" else "Напишите заметку одним сообщением.")
@@ -1378,7 +1378,7 @@ def show_shortlist(cfg, store, message_id=None):
 def details_question(o, cfg=None, deal="rent"):
     cfg = cfg or {}
     a = cfg.get("assistant_name", "Ra'no")
-    q = [f"Здравствуйте! Это {a}, ассистент по поиску жилья.",
+    q = [f"Здравствуйте! Это {a} 👋, ИИ-ассистент по поиску жилья.",
          "По вашему объявлению о продаже" if is_site_offer(o) else "По варианту, который вы присылали"]
     tag = []
     if o["rooms"]:
@@ -1414,7 +1414,7 @@ def request_details(cfg, store, oids=None):
     if oids is None:
         oids = [o["oid"] for o in offers_by_status(store, "shortlist") if o and askable(o)]
     if not oids:
-        return "Всех уже спросили"
+        return "Всех уже спросила 🙂"
     deal = (get_anketa(store).get("ans") or {}).get("deal", "rent")
     sent = 0
     manual = []
@@ -1437,9 +1437,9 @@ def request_details(cfg, store, oids=None):
             sent += 1
     store.conn.commit()
     if sent:
-        rr.send_telegram(cfg, f"📨 Запросы отправлены маклерам по {sent} вариантам.\n"
-                              "Ответы придут сюда же — прикреплю к карточкам. "
-                              "Если кто-то промолчит сутки — предложу напомнить.")
+        rr.send_telegram(cfg, f"📨 Спросила маклеров по {sent} вариантам.\n"
+                              "Как ответят — прикреплю к карточкам. "
+                              "А если кто-то промолчит сутки — подскажу, напомнить ли.")
     for o in manual:                         # готовый текст, чтобы отправить самому
         ex = o.get("extra") or {}
         if is_site_offer(o):
@@ -1637,7 +1637,7 @@ def apply_webapp_data(cfg, store, raw):
     try:
         data = json.loads(raw)
     except (TypeError, ValueError):
-        rr.send_telegram(cfg, "Не смог прочитать данные из приложения.")
+        rr.send_telegram(cfg, "Ой, не смогла прочитать данные из приложения 🙈")
         return False
 
     ans = {k: v for k, v in (data.get("ans") or {}).items() if k in ALLOWED}

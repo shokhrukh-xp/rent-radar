@@ -465,10 +465,10 @@ def send_pick(cfg, store, limit=7, reason="Подборка дня"):
     if not q:
         return 0
     top, rest = q[:limit], q[limit:]
-    lines = [f"🔎 <b>{reason}</b> — {len(top)} из {len(q)} новых, лучшие сверху", ""]
+    lines = [f"🔎 <b>{reason}</b> — {len(top)} из {len(q)} новых, самые интересные сверху ✨", ""]
     for i, x in enumerate(top, 1):
         lines.append(f"{i}. {x['line']}")
-    lines += ["", "👍 + номер — в шортлист: дальше уточнение, просмотр, заметки."]
+    lines += ["", "Понравилось? Жмите 👍 с номером — заберу в шортлист, дальше помогу с уточнением и просмотром."]
     rows, row = [], []
     for i, x in enumerate(top, 1):
         row.append({"text": f"👍 {i}", "callback_data": f"L:s:{x['key']}"[:64]})
