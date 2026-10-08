@@ -448,7 +448,8 @@ def analyze(store, l: dict, cfg: dict) -> dict:
         return out
     cls, rsrc, claimed = repair_info(l)
     out["repair"], out["repair_src"], out["repair_claimed"] = cls, rsrc, claimed
-    out["repair_signs"] = (l.get("repair_photo") or {}).get("signs") if rsrc == "фото" else ""
+    signs = [t.strip() for t in str((l.get("repair_photo") or {}).get("signs") or "").split(",") if t.strip()]
+    out["repair_signs"] = ", ".join(t for t in signs[:3] if len(t) <= 45) if rsrc == "фото" else ""
     if area:
         out["m2"] = price / area
         comp = comparables(store, l, repair=cls) if cls else None    # сначала — с таким же ремонтом
