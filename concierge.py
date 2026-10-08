@@ -682,6 +682,7 @@ def attach_answer(cfg, store, oid, text):
                 f"{rr.escape_html((text or '').strip()[:800])}\n\n"
                 + offer_card(store, cfg, o)[:1500],
         "reply_markup": json.dumps({"inline_keyboard": [[
+            {"text": "📂 Карточка", "callback_data": f"s:o:{oid}"},
             {"text": "📋 Шортлист", "callback_data": "s:show"}]]}, ensure_ascii=False)})
 
 
@@ -711,13 +712,13 @@ def broker_welcome(cfg, store) -> str:
 def get_offer(store, oid):
     r = store.conn.execute(
         "SELECT oid, broker_chat, broker_name, text, photos, district, rooms, area, "
-        "price_usd, price_raw, floor, floors_total, created_at, status, note, extra "
-        "FROM broker_offers WHERE oid=?", (oid,)).fetchone()
+        "price_usd, price_raw, floor, floors_total, created_at, status, note, extra, "
+        "asked_at, replied_at FROM broker_offers WHERE oid=?", (oid,)).fetchone()
     if not r:
         return None
     keys = ["oid", "broker_chat", "broker_name", "text", "photos", "district", "rooms",
             "area", "price_usd", "price_raw", "floor", "floors_total",
-            "created_at", "status", "note", "extra"]
+            "created_at", "status", "note", "extra", "asked_at", "replied_at"]
     o = dict(zip(keys, r))
     o["photos"] = json.loads(o["photos"] or "[]")
     try:
@@ -1031,8 +1032,58 @@ SORTS = {"p": ("по цене", lambda o: o["price_usd"] or 9e9),
          "n": ("по свежести", lambda o: -o["oid"])}
 
 
+WD_RU = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"]
+
+
+def _when(iso):
+    try:
+        return datetime.fromisoformat(iso).astimezone(TZ)
+    except (TypeError, ValueError):
+        return None
+
+
+def when_label(v, now=None):
+    """«сегодня, 18:00» / «завтра, 11:30» / «сб, 12 октября» — для этапа просмотра."""
+    at = _when((v or {}).get("at"))
+    if not at:
+        return (v or {}).get("label") or ""
+    now = (now or datetime.now(TZ)).astimezone(TZ)
+    dd = (at.date() - now.date()).days
+    day = ("сегодня" if dd == 0 else "завтра" if dd == 1 else "вчера" if dd == -1 else
+           f"{WD_RU[at.weekday()]}, {at.day} {MON_GEN_RU[at.month - 1]}")
+    return day if v.get("notime") else f"{day}, {at:%H:%M}"
+
+
+def stage_of(o, now=None):
+    """Где вариант на пути к сделке: ждём ответа → ответил → просмотр → посмотрели."""
+    ex = o.get("extra") or {}
+    v = ex.get("viewing") or {}
+    seen = ex.get("seen")
+    if seen:
+        return {"g": "👀 посмотрели — нравится", "m": "👀 посмотрели — думаете"}.get(seen, "👀 посмотрели")
+    if v.get("at"):
+        at = _when(v["at"])
+        now = (now or datetime.now(TZ))
+        if at and at < now - timedelta(hours=1):
+            return f"📅 просмотр был {when_label(v, now)} — как прошёл?"
+        return f"📅 просмотр {when_label(v, now)}"
+    if o.get("replied_at"):
+        return "💬 маклер ответил"
+    if o.get("status") == "asked":
+        return "⏳ ждём ответа маклера"
+    return ""
+
+
+def askable(o):
+    """Ещё не спрашивали детали и не дошли до просмотра."""
+    ex = o.get("extra") or {}
+    return (o.get("status") == "shortlist" and not o.get("asked_at") and not o.get("replied_at")
+            and not ex.get("seen") and not (ex.get("viewing") or {}).get("at"))
+
+
 def shortlist_items(store, cfg, sort="n"):
-    """Пункты шортлиста: (заголовок, [{oid, line, note}]) — общие для Python и снимка воркера."""
+    """Пункты шортлиста: (заголовок, [{oid, line, note}], сколько ещё не спрашивали) —
+    общие для Python и снимка воркера."""
     items = offers_by_status(store, "shortlist") + offers_by_status(store, "asked")
     items = [o for o in items if o]
     items.sort(key=SORTS.get(sort, SORTS["n"])[1])
@@ -1049,12 +1100,13 @@ def shortlist_items(store, cfg, sort="n"):
         price = f"${o['price_usd']:.0f}" if o["price_usd"] else "цена?"
         if o["price_usd"] and o["area"]:
             price += f" ({o['price_usd'] / o['area']:.1f}/м²)"
-        status = " ⏳ запрошено" if o["status"] == "asked" else ""
-        rows.append({"oid": o["oid"], "line": f"<b>{price}</b> · {' · '.join(bits) or '—'}{status}",
-                     "note": price_note(o, idx)})
+        st = stage_of(o)
+        rows.append({"oid": o["oid"], "line": f"<b>{price}</b> · {' · '.join(bits) or '—'}",
+                     "stage": st, "note": price_note(o, idx)})
     title = (f"📋 <b>Шортлист</b> — {len(rows)} вариантов ({SORTS.get(sort, SORTS['n'])[0]})\n"
+             f"<i>Нажмите номер — откроется карточка: уточнить, назначить просмотр, заметка.</i>\n"
              if rows else "")
-    return title, rows
+    return title, rows, sum(1 for o in items if askable(o))
 
 
 SL_EMPTY = ("📋 <b>Шортлист пуст</b>\n\nВарианты попадают сюда по кнопке "
@@ -1062,33 +1114,213 @@ SL_EMPTY = ("📋 <b>Шортлист пуст</b>\n\nВарианты попа�
 
 
 def shortlist_view(store, cfg):
-    sel = set(store.get_kv("sl_sel", []) or [])
     sort = store.get_kv("sl_sort", "n")
-    title, rows = shortlist_items(store, cfg, sort)
+    title, rows, n_ask = shortlist_items(store, cfg, sort)
     if not rows:
         return SL_EMPTY, None, []
     lines = [title]
     for i, r in enumerate(rows, 1):
-        lines.append(f"{'✅' if r['oid'] in sel else f'{i}.'} {r['line']}")
+        lines.append(f"{i}. {r['line']}")
+        if r["stage"]:
+            lines.append(f"      {r['stage']}")
         if r["note"]:
             lines.append(f"      <i>{r['note']}</i>")
     kb_rows, row = [], []
     for i, r in enumerate(rows, 1):
-        row.append({"text": ("✅" if r["oid"] in sel else "") + str(i),
-                    "callback_data": f"s:t:{r['oid']}"})
+        row.append({"text": str(i), "callback_data": f"s:o:{r['oid']}"})
         if len(row) == 5:
             kb_rows.append(row); row = []
     if row:
         kb_rows.append(row)
-    if sel:
-        kb_rows.append([{"text": f"📨 Запросить детали по выбранным ({len(sel)})",
+    if n_ask:
+        kb_rows.append([{"text": f"📨 Уточнить у всех, кого ещё не спрашивали ({n_ask})",
                          "callback_data": "s:go"}])
-        kb_rows.append([{"text": "🗑 Снять выделение", "callback_data": "s:clr"}])
     kb_rows.append([{"text": f"↕️ Сортировка: {SORTS.get(sort, SORTS['n'])[0]}",
                      "callback_data": "s:sort"},
                     {"text": "🔄 Обновить", "callback_data": "s:ref"}])
     items = [get_offer(store, r["oid"]) for r in rows]
     return "\n".join(lines), {"inline_keyboard": kb_rows}, items
+
+
+def offer_view(store, cfg, o, idx=None):
+    """Карточка варианта из шортлиста: этап и действия по нему."""
+    rr = _rr()
+    ex = o.get("extra") or {}
+    v = ex.get("viewing") or {}
+    parts = [offer_card(store, cfg, o, idx=idx)[:3000], ""]
+    st = stage_of(o)
+    parts.append(f"<b>Этап:</b> {st or '👍 в шортлисте'}")
+    for n in (ex.get("notes") or [])[-5:]:
+        parts.append(f"📝 {rr.escape_html(n.get('text', ''))}")
+    oid = o["oid"]
+    rows = []
+    if not o.get("asked_at") and not o.get("replied_at"):
+        rows.append([{"text": "📨 Уточнить детали у маклера", "callback_data": f"o:ask:{oid}"}])
+    elif o.get("status") == "asked" and not o.get("replied_at") and can_message_broker(o) \
+            and not ex.get("reminded"):
+        rows.append([{"text": "🔔 Напомнить маклеру", "callback_data": f"o:rem:{oid}"}])
+    if v.get("at"):
+        rows.append([{"text": "📅 Перенести просмотр", "callback_data": f"o:view:{oid}"},
+                     {"text": "✖️ Отменить", "callback_data": f"o:vclr:{oid}"}])
+    else:
+        rows.append([{"text": "📅 Назначить просмотр", "callback_data": f"o:view:{oid}"}])
+    rows.append([{"text": "👍 Посмотрел, нравится", "callback_data": f"o:seen:{oid}:g"},
+                 {"text": "🤔 Думаю", "callback_data": f"o:seen:{oid}:m"}])
+    rows.append([{"text": "📝 Заметка", "callback_data": f"o:note:{oid}"},
+                 {"text": "👎 Не то — убрать", "callback_data": f"o:seen:{oid}:n"}])
+    rows.append([{"text": "← К шортлисту", "callback_data": "s:ref"}])
+    return "\n".join(parts), {"inline_keyboard": rows}
+
+
+def show_offer_view(cfg, store, oid, message_id=None):
+    rr = _rr()
+    o = get_offer(store, oid)
+    if not o:
+        return False
+    text, kb = offer_view(store, cfg, o)
+    payload = {"chat_id": cfg["telegram_chat_id"], "text": text, "parse_mode": "HTML",
+               "reply_markup": json.dumps(kb, ensure_ascii=False)}
+    if message_id:
+        payload["message_id"] = message_id
+        if rr.tg_call(cfg, "editMessageText", payload) is not None:
+            return True
+        payload.pop("message_id")
+    rr.tg_call(cfg, "sendMessage", payload)
+    return True
+
+
+def _set_extra(store, oid, **kw):
+    o = get_offer(store, oid)
+    if not o:
+        return None
+    ex = dict(o.get("extra") or {})
+    for k, val in kw.items():
+        if val is None:
+            ex.pop(k, None)
+        else:
+            ex[k] = val
+    store.conn.execute("UPDATE broker_offers SET extra=? WHERE oid=?",
+                       (json.dumps(ex, ensure_ascii=False), oid))
+    store.conn.commit()
+    return ex
+
+
+def set_viewing(cfg, store, oid, at, label="", notime=False, text=""):
+    """Просмотр назначен (время разобрал воркер). Флаги напоминаний — заново."""
+    when = _when(at)
+    if not when:
+        return False
+    v = {"at": when.isoformat(), "label": label, "notime": bool(notime), "text": (text or "")[:200],
+         "set_at": datetime.now(TZ).isoformat()}
+    if when - datetime.now(TZ) < timedelta(hours=2):   # уже скоро — «за 2 часа» не нужно
+        v["pre"] = True
+    _set_extra(store, oid, viewing=v)
+    o = get_offer(store, oid)
+    if o and o["status"] not in ("shortlist", "asked"):
+        set_offer_status(store, oid, "shortlist")
+    return True
+
+
+def add_note(store, oid, text):
+    o = get_offer(store, oid)
+    if not o or not (text or "").strip():
+        return False
+    notes = list((o.get("extra") or {}).get("notes") or [])
+    notes.append({"at": datetime.now(TZ).isoformat(), "text": text.strip()[:500]})
+    _set_extra(store, oid, notes=notes[-20:])
+    return True
+
+
+def _offer_tag(o):
+    tag = []
+    if o.get("rooms"):
+        tag.append(f"{o['rooms']}-комн")
+    if o.get("district"):
+        tag.append(o["district"])
+    if o.get("price_usd"):
+        tag.append(f"${o['price_usd']:.0f}")
+    return ", ".join(tag)
+
+
+def remind_text(o, cfg=None):
+    a = (cfg or {}).get("assistant_name", "Ra'no")
+    tag = _offer_tag(o)
+    return (f"Здравствуйте! Это {a}. Напоминаю про вопрос по варианту" + (f" ({tag})" if tag else "")
+            + ". Подскажите, пожалуйста, он ещё актуален? Если уже нет — просто напишите «нет», "
+              "больше не побеспокою.")
+
+
+def remind_broker(cfg, store, oid):
+    """Одно вежливое напоминание маклеру, который молчит по уточнению."""
+    rr = _rr()
+    o = get_offer(store, oid)
+    if not o:
+        return "Вариант не найден"
+    if (o.get("extra") or {}).get("reminded"):
+        return "Уже напоминала — второй раз не пишу"
+    if not can_message_broker(o):
+        rr.send_telegram(cfg, f"✍️ Маклер по варианту #{oid} не в боте — напомните сами, текст готов:\n\n"
+                              f"<code>{rr.escape_html(remind_text(o, cfg))}</code>")
+        return "Текст напоминания — в чате"
+    ok = rr.tg_call(cfg, "sendMessage", {"chat_id": o["broker_chat"], "text": remind_text(o, cfg)})
+    if ok is None:
+        return "Не получилось отправить"
+    now = datetime.now(timezone.utc).isoformat()
+    store.conn.execute("UPDATE broker_offers SET asked_at=? WHERE oid=?", (now, oid))
+    store.conn.commit()
+    _set_extra(store, oid, reminded=now)
+    return "🔔 Напомнила маклеру"
+
+
+def handle_offer_cb(data, cfg, store, message_id=None):
+    """Действия с карточкой варианта (o:…): уточнить, просмотр, посмотрел, заметка, убрать."""
+    rr = _rr()
+    parts = data.split(":")
+    act = parts[1] if len(parts) > 1 else ""
+    try:
+        oid = int(parts[2])
+    except (IndexError, ValueError):
+        return "", True
+    arg = parts[3] if len(parts) > 3 else ""
+    o = get_offer(store, oid)
+    if not o:
+        return "Вариант не найден", True
+    toast = ""
+    if act == "ask":
+        toast = request_details(cfg, store, [oid])
+    elif act == "rem":
+        toast = remind_broker(cfg, store, oid)
+    elif act == "quiet":
+        _set_extra(store, oid, no_remind=True)
+        toast = "Хорошо, не напоминаю"
+    elif act == "vclr":
+        _set_extra(store, oid, viewing=None)
+        toast = "Просмотр отменён"
+    elif act == "seen" and arg in ("g", "m", "n"):
+        _set_extra(store, oid, seen=arg, seen_at=datetime.now(TZ).isoformat())
+        if arg == "n":
+            set_offer_status(store, oid, "rejected")
+            if can_message_broker(o):
+                rr.tg_call(cfg, "sendMessage", {"chat_id": o["broker_chat"], "text": decline_text(cfg)})
+            done = {"chat_id": cfg["telegram_chat_id"], "parse_mode": "HTML",
+                    "text": f"👎 Вариант #{oid} убран из шортлиста"
+                            + (" — маклеру ушёл вежливый отказ." if can_message_broker(o) else "."),
+                    "reply_markup": json.dumps({"inline_keyboard": [[
+                        {"text": "📋 Шортлист", "callback_data": "s:show"}]]}, ensure_ascii=False)}
+            if message_id:
+                rr.tg_call(cfg, "editMessageText", {**done, "message_id": message_id})
+            else:
+                rr.tg_call(cfg, "sendMessage", done)
+            return "Убрала из шортлиста", True
+        toast = "👍 Отмечено: нравится" if arg == "g" else "🤔 Отмечено: думаете"
+    elif act in ("view", "note"):             # ввод текста ведёт воркер; сюда — только если его нет
+        rr.send_telegram(cfg, "Напишите день и время просмотра, например «завтра 18:00»."
+                         if act == "view" else "Напишите заметку одним сообщением.")
+        return "", True
+    else:
+        return "", True
+    show_offer_view(cfg, store, oid, message_id)
+    return toast, True
 
 
 def show_shortlist(cfg, store, message_id=None):
@@ -1138,20 +1370,24 @@ def details_question(o, cfg=None, deal="rent"):
     return "\n".join(q)
 
 
-def request_details(cfg, store):
+def request_details(cfg, store, oids=None):
+    """Вопросы маклерам по вариантам. Без списка — всем, кого ещё не спрашивали."""
     rr = _rr()
-    sel = store.get_kv("sl_sel", []) or []
-    if not sel:
-        return "Ничего не выбрано"
+    if oids is None:
+        oids = [o["oid"] for o in offers_by_status(store, "shortlist") if o and askable(o)]
+    if not oids:
+        return "Всех уже спросили"
     deal = (get_anketa(store).get("ans") or {}).get("deal", "rent")
     sent = 0
     manual = []
-    for oid in sel:
+    for oid in oids:
         o = get_offer(store, oid)
         if not o:
             continue
         if not can_message_broker(o):        # пересланный из WhatsApp — уточняете сами
             manual.append(o)
+            store.conn.execute("UPDATE broker_offers SET asked_at=? WHERE oid=?",
+                               (datetime.now(timezone.utc).isoformat(), oid))
             continue
         ok = rr.tg_call(cfg, "sendMessage",
                         {"chat_id": o["broker_chat"],
@@ -1162,30 +1398,30 @@ def request_details(cfg, store):
                 (datetime.now(timezone.utc).isoformat(), oid))
             sent += 1
     store.conn.commit()
-    store.set_kv("sl_sel", [])
     if sent:
         rr.send_telegram(cfg, f"📨 Запросы отправлены маклерам по {sent} вариантам.\n"
-                              "Ответы придут сюда же — прикреплю к карточкам.")
+                              "Ответы придут сюда же — прикреплю к карточкам. "
+                              "Если кто-то промолчит сутки — предложу напомнить.")
     for o in manual:                         # готовый текст, чтобы отправить самому
         rr.send_telegram(cfg, f"✍️ Вариант #{o['oid']} пришёл не через бота — уточните сами, "
                               f"текст готов:\n\n<code>{rr.escape_html(details_question(o, cfg, deal))}</code>")
-    return f"Отправлено: {sent}"
+    return f"Отправлено: {sent}" + (f", вручную: {len(manual)}" if manual else "")
 
 
 def handle_shortlist_cb(data, cfg, store, message_id=None):
     parts = data.split(":", 2)
     act = parts[1] if len(parts) > 1 else ""
-    if act == "t":
-        oid = int(parts[2])
-        sel = store.get_kv("sl_sel", []) or []
-        sel.remove(oid) if oid in sel else sel.append(oid)
-        store.set_kv("sl_sel", sel)
-        show_shortlist(cfg, store, message_id)
-        return f"Выбрано: {len(sel)}", True
+    if act in ("o", "t"):                     # номер — карточка варианта («t» — старые кнопки)
+        try:
+            oid = int(parts[2])
+        except (IndexError, ValueError):
+            return "", True
+        if not show_offer_view(cfg, store, oid, message_id):
+            return "Вариант не найден", True
+        return "", True
     if act == "clr":
-        store.set_kv("sl_sel", [])
         show_shortlist(cfg, store, message_id)
-        return "Выделение снято", True
+        return "", True
     if act == "sort":
         order = ["n", "p", "m"]
         cur = store.get_kv("sl_sort", "n")

@@ -418,29 +418,96 @@ async function instantText(env, chat, cmd) {
   return true;
 }
 
-// ── Шортлист из снимка: выделение и сортировку ведёт воркер, «Запросить детали» — Python ──
+// ── Шортлист из снимка: номер открывает карточку варианта, сортировку ведёт воркер ──
 const SL_ORDER = ["n", "p", "m"];
 function renderShortlist(ui, st) {
   const v = (ui.sl || {})[st.sort] || (ui.sl || {}).n;
   if (!v || !v.items || !v.items.length) return { text: ui.sl_empty || "📋 Шортлист пуст", kb: null };
   const lines = [v.title];
   v.items.forEach((r, i) => {
-    lines.push(`${st.sel.includes(r.oid) ? "✅" : (i + 1) + "."} ${r.line}`);
+    lines.push(`${i + 1}. ${r.line}`);
+    if (r.stage) lines.push(`      ${r.stage}`);
     if (r.note) lines.push(`      <i>${r.note}</i>`);
   });
   const rows = []; let row = [];
   v.items.forEach((r, i) => {
-    row.push({ text: (st.sel.includes(r.oid) ? "✅" : "") + (i + 1), callback_data: `s:t:${r.oid}` });
+    row.push({ text: String(i + 1), callback_data: `s:o:${r.oid}` });
     if (row.length === 5) { rows.push(row); row = []; }
   });
   if (row.length) rows.push(row);
-  if (st.sel.length) {
-    rows.push([{ text: `📨 Запросить детали по выбранным (${st.sel.length})`, callback_data: "s:go" }]);
-    rows.push([{ text: "🗑 Снять выделение", callback_data: "s:clr" }]);
-  }
+  if (v.askable) rows.push([{ text: `📨 Уточнить у всех, кого ещё не спрашивали (${v.askable})`, callback_data: "s:go" }]);
   rows.push([{ text: `↕️ Сортировка: ${v.sort_label}`, callback_data: "s:sort" }, { text: "🔄 Обновить", callback_data: "s:ref" }]);
   return { text: lines.join("\n"), kb: { inline_keyboard: rows } };
 }
+
+// ── дата просмотра из обычной фразы: «завтра 18:00», «сб 11», «12 октября в 15», «в 19» ──
+const WD = [["вс", "воскр"], ["пн", "понед"], ["вт", "вторн"], ["ср", "сред"], ["чт", "четв"], ["пт", "пятн"], ["сб", "суббот"]];
+const WD_SHORT = ["вс", "пн", "вт", "ср", "чт", "пт", "сб"];
+const MON = ["январ", "феврал", "март", "апрел", "ма[яй]", "июн", "июл", "август", "сентябр", "октябр", "ноябр", "декабр"];
+const MON_GEN = ["января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября", "ноября", "декабря"];
+const NB = "(?:^|[^а-яa-z0-9])";            // «границу слова» \b JS для кириллицы не знает
+export function parseWhen(text, nowMs = Date.now()) {
+  let t = " " + String(text || "").toLowerCase().replace(/ё/g, "е") + " ";
+  const loc = new Date(nowMs + 5 * 3600e3);                          // Ташкент, UTC+5, без перехода на летнее
+  let y = loc.getUTCFullYear(), mo = loc.getUTCMonth(), d = loc.getUTCDate();
+  let day = null, hh = null, mm = 0, wd = null;
+  let m;
+  if ((m = t.match(/(\d{1,2})\s*(январ|феврал|март|апрел|ма[яй]|июн|июл|август|сентябр|октябр|ноябр|декабр)[а-я]*/))) {
+    const mi = MON.findIndex(x => new RegExp("^" + x).test(m[2]));
+    day = { y, mo: mi, d: +m[1] }; t = t.replace(m[0], " ");
+  } else if ((m = t.match(/(\d{1,2})([.\/])(\d{1,2})(?:[.\/](\d{2,4}))?/))) {
+    // «9.10» — дата; «18.30», «завтра 10.10», «в 11.00» — время
+    const before = t.slice(0, t.indexOf(m[0]));
+    const rest = t.replace(m[0], " ");
+    const otherTime = /\d{1,2}:\d{2}/.test(rest) || new RegExp(NB + "в\\s*\\d").test(rest);
+    const relDay = /сегодня|завтра/.test(t) || WD.some(([a, b]) => new RegExp(NB + "(" + a + "(?![а-я])|" + b + ")").test(t));
+    const asTime = m[2] === "." && !m[4] && m[3].length === 2 && +m[1] < 24 && +m[3] < 60 &&
+      (+m[3] > 12 || +m[3] === 0 || /(^|[^а-я])в\s*$/.test(before) || (relDay && !otherTime));
+    if (!asTime && +m[3] >= 1 && +m[3] <= 12 && +m[1] >= 1 && +m[1] <= 31) {
+      day = { y: m[4] ? (+m[4] < 100 ? 2000 + +m[4] : +m[4]) : y, mo: +m[3] - 1, d: +m[1] }; t = rest;
+    }
+  }
+  if (!day) {
+    if (/послезавтра/.test(t)) day = { rel: 2 };
+    else if (/завтра/.test(t)) day = { rel: 1 };
+    else if (/сегодня/.test(t)) day = { rel: 0 };
+    else {
+      for (let i = 0; i < 7 && wd === null; i++)
+        if (new RegExp(NB + "(" + WD[i][0] + "(?![а-я])|" + WD[i][1] + ")").test(t)) wd = i;
+      if (wd !== null) day = { wd };
+    }
+  }
+  if ((m = t.match(/(\d{1,2})[:.](\d{2})/)) && +m[1] < 24 && +m[2] < 60) { hh = +m[1]; mm = +m[2]; }
+  else if ((m = t.match(new RegExp(NB + "в\\s*(\\d{1,2})(?![\\d.:])"))) && +m[1] < 24) hh = +m[1];
+  else if ((m = t.match(/(\d{1,2})\s*(?:ч|час)/)) && +m[1] < 24) hh = +m[1];
+  else if (day && (m = t.match(new RegExp(NB + "(\\d{1,2})(?![\\d.:/])"))) && +m[1] < 24 && +m[1] >= 7) hh = +m[1];
+  else if (/утр/.test(t)) hh = 10; else if (/вечер/.test(t)) hh = 19; else if (/дн[её]м|обед/.test(t)) hh = 14;
+  if (hh !== null && hh < 7 && !/утр|ноч/.test(t)) hh += 12;          // «в 3» — это 15:00
+  if (!day && hh === null) return null;
+  const notime = hh === null;
+  const H = notime ? 12 : hh, Mi = notime ? 0 : mm;
+  const at = (yy, mm0, dd) => Date.UTC(yy, mm0, dd, H, Mi) - 5 * 3600e3;
+  let ms;
+  if (!day) { ms = at(y, mo, d); if (ms < nowMs) ms = at(y, mo, d + 1); }
+  else if (day.rel !== undefined) ms = at(y, mo, d + day.rel);
+  else if (day.wd !== undefined) {
+    let delta = (day.wd - loc.getUTCDay() + 7) % 7;
+    ms = at(y, mo, d + delta);
+    if (ms < nowMs) ms = at(y, mo, d + delta + 7);
+  } else {
+    ms = at(day.y, day.mo, day.d);
+    if (ms < nowMs - 86400e3) ms = at(day.y + 1, day.mo, day.d);
+  }
+  const L = new Date(ms + 5 * 3600e3);
+  const p2 = n => String(n).padStart(2, "0");
+  const iso = `${L.getUTCFullYear()}-${p2(L.getUTCMonth() + 1)}-${p2(L.getUTCDate())}T${p2(L.getUTCHours())}:${p2(L.getUTCMinutes())}:00+05:00`;
+  const dd = Math.round((Date.UTC(L.getUTCFullYear(), L.getUTCMonth(), L.getUTCDate()) - Date.UTC(y, mo, d)) / 86400e3);
+  const dayLbl = dd === 0 ? "сегодня" : dd === 1 ? "завтра" : `${WD_SHORT[L.getUTCDay()]}, ${L.getUTCDate()} ${MON_GEN[L.getUTCMonth()]}`;
+  return { at: iso, ms, notime, label: notime ? `${dayLbl} (время уточнить)` : `${dayLbl}, ${p2(L.getUTCHours())}:${p2(L.getUTCMinutes())}` };
+}
+
+const OFFER_TOAST = { ask: "📨 Спрошу маклера", rem: "🔔 Напомню маклеру", quiet: "Хорошо, не напоминаю",
+  vclr: "Просмотр отменён", "seen:g": "👍 Отмечено: нравится", "seen:m": "🤔 Отмечено: думаете", "seen:n": "👎 Убираю из шортлиста" };
 
 async function pendingChanges(env) {
   const r = await (await db(env)).prepare("SELECT upd FROM queue").all();
@@ -450,10 +517,7 @@ async function pendingChanges(env) {
 export async function showShortlist(env, chat, messageId = null) {
   const ui = await kvGet(env, "ui", null);
   if (!ui || !ui.sl) return asCommand(env, chat, "/shortlist");
-  const st = await kvGet(env, "sl", null) || { sel: [], sort: "n" };
-  const live = new Set(((ui.sl[st.sort] || ui.sl.n).items || []).map(r => r.oid));
-  st.sel = st.sel.filter(o => live.has(o));
-  await kvSet(env, "sl", st);
+  const st = await kvGet(env, "sl", null) || { sort: "n" };
   const { text, kb } = renderShortlist(ui, st);
   const pend = await pendingChanges(env);
   const full = text + (pend ? `\n\n<i>⏳ Ещё ${pend} отметок сохраняю — обновится через минуту.</i>` : "");
@@ -787,29 +851,63 @@ export async function handleUpdate(env, upd) {
       await queueAndWake(env, upd);
       return "outreach";
     }
-    if (/^s:(t|clr|sort|ref|go|show)/.test(data) && (await kvGet(env, "ui", null))?.sl) {
-      const st = await kvGet(env, "sl", null) || { sel: [], sort: "n" };
+    if (/^s:(o|t):\d+$/.test(data)) {           // номер в шортлисте — карточка варианта из снимка
+      const oid = data.split(":")[2];
+      const card = ((await kvGet(env, "ui", null)) || {}).cards?.[oid];
+      if (card) {
+        await tg(env, "answerCallbackQuery", { callback_query_id: cb.id });
+        const r = await tg(env, "editMessageText", { chat_id: chat, message_id: cb.message.message_id, text: card.text,
+          parse_mode: "HTML", reply_markup: card.kb });
+        if (!r || r.ok === false) await say(env, chat, card.text, { parse_mode: "HTML", reply_markup: card.kb });
+        return "card";
+      }
+    }
+    if (/^s:(clr|sort|ref|go|show)/.test(data) && (await kvGet(env, "ui", null))?.sl) {
+      const st = await kvGet(env, "sl", null) || { sort: "n" };
       const act = data.split(":")[1];
       let toast = "";
-      if (act === "t") {
-        const oid = +data.split(":")[2];
-        st.sel = st.sel.includes(oid) ? st.sel.filter(x => x !== oid) : [...st.sel, oid];
-        toast = `Выбрано: ${st.sel.length}`;
-      } else if (act === "clr") { st.sel = []; toast = "Выделение снято"; }
-      else if (act === "sort") { st.sort = SL_ORDER[(SL_ORDER.indexOf(st.sort) + 1) % 3]; toast = "Сортировка изменена"; }
+      if (act === "sort") { st.sort = SL_ORDER[(SL_ORDER.indexOf(st.sort) + 1) % 3]; toast = "Сортировка изменена"; }
       else if (act === "go") {
-        if (!st.sel.length) { toast = "Ничего не выбрано"; }
+        const ui = await kvGet(env, "ui", null);
+        const n = (ui.sl[st.sort] || ui.sl.n).askable || 0;
+        if (!n) toast = "Всех уже спросили";
         else {
-          upd.callback_query = { ...cb, _sel: st.sel };
+          upd.callback_query = { ...cb, _toast_done: true };
           await queueAndWake(env, upd);
-          toast = `📨 Запрошу детали по ${st.sel.length} — ответы придут сюда`;
-          st.sel = [];
+          toast = `📨 Спрошу ${n} маклеров — ответы придут сюда`;
         }
       } else toast = act === "show" ? "" : "Обновлено";
-      await kvSet(env, "sl", st);
+      await kvSet(env, "sl", { sort: st.sort || "n" });
       await tg(env, "answerCallbackQuery", { callback_query_id: cb.id, text: toast });
-      await showShortlist(env, chat, act === "show" ? null : cb.message.message_id);
+      if (act !== "go") await showShortlist(env, chat, act === "show" ? null : cb.message.message_id);
       return "shortlist";
+    }
+    if (/^o:(view|note):\d+$/.test(data)) {      // дальше — ввод текста: время просмотра или заметка
+      const [, kind, oid] = data.split(":");
+      const iv = (await kvGet(env, ivKey(chat), null)) || emptyIv();
+      iv.mode = kind === "view" ? "await_view" : "await_note"; iv.oid = +oid; iv.modeAt = Date.now();
+      await kvSet(env, ivKey(chat), iv);
+      await tg(env, "answerCallbackQuery", { callback_query_id: cb.id });
+      await say(env, chat, kind === "view"
+        ? `📅 Когда просмотр варианта #${oid}? Напишите день и время — например «завтра 18:00», «сб 11:30» или «12 октября в 15».`
+        : `📝 Напишите заметку к варианту #${oid}: что понравилось, что смутило, о чём договорились.`,
+        { reply_markup: { inline_keyboard: [[{ text: "Отмена", callback_data: "o:cancel:0" }]] } });
+      return "await";
+    }
+    if (data === "o:cancel:0") {
+      const iv = (await kvGet(env, ivKey(chat), null)) || emptyIv();
+      iv.mode = ""; await kvSet(env, ivKey(chat), iv);
+      await tg(env, "answerCallbackQuery", { callback_query_id: cb.id, text: "Отменено" });
+      await tg(env, "editMessageReplyMarkup", { chat_id: chat, message_id: cb.message.message_id, reply_markup: { inline_keyboard: [] } });
+      return "cancel";
+    }
+    if (/^o:(ask|rem|quiet|vclr|seen):\d+/.test(data)) {
+      const p = data.split(":");
+      await tg(env, "answerCallbackQuery", { callback_query_id: cb.id,
+        text: OFFER_TOAST[p[1] === "seen" ? `seen:${p[3]}` : p[1]] || "Принято" });
+      upd.callback_query = { ...cb, _toast_done: true };
+      await queueAndWake(env, upd);
+      return "offer";
     }
     if (/^t:n:\d+$/.test(data)) {               // «Мимо» — сразу спросить причину
       const oid = data.split(":")[2];
@@ -874,6 +972,10 @@ export async function handleUpdate(env, upd) {
   const lang = (msg.from?.language_code || "").slice(0, 2);
   const L = lang === "uz" ? "uz" : "ru";     // язык интерфейса Telegram часто английский — это не язык клиента
 
+  if (Object.values(BTN).includes(text) || text.startsWith("/")) {   // нажали другое — ввод даты/заметки бросили
+    const ivA = await kvGet(env, ivKey(chat), null);
+    if (ivA && /^await_(view|note)$/.test(ivA.mode)) { ivA.mode = ""; await kvSet(env, ivKey(chat), ivA); }
+  }
   // кнопки внизу — обычный текст с подписью кнопки
   if (text === BTN.search) return (await showMySearch(env, chat, L), "my_search");
   if (text === BTN.offers || /^\/(offers|varianty)(@\w+)?$/i.test(text)) return (await showOffers(env, chat), "ui");
@@ -919,6 +1021,42 @@ export async function handleUpdate(env, upd) {
     return "queued";
   }
   const iv = await kvGet(env, ivKey(chat), null);
+  if (iv && /^await_(view|note)$/.test(iv.mode) && Date.now() - (iv.modeAt || 0) < 15 * 60e3) {
+    const oid = iv.oid;
+    if (/^(отмена|стоп|не надо)$/i.test(text)) {
+      iv.mode = ""; await kvSet(env, ivKey(chat), iv);
+      await say(env, chat, "Хорошо, отменила.");
+      return "cancel";
+    }
+    if (iv.mode === "await_note") {
+      iv.mode = ""; await kvSet(env, ivKey(chat), iv);
+      upd.message = { ...msg, _note: { oid } };
+      await queueAndWake(env, upd);
+      await say(env, chat, `📝 Заметку к варианту #${oid} сохранила.`,
+        { reply_markup: { inline_keyboard: [[{ text: "📂 Карточка", callback_data: `s:o:${oid}` }, { text: "📋 Шортлист", callback_data: "s:show" }]] } });
+      return "note";
+    }
+    const w = parseWhen(text);
+    if (!w && !/\d/.test(text) && text.split(/\s+/).length > 3) {   // это уже не про дату — обычный разговор
+      iv.mode = ""; await kvSet(env, ivKey(chat), iv);
+      await interviewTurn(env, chat, text);
+      return "interview";
+    }
+    if (!w) {
+      iv.modeAt = Date.now(); await kvSet(env, ivKey(chat), iv);
+      await say(env, chat, "Не поняла дату 🙈 Напишите, например: «завтра 18:00», «сб 11:30» или «12 октября в 15».",
+        { reply_markup: { inline_keyboard: [[{ text: "Отмена", callback_data: "o:cancel:0" }]] } });
+      return "await";
+    }
+    iv.mode = ""; await kvSet(env, ivKey(chat), iv);
+    upd.message = { ...msg, _view: { oid, at: w.at, label: w.label, notime: w.notime } };
+    await queueAndWake(env, upd);
+    await say(env, chat, `📅 Записала просмотр варианта #${oid}: <b>${w.label}</b>.\n`
+      + (w.notime ? "Утром в этот день напомню." : "Утром в этот день напомню, и ещё раз — за 2 часа.")
+      + "\nПосле просмотра спрошу, как прошло.",
+      { parse_mode: "HTML", reply_markup: { inline_keyboard: [[{ text: "📂 Карточка", callback_data: `s:o:${oid}` }, { text: "📋 Шортлист", callback_data: "s:show" }]] } });
+    return "viewing";
+  }
   if (iv && iv.mode === "await_text") {          // «✏️ Изменить текст» — это для Python
     iv.mode = ""; await kvSet(env, ivKey(chat), iv);
     await queueAndWake(env, upd, chat, WAIT[L]);
@@ -932,6 +1070,10 @@ export async function handleUpdate(env, upd) {
 const json = (o, s = 200) => new Response(JSON.stringify(o), { status: s, headers: { "content-type": "application/json" } });
 
 export default {
+  // 08:30 и 20:00 по Ташкенту — разбудить Python к утренней сводке просмотров и вечерним итогам
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(wake(env).catch(e => console.log("cron wake error", e.stack || e)));
+  },
   async fetch(req, env, ctx) {
     const url = new URL(req.url);
     const p = url.pathname;

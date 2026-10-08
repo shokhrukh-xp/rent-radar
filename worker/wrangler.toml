@@ -18,3 +18,7 @@ database_id = "e31433a9-bb25-4225-ad09-ea6d7caef25c"
 # логи воркера в дашборде Cloudflare (Workers → rano-bot → Logs) — для разбора «ничего не пришло»
 [observability]
 enabled = true
+
+# будильник Python: 08:30 и 20:00 по Ташкенту (UTC+5) — утренние просмотры и вечерняя сводка
+[triggers]
+crons = ["30 3 * * *", "0 15 * * *"]

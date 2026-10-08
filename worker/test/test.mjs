@@ -2,7 +2,7 @@
 // D1 эмулируется на node:sqlite, Telegram / Gemini / GitHub — подменой fetch.
 import { DatabaseSync } from "node:sqlite";
 import assert from "node:assert/strict";
-import worker, { parseNum, applyPatch, essentialsOk, finalAns, handleUpdate, summary, pairsToSet, OWNER_KB, BROKER_KB, BTN } from "../src/index.js";
+import worker, { parseNum, applyPatch, essentialsOk, finalAns, handleUpdate, summary, pairsToSet, OWNER_KB, BROKER_KB, BTN, parseWhen } from "../src/index.js";
 
 function d1() {
   const s = new DatabaseSync(":memory:");
@@ -298,13 +298,15 @@ assert.equal((await drain()).at(-1).message.text, "/brokers");
 { const row = await env.DB.prepare("SELECT v FROM kv WHERE k=?").bind("iv:" + OWNER).first();
   const ivx = JSON.parse(row.v); ivx.sentAt = Date.now() - 60e3;
   await env.DB.prepare("UPDATE kv SET v=? WHERE k=?").bind(JSON.stringify(ivx), "iv:" + OWNER).run(); }
-const SLV = items => ({ title: "📋 <b>Шортлист</b> — 2 вариантов\n", items, sort_label: "по свежести" });
+const SLV = items => ({ title: "📋 <b>Шортлист</b> — 2 вариантов\n", items, sort_label: "по свежести", askable: items.length });
 await post("/svc/snapshot", { offers: [], offers_total: 0, shortlist: 2, written: 3, free: 2, deal: "sale",
   brokers: [], brokers_total: 0, header: "", brokers_empty: "нет",
   sl: { n: SLV([{ oid: 21, line: "<b>$44000</b> · 2к", note: "" }, { oid: 22, line: "<b>$41000</b> · 2к", note: "дешевле" }]),
         p: { ...SLV([{ oid: 22, line: "<b>$41000</b> · 2к", note: "" }, { oid: 21, line: "<b>$44000</b> · 2к", note: "" }]), sort_label: "по цене" },
         m: SLV([]) },
-  sl_empty: "📋 Шортлист пуст", texts: { "/rynok": "📊 <b>Рынок</b> Мирабад $1450/м²", "/sale": "🏷 <b>Поиск</b>",
+  sl_empty: "📋 Шортлист пуст",
+  cards: { "22": { text: "🏠 <b>Вариант #22</b>\n<b>Этап:</b> 👍 в шортлисте", kb: { inline_keyboard: [[{ text: "📅 Назначить просмотр", callback_data: "o:view:22" }]] } } },
+  texts: { "/rynok": "📊 <b>Рынок</b> Мирабад $1450/м²", "/sale": "🏷 <b>Поиск</b>",
   "/request": "📝 <b>Текущий запрос</b>", "/help": "🏠 Ra'no — кнопки" } });
 await drain();
 sent.length = 0;
@@ -317,19 +319,38 @@ assert.equal((await drain()).length, 0);                                     // 
 sent.length = 0;
 await handleUpdate(env, { update_id: ++uid, callback_query: { id: "m2", data: "cmd:/shortlist", message: { message_id: 31, chat: { id: +OWNER } } } });
 assert.match(texts().at(-1), /1\. <b>\$44000<\/b>[\s\S]*2\. <b>\$41000<\/b>[\s\S]*дешевле/);
-// выделение и сортировка — правкой того же сообщения
-await handleUpdate(env, { update_id: ++uid, callback_query: { id: "m3", data: "s:t:22", message: { message_id: 40, chat: { id: +OWNER } } } });
+assert.ok(JSON.stringify(sent.at(-1).reply_markup).includes("s:o:22") && JSON.stringify(sent.at(-1).reply_markup).includes("(2)"));
+// номер → карточка варианта правкой того же сообщения, без Python
+await handleUpdate(env, { update_id: ++uid, callback_query: { id: "m3", data: "s:o:22", message: { message_id: 40, chat: { id: +OWNER } } } });
 let ed = sent.filter(x => x.m === "editMessageText").at(-1);
-assert.equal(ed.message_id, 40); assert.match(ed.text, /✅ <b>\$41000/);
-assert.ok(JSON.stringify(ed.reply_markup).includes("s:go"));
+assert.equal(ed.message_id, 40); assert.match(ed.text, /Вариант #22[\s\S]*Этап/);
+assert.equal((await drain()).length, 0);
 await handleUpdate(env, { update_id: ++uid, callback_query: { id: "m4", data: "s:sort", message: { message_id: 40, chat: { id: +OWNER } } } });
 ed = sent.filter(x => x.m === "editMessageText").at(-1);
-assert.match(ed.text, /^📋[\s\S]*✅ <b>\$41000[\s\S]*2\. <b>\$44000/);           // по цене, выделение сохранилось
+assert.match(ed.text, /^📋[\s\S]*1\. <b>\$41000[\s\S]*2\. <b>\$44000/);           // по цене
 await handleUpdate(env, { update_id: ++uid, callback_query: { id: "m5", data: "s:go", message: { message_id: 40, chat: { id: +OWNER } } } });
 got = await drain();
-assert.equal(got.at(-1).callback_query.data, "s:go"); assert.deepEqual(got.at(-1).callback_query._sel, [22]);
-ed = sent.filter(x => x.m === "editMessageText").at(-1);
-assert.doesNotMatch(ed.text, /✅/);                                           // после запроса выделение снято
+assert.equal(got.at(-1).callback_query.data, "s:go"); assert.equal(got.at(-1).callback_query._toast_done, true);
+assert.match(sent.filter(x => x.m === "answerCallbackQuery").at(-1).text, /Спрошу 2/);
+// просмотр: кнопка → фраза → время разобрано сразу, Python получает готовое
+await handleUpdate(env, { update_id: ++uid, callback_query: { id: "m7", data: "o:view:22", message: { message_id: 41, chat: { id: +OWNER } } } });
+assert.match(texts().at(-1), /Когда просмотр варианта #22/);
+await handleUpdate(env, msg("непонятно когда"));
+assert.match(texts().at(-1), /Не поняла дату/);
+await handleUpdate(env, msg("завтра в 18:30"));
+assert.match(texts().at(-1), /Записала просмотр варианта #22: <b>завтра, 18:30<\/b>/);
+got = await drain();
+assert.equal(got.at(-1).message._view.oid, 22); assert.match(got.at(-1).message._view.at, /T18:30:00\+05:00$/);
+// заметка
+await handleUpdate(env, { update_id: ++uid, callback_query: { id: "m8", data: "o:note:22", message: { message_id: 41, chat: { id: +OWNER } } } });
+await handleUpdate(env, msg("Двор хороший, торг 2000"));
+assert.match(texts().at(-1), /Заметку к варианту #22 сохранила/);
+got = await drain();
+assert.deepEqual(got.at(-1).message._note, { oid: 22 });
+// «посмотрел» — подсказка сразу, сохранит Python
+await handleUpdate(env, { update_id: ++uid, callback_query: { id: "m9", data: "o:seen:22:g", message: { message_id: 41, chat: { id: +OWNER } } } });
+assert.match(sent.filter(x => x.m === "answerCallbackQuery").at(-1).text, /нравится/);
+assert.equal((await drain()).at(-1).callback_query._toast_done, true);
 // «Шортлист» из другого сообщения — новым сообщением, не правкой чужого
 const nEdits = sent.filter(x => x.m === "editMessageText").length;
 await handleUpdate(env, { update_id: ++uid, callback_query: { id: "m6", data: "s:show", message: { message_id: 50, chat: { id: +OWNER } } } });
@@ -359,5 +380,18 @@ assert.equal(pr.ok, false);
 // ── /svc без ключа — 401
 r = await worker.fetch(new Request("https://w.example/svc/updates"), env, { waitUntil() {} });
 assert.equal(r.status, 401);
+
+{ const now = Date.UTC(2026, 9, 8, 10, 0) - 5 * 3600e3;             // чт 8 октября, 10:00 Ташкент
+  const W = t => parseWhen(t, now);
+  assert.equal(W("завтра 18:00").at, "2026-10-09T18:00:00+05:00");
+  assert.equal(W("сб 11:30").at, "2026-10-10T11:30:00+05:00");
+  assert.equal(W("12 октября в 15").at, "2026-10-12T15:00:00+05:00");
+  assert.equal(W("18.30").at, "2026-10-08T18:30:00+05:00");
+  assert.equal(W("10.10 в 15").at, "2026-10-10T15:00:00+05:00");
+  assert.equal(W("сегодня в 3").at, "2026-10-08T15:00:00+05:00");
+  assert.equal(W("8:00").at, "2026-10-09T08:00:00+05:00");               // прошло — значит завтра
+  assert.equal(W("чт 9").at, "2026-10-15T09:00:00+05:00");               // этот чт уже прошёл
+  assert.equal(W("пн").notime, true);
+  assert.equal(W("привет"), null); }
 
 console.log("OK — воркер: интервью, нормализация, очередь, будильник, кнопки, дубли, ошибки");

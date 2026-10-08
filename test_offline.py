@@ -1,6 +1,6 @@
 """Оффлайн-верификация Амины (без сети): python3 test_offline.py"""
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import time
 from pathlib import Path
 
@@ -872,29 +872,47 @@ with mock.patch.object(rr, "tg_call", fake_tg):
     dec = [pl for m, pl in SENT if m == "sendMessage" and "не подошёл" in pl.get("text", "")]
     assert dec and "дешевле" in dec[0]["text"], "маклеру — отказ с подсказкой"
 
-# --- шортлист: сводка, выбор, запрос деталей ---
+# --- шортлист: сводка, карточка варианта, запрос деталей ---
 cg.set_offer_status(cs, 4, "shortlist")
 text, kb, items = cg.shortlist_view(cs, cfg)
 assert "Шортлист" in text and len(items) == 2
-nums = [b for row in kb["inline_keyboard"] for b in row if b["callback_data"].startswith("s:t:")]
+nums = [b for row in kb["inline_keyboard"] for b in row if b["callback_data"].startswith("s:o:")]
 assert len(nums) == 2
-assert not any(b["callback_data"] == "s:go" for row in kb["inline_keyboard"] for b in row)
+assert any(b["callback_data"] == "s:go" and "(2)" in b["text"] for row in kb["inline_keyboard"] for b in row)
 
 with mock.patch.object(rr, "tg_call", fake_tg):
-    cg.handle_shortlist_cb(f"s:t:{oid1}", cfg, cs, 1)
-    assert cs.get_kv("sl_sel") == [oid1]
-    _, kb2, _ = cg.shortlist_view(cs, cfg)
-    assert any(b["callback_data"] == "s:go" for row in kb2["inline_keyboard"] for b in row)
-    cg.handle_shortlist_cb(f"s:t:{oid1}", cfg, cs, 1)          # снять
-    assert cs.get_kv("sl_sel") == []
-    cg.handle_shortlist_cb(f"s:t:{oid1}", cfg, cs, 1)
     SENT.clear()
-    toast, _ = cg.handle_shortlist_cb("s:go", cfg, cs, 1)
+    cg.handle_shortlist_cb(f"s:o:{oid1}", cfg, cs, 1)          # номер → карточка
+    card = [pl for m, pl in SENT if m == "editMessageText"][-1]
+    ckb = json.loads(card["reply_markup"])["inline_keyboard"]
+    datas = [b["callback_data"] for row in ckb for b in row]
+    assert f"o:ask:{oid1}" in datas and f"o:view:{oid1}" in datas and f"o:seen:{oid1}:g" in datas
+    assert "Этап" in card["text"]
+    SENT.clear()
+    toast, _ = cg.handle_offer_cb(f"o:ask:{oid1}", cfg, cs, 1)
     assert "Отправлено: 1" in toast
     asked = [pl for m, pl in SENT if m == "sendMessage" and str(pl.get("chat_id")) == "555"]
     assert asked and "актуален" in asked[0]["text"] and "комисси" in asked[0]["text"]
-    assert cg.get_offer(cs, oid1)["status"] == "asked"
-    assert cs.get_kv("sl_sel") == []                            # выбор сброшен
+    o1 = cg.get_offer(cs, oid1)
+    assert o1["status"] == "asked" and "ждём ответа" in cg.stage_of(o1)
+    _, kb3, _ = cg.shortlist_view(cs, cfg)                      # спросили одного — осталось 1
+    assert any(b["callback_data"] == "s:go" and "(1)" in b["text"] for row in kb3["inline_keyboard"] for b in row)
+
+    # просмотр, заметка, посмотрел
+    at = (datetime.now(cg.TZ) + timedelta(days=1)).replace(hour=18, minute=0, second=0, microsecond=0)
+    assert cg.set_viewing(cfg, cs, oid1, at.isoformat(), "завтра 18:00")
+    assert cg.stage_of(cg.get_offer(cs, oid1)).startswith("📅 просмотр завтра, 18:00")
+    assert cg.add_note(cs, oid1, "Хороший двор, торг 2000")
+    t2, _ = cg.offer_view(cs, cfg, cg.get_offer(cs, oid1))
+    assert "торг 2000" in t2 and "просмотр" in t2
+    SENT.clear()
+    cg.handle_offer_cb(f"o:seen:{oid1}:g", cfg, cs, 1)
+    assert "нравится" in cg.stage_of(cg.get_offer(cs, oid1))
+    # напоминание маклеру — одно
+    SENT.clear()
+    assert "Напомнила" in cg.remind_broker(cfg, cs, oid1)
+    assert any("Напоминаю" in pl.get("text", "") for m, pl in SENT if str(pl.get("chat_id")) == "555")
+    assert "второй раз" in cg.remind_broker(cfg, cs, oid1)
 
     cg.handle_shortlist_cb("s:sort", cfg, cs, 1)
     assert cs.get_kv("sl_sort") in ("p", "m", "n")
@@ -944,9 +962,9 @@ with mock.patch.object(rr, "tg_call", fake_tg):
     assert any("Вариант" in (pl.get("text", "") + pl.get("caption", "") + pl.get("media", "")) for _, pl in SENT)
     assert ("analysis", {}) in SENT                                  # покупка → анализ цены
     # уточнения → ответ прикрепляется к варианту
-    cg.set_offer_status(cs, oid8, "shortlist"); cs.set_kv("sl_sel", [oid8])
+    cg.set_offer_status(cs, oid8, "shortlist")
     SENT.clear()
-    cg.request_details(cfg, cs)
+    cg.request_details(cfg, cs, [oid8])
     q = [pl for m, pl in SENT if str(pl.get("chat_id")) == "888"][0]["text"]
     assert "ипотека" in q and "в месяц" not in q                     # вопросы про покупку
     SENT.clear()
@@ -1796,3 +1814,66 @@ with mock.patch.object(rr, "worker_post", lambda *a, **k: None), \
     assert cg.get_offer(ast, o3)["price_usd"] == 60000 and cg.get_offer(ast, o3)["status"] == "new"
 adb.unlink(missing_ok=True)
 print("OK — разбор вариантов моделью: поля, адрес/ремонт/комиссия в карточке, реплики, запасной regex")
+
+# ============ доведение до сделки: молчащий маклер, просмотры, вечерняя сводка ============
+import followup as fu
+fdb = Path("/tmp/test_fu.db"); fdb.unlink(missing_ok=True)
+fs = rr.Store(fdb)
+FU = []
+ftg = lambda c, m, pl, **k: (FU.append((m, pl)), {"ok": True})[1]
+T = lambda h, m=0, d=0: (datetime(2026, 10, 8, h, m, tzinfo=cg.TZ) + timedelta(days=d))
+with mock.patch.object(rr, "tg_call", ftg):
+    a1, _ = cg.save_offer(fs, cfg, 4242, "Аброр", "2 комн Мирабад 50 м2 48 000$", [])
+    a2, _ = cg.save_offer(fs, cfg, 4343, "Дильноза", "2 комн Яккасарай 55 м2 47 000$", [])
+    for oid in (a1, a2):
+        cg.set_offer_status(fs, oid, "shortlist")
+    cg.request_details(cfg, fs)                                    # обоим ушли вопросы
+    old = (T(10) - timedelta(hours=25)).astimezone(timezone.utc).isoformat()
+    fs.conn.execute("UPDATE broker_offers SET asked_at=?", (old,)); fs.conn.commit()
+    fs.conn.execute("UPDATE broker_offers SET replied_at=? WHERE oid=?", (T(9).isoformat(), a2)); fs.conn.commit()
+    # молчит сутки → вопрос владельцу, один раз; ночью — нет
+    FU.clear()
+    assert fu.silent_brokers(cfg, fs, T(3)) == 0
+    assert fu.silent_brokers(cfg, fs, T(10)) == 1
+    msg = FU[-1][1]
+    assert "Аброр" in msg["text"] and f"o:rem:{a1}" in msg["reply_markup"]
+    assert fu.silent_brokers(cfg, fs, T(11)) == 0                 # не повторяем
+    FU.clear()
+    cg.handle_offer_cb(f"o:rem:{a1}", cfg, fs, 5)
+    assert any("Напоминаю" in pl.get("text", "") and str(pl["chat_id"]) == "4242" for m, pl in FU)
+    # просмотр завтра 18:00: утро — сводка, за 2 часа — напоминание, после — «как прошёл?»
+    cg.set_viewing(cfg, fs, a2, T(18, d=1).isoformat(), "завтра 18:00")
+    cg.enrich_offer(cfg, fs, a2, {"address": "ул. Шота Руставели 12"})
+    FU.clear()
+    assert fu.morning_note(cfg, fs, T(9, d=1))
+    assert "Сегодня просмотры" in FU[-1][1]["text"] and "18:00" in FU[-1][1]["text"] and "Руставели" in FU[-1][1]["text"]
+    assert not fu.morning_note(cfg, fs, T(10, d=1))               # раз в день
+    assert fu.viewing_reminders(cfg, fs, T(15, d=1)) == 0         # рано
+    assert fu.viewing_reminders(cfg, fs, T(16, 30, d=1)) == 1 and "Через 1 ч 30 мин" in FU[-1][1]["text"]
+    assert fu.viewing_reminders(cfg, fs, T(17, d=1)) == 0
+    assert fu.viewing_reminders(cfg, fs, T(19, 30, d=1)) == 1 and "Как прошёл просмотр" in FU[-1][1]["text"]
+    assert fu.viewing_reminders(cfg, fs, T(20, d=1)) == 0
+    # вечерняя сводка: только в 20:00–23:30, раз в день, с подсказкой следующего шага
+    cg.set_viewing(cfg, fs, a1, T(11, d=1).isoformat(), "завтра 11:00")
+    b0 = fs.brokers(status="new")
+    fs.conn.execute("INSERT INTO brokers(bid, source, name, phone, status, last_contact) VALUES('x','t','Н','1','contacted',?)",
+                    (T(12).astimezone(timezone.utc).isoformat(),))
+    fs.conn.commit()
+    cg.save_offer(fs, cfg, 4444, "Тимур", "3 комн Юнусабад 70 м2 52 000$", [])
+    FU.clear()
+    assert not fu.evening_digest(cfg, fs, None, T(19))
+    with mock.patch.object(fu, "_day_start_utc", lambda now: "2000-01-01"):
+        assert fu.evening_digest(cfg, fs, None, T(20, 5))
+    dg = FU[-1][1]["text"]
+    assert "Итоги дня" in dg and "написали: 1 сегодня" in dg and "Ждут вашего решения: 1" in dg
+    assert "Завтра просмотры" in dg and "11:00" in dg and "Разберите" in dg
+    assert "cmd:/offers" in FU[-1][1]["reply_markup"]
+    assert not fu.evening_digest(cfg, fs, None, T(21))             # уже было сегодня
+    # пустой день — без сводки
+    es = rr.Store(Path("/tmp/test_fu2.db")); 
+    assert fu.digest_text(fu.digest_data(es, None, T(20)), T(20))[0] is None
+    Path("/tmp/test_fu2.db").unlink(missing_ok=True)
+    # run(): троттлинг
+    assert fu.run(cfg, fs, now=T(10), force=True) is not None and fu.run(cfg, fs) == {}
+fdb.unlink(missing_ok=True)
+print("OK — доведение до сделки: напоминание маклеру, этапы просмотра, утренняя и вечерняя сводка")

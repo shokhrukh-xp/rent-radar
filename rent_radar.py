@@ -29,6 +29,7 @@ import requests
 
 import analyst
 import concierge
+import followup
 import market
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -1167,6 +1168,8 @@ HELP_TEXT = """🏠 <b>Ra'no</b> — ассистент по поиску жил
 
 Можно и словами: «что прислали?», «давай заново», «мне скинули квартиру — добавь».
 Варианты из WhatsApp — просто перешлите сюда, фото и текст я соберу в карточку.
+В шортлисте нажмите номер варианта — откроется карточка: уточнить у маклера, назначить просмотр, заметка, «посмотрел».
+Сама напомню: если маклер молчит сутки, утром в день просмотра и за 2 часа; в 20:00 — итоги дня.
 
 Для тонкой настройки радара остались команды: /menu, /status, /owner, /segment, /work, /photos, /pause, /resume"""
 
@@ -1994,9 +1997,15 @@ def ui_snapshot(cfg, store, settings) -> dict:
     # шортлист — во всех трёх сортировках; выделение и сортировку ведёт воркер
     sl = {}
     for srt in ("n", "p", "m"):
-        title, rows = concierge.shortlist_items(store, cfg, srt)
-        sl[srt] = {"title": title, "items": rows,
+        title, rows, n_ask = concierge.shortlist_items(store, cfg, srt)
+        sl[srt] = {"title": title, "items": rows, "askable": n_ask,
                    "sort_label": concierge.SORTS[srt][0]}
+    cards = {}                                           # карточки вариантов шортлиста — по номеру сразу
+    for r in sl["n"]["items"][:30]:
+        o = concierge.get_offer(store, r["oid"])
+        if o:
+            ctext, ckb = concierge.offer_view(store, cfg, o, idx=idx)
+            cards[str(r["oid"])] = {"text": ctext, "kb": ckb}
     eff = effective_sale_cfg(cfg, store)
     texts = {"/help": HELP_TEXT, "/sale": sale_status_text(eff)}
     rq = store.get_kv("request_text")
@@ -2012,7 +2021,7 @@ def ui_snapshot(cfg, store, settings) -> dict:
     if mk.get("text"):
         texts["/rynok"] = mk["text"]
     return {"offers": offers, "offers_total": len(pool), "shortlist": shortlist, "written": written,
-            "sl": sl, "sl_empty": concierge.SL_EMPTY, "texts": texts,
+            "sl": sl, "sl_empty": concierge.SL_EMPTY, "cards": cards, "texts": texts,
             "free": cfg.get("free_offers", 2), "deal": deal,
             "brokers": brokers, "brokers_total": len(ranked),
             "header": outreach_header(store, deal, text, len(ranked)) if ranked else "",
@@ -2105,6 +2114,9 @@ def handle_callback(data: str, settings: dict, store, cfg: dict, message_id=None
         return toast, None
     if d.startswith("t:"):
         toast, _ = concierge.handle_triage_cb(d, cfg, store)
+        return toast, None
+    if d.startswith("o:"):
+        toast, _ = concierge.handle_offer_cb(d, cfg, store, message_id)
         return toast, None
     if d.startswith("s:"):
         toast, done = concierge.handle_shortlist_cb(d, cfg, store, message_id)
@@ -2437,6 +2449,7 @@ def process_commands(cfg: dict, store, long_poll: int = 0) -> dict:
     if not resp:
         return settings
     changed = False
+    snap = False                                  # шортлист/карточки поменялись — воркеру сразу
     for upd in resp.get("result", []):
         offset = max(offset, upd.get("update_id", 0))
 
@@ -2445,14 +2458,13 @@ def process_commands(cfg: dict, store, long_poll: int = 0) -> dict:
             msg = cb.get("message") or {}
             if str((msg.get("chat") or {}).get("id") or "") != str(cfg["telegram_chat_id"]):
                 continue
-            if cb.get("_sel") is not None:      # шортлист вёл воркер — его выделение
-                store.set_kv("sl_sel", [int(x) for x in cb["_sel"]])
             if cb.get("_worker_done"):          # воркер уже ответил и показал следующее — сохраняем
                 apply_worker_done(cb.get("data") or "", cfg, store)
                 changed = True
                 continue
             toast, view = handle_callback(cb.get("data") or "", settings, store, cfg,
                                           msg.get("message_id"))
+            snap = snap or (cb.get("data") or "")[:2] in ("o:", "s:", "t:")
             # подсказка-«всплывашка»; для старых нажатий Telegram её отклоняет — это нормально
             tg_call(cfg, "answerCallbackQuery",
                     {"callback_query_id": cb.get("id"), "text": toast}, quiet=True)
@@ -2471,6 +2483,16 @@ def process_commands(cfg: dict, store, long_poll: int = 0) -> dict:
         if msg.get("_owner_offer"):          # воркер: владелец переслал/вставил вариант
             handle_owner_offer(cfg, store, msg)
             changed = True
+            continue
+        if msg.get("_view"):                 # воркер разобрал время просмотра и уже ответил
+            v = msg["_view"]
+            concierge.set_viewing(cfg, store, int(v.get("oid") or 0), v.get("at"), v.get("label", ""),
+                                  v.get("notime"), msg.get("text") or "")
+            changed = snap = True
+            continue
+        if msg.get("_note"):                 # заметка к варианту — воркер уже подтвердил
+            concierge.add_note(store, int(msg["_note"].get("oid") or 0), msg.get("text") or "")
+            changed = snap = True
             continue
 
         wad = msg.get("web_app_data") or {}
@@ -2505,6 +2527,8 @@ def process_commands(cfg: dict, store, long_poll: int = 0) -> dict:
     store.set_kv(offset_key, offset)
     if changed:
         store.set_kv("settings", settings)
+    if snap:
+        push_snapshot(cfg, store, settings, force=True)
     return settings
 
 
@@ -3028,6 +3052,8 @@ def run():
         settings = process_commands(cfg, store, long_poll=0 if once else 20)
         flush_pending_offer(cfg, store, sale_store)
         push_snapshot(cfg, store, settings)
+        if not once:
+            followup.run(cfg, store, sale_store)     # напоминания, просмотры, вечерняя сводка
         eff = effective_cfg(cfg, settings)
         market = analyst.market_stats(store)
         for name, scfg in enabled.items():
