@@ -772,45 +772,60 @@ class Store:
             self.conn.execute("ALTER TABLE listings ADD COLUMN data TEXT")
         except sqlite3.OperationalError:
             pass
+        try:                                   # специализация маклера: ["rent"], ["sale"], оба
+            self.conn.execute("ALTER TABLE brokers ADD COLUMN deals TEXT")
+        except sqlite3.OperationalError:
+            pass
         self.conn.commit()
 
-    def upsert_broker(self, bid, source, name, phone, ads, district, price):
-        """Копим карточку маклера: телефон, районы, диапазон цен."""
+    def upsert_broker(self, bid, source, name, phone, ads, district, price, deal="rent"):
+        """Копим карточку маклера: телефон, районы, диапазон цен, аренда/продажа.
+        Диапазон цен копим только по аренде — цены продажи в нём бессмысленны."""
         row = self.conn.execute(
-            "SELECT districts, min_price, max_price, phone, ads FROM brokers WHERE bid=?",
+            "SELECT districts, min_price, max_price, phone, ads, deals, name FROM brokers WHERE bid=?",
             (bid,)).fetchone()
         ds = set()
         lo = hi = None
+        deals = {deal}
         if row:
             ds = set(json.loads(row[0] or "[]"))
             lo, hi = row[1], row[2]
             phone = phone or row[3]
             ads = max(ads or 0, row[4] or 0)
+            deals |= set(json.loads(row[5])) if row[5] else {"rent"}
+            name = name or row[6]
+        if deal != "rent":
+            price = None
         if district:
             ds.add(district)
         if price:
             lo = price if lo is None else min(lo, price)
             hi = price if hi is None else max(hi, price)
         now = datetime.now(timezone.utc).isoformat()
+        dj = json.dumps(sorted(deals))
         if row:
             self.conn.execute(
                 "UPDATE brokers SET name=?, phone=?, ads=?, districts=?, "
-                "min_price=?, max_price=? WHERE bid=?",
-                (name, phone, ads, json.dumps(sorted(ds), ensure_ascii=False), lo, hi, bid))
+                "min_price=?, max_price=?, deals=? WHERE bid=?",
+                (name, phone, ads, json.dumps(sorted(ds), ensure_ascii=False), lo, hi, dj, bid))
         else:
             self.conn.execute(
                 "INSERT INTO brokers(bid, source, name, phone, ads, districts, "
-                "min_price, max_price, first_seen) VALUES(?,?,?,?,?,?,?,?,?)",
+                "min_price, max_price, first_seen, deals) VALUES(?,?,?,?,?,?,?,?,?,?)",
                 (bid, source, name, phone, ads,
-                 json.dumps(sorted(ds), ensure_ascii=False), lo, hi, now))
+                 json.dumps(sorted(ds), ensure_ascii=False), lo, hi, now, dj))
         self.conn.commit()
 
-    def brokers(self, status=None, with_phone=True, limit=50):
-        q = "SELECT bid, source, name, phone, ads, districts, min_price, max_price, status " \
+    def brokers(self, status=None, with_phone=True, limit=50, deal=None):
+        q = "SELECT bid, source, name, phone, ads, districts, min_price, max_price, status, deals " \
             "FROM brokers WHERE 1=1"
         args = []
         if status:
             q += " AND status=?"; args.append(status)
+        if deal == "sale":
+            q += " AND deals LIKE '%\"sale\"%'"
+        elif deal == "rent":                   # старые записи без пометки — арендные
+            q += " AND (deals IS NULL OR deals LIKE '%\"rent\"%')"
         if with_phone:
             q += " AND phone IS NOT NULL AND phone != ''"
         q += " ORDER BY ads DESC LIMIT ?"; args.append(limit)
@@ -818,7 +833,8 @@ class Store:
         for r in self.conn.execute(q, args):
             out.append({"bid": r[0], "source": r[1], "name": r[2], "phone": r[3],
                         "ads": r[4], "districts": json.loads(r[5] or "[]"),
-                        "min_price": r[6], "max_price": r[7], "status": r[8]})
+                        "min_price": r[6], "max_price": r[7], "status": r[8],
+                        "deals": json.loads(r[9]) if r[9] else ["rent"]})
         return out
 
     def broker_status(self, bid, status):
@@ -827,12 +843,14 @@ class Store:
             (status, datetime.now(timezone.utc).isoformat(), bid))
         self.conn.commit()
 
-    def broker_stats(self):
+    def broker_stats(self, deal=None):
+        cond = {"sale": " WHERE deals LIKE '%\"sale\"%'",
+                "rent": " WHERE (deals IS NULL OR deals LIKE '%\"rent\"%')"}.get(deal, " WHERE 1=1")
         rows = self.conn.execute(
-            "SELECT status, COUNT(*) FROM brokers GROUP BY status").fetchall()
-        total = self.conn.execute("SELECT COUNT(*) FROM brokers").fetchone()[0]
+            "SELECT status, COUNT(*) FROM brokers" + cond + " GROUP BY status").fetchall()
+        total = self.conn.execute("SELECT COUNT(*) FROM brokers" + cond).fetchone()[0]
         withph = self.conn.execute(
-            "SELECT COUNT(*) FROM brokers WHERE phone IS NOT NULL AND phone!=''").fetchone()[0]
+            "SELECT COUNT(*) FROM brokers" + cond + " AND phone IS NOT NULL AND phone!=''").fetchone()[0]
         return total, withph, dict(rows)
 
     def seller_ads_cached(self, seller_id: str, max_age_days: int):
@@ -1511,6 +1529,109 @@ def harvest_broker(l: dict, store, cfg, ads: int):
                         l.get("district"), l.get("price_usd"))
 
 
+# ------------------------------------------ маклеры по продаже: сбор контактов ----
+# Откуда: Uybor (продажа; телефон — только если продавец написал его в описании:
+# кнопка «показать телефон» на сайте защищена капчей, её не обходим) и публичные
+# Telegram-каналы с объявлениями о продаже. OLX и Birbir с серверов отвечают 403.
+SALE_BROKER_CHANNELS = [
+    "Kvartiritashkenta", "kvartiry_tashkent", "tashkent_nedvizhimost", "toshkent_kvartira",
+    "Tashkentflat", "uybor", "domtutuzb", "nedvizhimost_tashkent",
+    # арендные каналы тоже публикуют продажу — с них берём только объявления о продаже
+    "arentash", "arendakvartir_uz", "arendatashkent_uz", "arenda_kvartira_v_tashkente",
+]
+SALE_POST_WORDS = ("прода", "sotiladi", "sotuvda", "sotaman", "sotuv", "купить", "ипотек", "ipoteka")
+RENT_POST_WORDS = ("аренд", "сдает", "сдаёт", "сдается", "сдаётся", "ijara", "/мес", "oyiga",
+                   "в месяц", "посуточ", "kunlik", "сниму", "ищу", "kerak")
+BROKER_POST_WORDS = ("агентств", "риелт", "риэлт", "маклер", "makler", "rieltor", "agentlik",
+                     "комисси", "vositachi", "услуг", "xizmat", "realty", "estate")
+
+
+def _sale_post(text: str) -> bool:
+    low = (text or "").lower()
+    return any(w in low for w in SALE_POST_WORDS) and not any(w in low for w in RENT_POST_WORDS)
+
+
+def harvest_sale_brokers(cfg, store) -> int:
+    """Пополняет базу маклерами по ПРОДАЖЕ. Возвращает, сколько контактов обновлено.
+
+    Маклер — телефон, который встречается в 2+ объявлениях о продаже, или
+    объявление со словами агентства/риелтора; на Uybor — продавец с 3+ объявлениями."""
+    ss = cfg.get("sale_search") or {}
+    n = 0
+    seen = store.get_kv("sale_broker_posts") or {}          # телефон → ключи объявлений
+    # --- Telegram-каналы
+    chans = ss.get("broker_channels") or SALE_BROKER_CHANNELS
+    try:
+        posts = fetch_telegram({"channels": chans}, cfg)
+    except Exception as e:
+        log.warning("[маклеры продажи] Telegram: %s", e)
+        posts = []
+    for l in posts:
+        if not _sale_post(l.get("text")):
+            continue
+        broker_words = any(w in l["text"].lower() for w in BROKER_POST_WORDS)
+        for ph in (l.get("phones") or [])[:2]:
+            keys = seen.setdefault(ph, [])
+            if l["key"] not in keys:
+                keys.append(l["key"])
+                del keys[:-50]
+            if len(keys) >= 2 or broker_words:
+                store.upsert_broker(f"tel:{ph}", l["source"], "", ph, len(keys),
+                                    l.get("district"), None, deal="sale")
+                n += 1
+    if len(seen) > 5000:                                     # не раздуваем kv
+        seen = dict(sorted(seen.items(), key=lambda kv: -len(kv[1]))[:3000])
+    store.set_kv("sale_broker_posts", seen)
+    # --- Uybor: свежие объявления о продаже по всему Ташкенту
+    u = ss.get("uybor") or {}
+    items = []
+    for page in range(ss.get("broker_uybor_pages", 3)):     # телефон в описании — редкость, берём шире
+        try:
+            r = requests.get(UYBOR_API, params={
+                "limit": 100, "offset": page * 100, "operationType__eq": "sale",
+                "category__eq": u.get("category_id", 7), "region__eq": u.get("region_id", 13),
+                "sort": "-createdAt"}, headers=HEADERS, timeout=25)
+            r.raise_for_status()
+            items += [uybor_listing(o) for o in r.json().get("results", [])]
+        except Exception as e:
+            log.warning("[маклеры продажи] Uybor: %s", e)
+            break
+    for l in items:
+        if not l.get("phones"):
+            continue
+        uid = (l.get("seller_id") or "").partition(":")[2]
+        ads = uybor_user_ads(uid, store, cfg)
+        low = (l.get("text") or "").lower()
+        if ads >= 3 or any(w in low for w in BROKER_POST_WORDS):
+            store.upsert_broker(l["seller_id"], "Uybor · продажа", "", l["phones"][0],
+                                max(ads, 1), l.get("district"), None, deal="sale")
+            n += 1
+    if n:
+        log.info("[маклеры продажи] обновлено контактов: %d", n)
+    return n
+
+
+def backfill_sale_brokers(store, sale_store) -> int:
+    """Разово: маклеры из уже собранных объявлений о продаже (sale.db)."""
+    if sale_store is None or store.get_kv("sale_brokers_backfilled"):
+        return 0
+    n = 0
+    for (data,) in sale_store.conn.execute("SELECT data FROM listings WHERE data IS NOT NULL"):
+        try:
+            l = json.loads(data)
+        except (TypeError, ValueError):
+            continue
+        phones = l.get("phones") or []
+        if phones and (l.get("seller_kind") == "agency" or (l.get("seller_ads") or 0) >= 3):
+            store.upsert_broker(l.get("seller_id") or f"tel:{phones[0]}", "Uybor · продажа", "",
+                                phones[0], max(l.get("seller_ads") or 0, 1), l.get("district"),
+                                None, deal="sale")
+            n += 1
+    store.set_kv("sale_brokers_backfilled", True)
+    log.info("[маклеры продажи] из базы продаж добавлено: %d", n)
+    return n
+
+
 def outreach_text(cfg, settings) -> str:
     """Запрос маклеру, собранный из ваших текущих фильтров."""
     eff = effective_cfg(cfg, settings)
@@ -1550,20 +1671,30 @@ def tg_phone_link(phone: str) -> str:
     return f"https://t.me/+{digits}"
 
 
-def send_broker_cards(cfg, store, settings, limit=10, text=None) -> str:
+def request_deal(store) -> str:
+    """Под какую сделку подбирать маклеров: покупка → продающие, иначе — арендные."""
+    ans = (store.get_kv("anketa") or {}).get("ans") or {}
+    return "sale" if ans.get("deal") == "buy" else "rent"
+
+
+def send_broker_cards(cfg, store, settings, limit=10, text=None, deal=None) -> str:
     """Карточки маклеров с готовым текстом — отправка в один тап."""
     text = text or store.get_kv("request_text") or outreach_text(cfg, settings)
-    pool = store.brokers(status="new", with_phone=True, limit=limit)
-    total, withph, by_status = store.broker_stats()
+    deal = deal or request_deal(store)
+    kind = "по продаже" if deal == "sale" else "по аренде"
+    pool = store.brokers(status="new", with_phone=True, limit=limit, deal=deal)
+    total, withph, by_status = store.broker_stats(deal)
     if not pool:
-        send_telegram(cfg, "📇 Новых маклеров с телефоном пока нет.\n"
-                           f"Всего в базе: {total} (с телефоном {withph}).\n"
-                           "База пополняется по мере работы радара — попробуйте позже.")
+        send_telegram(cfg, f"📇 Новых маклеров {kind} с телефоном пока нет.\n"
+                           f"Всего в базе {kind}: {total} (с телефоном {withph}).\n"
+                           + ("Собираю их из объявлений о продаже на Uybor и в Telegram-каналах — "
+                              "загляните через час: /brokers" if deal == "sale" else
+                              "База пополняется по мере работы радара — попробуйте позже."))
         return ""
 
     send_telegram(cfg, (
-        f"📇 <b>Рассылка маклерам</b> — {len(pool)} контактов\n"
-        f"В базе всего {total}, с телефоном {withph}, уже написано "
+        f"📇 <b>Рассылка маклерам {kind}</b> — {len(pool)} контактов\n"
+        f"В базе {kind} всего {total}, с телефоном {withph}, уже написано "
         f"{by_status.get('contacted', 0)}.\n\n"
         "Текст запроса (собран из ваших фильтров):\n"
         f"<code>{escape_html(text)}</code>\n\n"
@@ -1573,7 +1704,7 @@ def send_broker_cards(cfg, store, settings, limit=10, text=None) -> str:
     for b in pool:
         d = ", ".join(b["districts"][:3]) or "—"
         price = ""
-        if b["min_price"] and b["max_price"]:
+        if deal == "rent" and b["min_price"] and b["max_price"]:
             price = f" · ${b['min_price']:.0f}–{b['max_price']:.0f}"
         body = (f"📇 <b>{escape_html(b['name'] or 'Маклер')}</b> · {escape_html(b['source'])}\n"
                 f"📞 {escape_html(fmt_phone(b['phone']) if len(b['phone']) == 9 else b['phone'])}\n"
@@ -2402,6 +2533,7 @@ def run():
 
     sale_cfg = cfg.get("sale_search") or {}
     sale_store, next_sale = None, 0.0
+    next_sale_brokers = 0.0
     if sale_cfg.get("enabled") and (sale_cfg.get("uybor") or {}).get("enabled", True):
         sale_store = Store(SALE_DB_PATH)
         sale_store.prune()
@@ -2490,6 +2622,14 @@ def run():
 
             if fresh:
                 log.info("[%s] новых: %d", name, fresh)
+
+        if not once and now >= next_sale_brokers:   # маклеры по продаже — для запросов на покупку
+            next_sale_brokers = now + (sale_cfg.get("broker_interval_seconds") or 900)
+            try:
+                backfill_sale_brokers(store, sale_store)
+                harvest_sale_brokers(cfg, store)
+            except Exception as e:
+                log.warning("[маклеры продажи] сбор не удался: %s", e)
 
         if sale_store is not None and (once or now >= next_sale):
             next_sale = now + (sale_cfg.get("uybor") or {}).get("interval_seconds", 600)

@@ -1448,3 +1448,67 @@ assert "Рынок по срезу Uybor" in reply
 assert rr.uybor_listing(dict(uy(9, 1, 205, price=1500), priceType="sqm"))["price_value"] == 45000
 sdb.unlink(missing_ok=True); mdb.unlink(missing_ok=True)
 print("OK — анализ рынка: срез Uybor, история цен, аналоги, аренда, сценарии, вердикт, /rynok")
+
+# ============ маклеры по продаже: сбор из Telegram и Uybor, выбор под тип сделки ============
+import unittest.mock as _mk
+bdb = Path("/tmp/test_brokers.db"); bdb.unlink(missing_ok=True)
+bs = rr.Store(bdb)
+bs.upsert_broker("tg:arentash", "TG @arentash", "", "901112233", 500, "Мирабад", 600)   # арендный
+bs.upsert_broker("tel:977777777", "TG @x", "", "977777777", 2, "Юнусабад", 90000, deal="sale")
+assert [b["bid"] for b in bs.brokers(deal="sale")] == ["tel:977777777"]
+assert [b["bid"] for b in bs.brokers(deal="rent")] == ["tg:arentash"]
+assert bs.brokers(deal="sale")[0]["min_price"] is None          # цены продажи в диапазон не пишем
+bs.upsert_broker("tg:arentash", "TG @arentash", "", "", 500, None, None, deal="sale")
+assert set(bs.brokers(deal="sale")[0]["deals"] if bs.brokers(deal="sale")[0]["bid"] == "tg:arentash"
+           else bs.brokers(deal="sale")[1]["deals"]) == {"rent", "sale"}
+assert bs.broker_stats("sale")[0] == 2 and bs.broker_stats("rent")[0] == 1
+
+POSTS = [
+    {"key": "tg:a:1", "source": "TG @a", "text": "Продается 2-комн, Юнусабад, 55 000$. Тел +998 90 123 45 67",
+     "phones": ["901234567"], "district": "Юнусабад"},
+    {"key": "tg:a:2", "source": "TG @a", "text": "Продаётся 3-комн, Мирабад. +998 90 123 45 67",
+     "phones": ["901234567"], "district": "Мирабад"},
+    {"key": "tg:b:1", "source": "TG @b", "text": "Сдается квартира 600$/мес, 935554433",
+     "phones": ["935554433"], "district": "Чиланзар"},                       # аренда — мимо
+    {"key": "tg:b:2", "source": "TG @b", "text": "Продается квартира, агентство недвижимости, 998881122",
+     "phones": ["998881122"], "district": None},                             # слово агентства — сразу
+    {"key": "tg:b:3", "source": "TG @b", "text": "Продаю свою квартиру, 1 раз, 977001122",
+     "phones": ["977001122"], "district": None},                             # хозяин, одно объявление
+]
+UY = {"results": [
+    {"id": 1, "userId": 77, "description": "Продажа, звоните 95 444 33 22", "districtId": 205, "price": 60000},
+    {"id": 2, "userId": 78, "description": "Без телефона", "price": 50000},
+]}
+class _UR:
+    status_code = 200
+    def raise_for_status(s): pass
+    def json(s): return UY
+with _mk.patch.object(rr, "fetch_telegram", lambda scfg, cfg: POSTS), \
+        _mk.patch.object(rr.requests, "get", lambda *a, **k: _UR()), \
+        _mk.patch.object(rr, "uybor_user_ads", lambda uid, store, cfg: 12):
+    rr.harvest_sale_brokers(dict(cfg, sale_search={"broker_uybor_pages": 1}), bs)
+sale = {b["bid"]: b for b in bs.brokers(deal="sale", limit=100)}
+assert "tel:901234567" in sale and sale["tel:901234567"]["ads"] == 2
+assert "tel:998881122" in sale and "tel:935554433" not in sale and "tel:977001122" not in sale
+assert "uybor:77" in sale and sale["uybor:77"]["phone"] == "954443322"
+
+# запрос на покупку → карточки только продающих маклеров
+bs.set_kv("anketa", {"ans": {"deal": "buy"}})
+CARDS = []
+with _mk.patch.object(rr, "tg_call", lambda c, m, pl, **k: (CARDS.append(pl), {"ok": True})[1]), \
+        _mk.patch.object(rr, "send_telegram", lambda c, t: (CARDS.append({"text": t}), True)[1]), \
+        _mk.patch.object(rr.time, "sleep"):
+    rr.send_broker_cards(cfg, bs, rr.default_settings(), text="Хочу купить квартиру")
+head = CARDS[0]["text"]
+assert "по продаже" in head, head
+assert len(CARDS) == 1 + len(sale)                                # заголовок + все продающие
+assert all("$" not in c.get("text", "") for c in CARDS[1:])      # без арендного диапазона цен
+bs.set_kv("anketa", {"ans": {"deal": "rent"}})
+CARDS.clear()
+with _mk.patch.object(rr, "tg_call", lambda c, m, pl, **k: (CARDS.append(pl), {"ok": True})[1]), \
+        _mk.patch.object(rr, "send_telegram", lambda c, t: (CARDS.append({"text": t}), True)[1]), \
+        _mk.patch.object(rr.time, "sleep"):
+    rr.send_broker_cards(cfg, bs, rr.default_settings(), text="Хочу снять")
+assert "по аренде" in CARDS[0]["text"] and len(CARDS) == 2       # заголовок + 1 арендный маклер
+bdb.unlink(missing_ok=True)
+print("OK — маклеры по продаже: Telegram + Uybor, пометка сделки, рассылка под покупку/аренду")
