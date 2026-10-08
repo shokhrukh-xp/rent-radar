@@ -337,6 +337,87 @@ async function showMySearch(env, chat, L) {
       [{ text: "🔄 Начать поиск заново", callback_data: "q:again" }]] } });
 }
 
+// ── «Варианты» и «Маклерам» — сразу, из снимка, который присылает Python ──
+const DECLINE = [["p", "💸 Дорого"], ["d", "📍 Район"], ["c", "🛠 Состояние"], ["a", "📐 Площадь/планировка"], ["x", "Без причины"]];
+const triageKb = oid => ({ inline_keyboard: [[
+  { text: "👍 В шортлист", callback_data: `t:s:${oid}` }, { text: "🕐 Позже", callback_data: `t:l:${oid}` },
+  { text: "👎 Мимо", callback_data: `t:n:${oid}` }]] });
+
+async function pendingBrokerMsgs(env) {
+  const r = await (await db(env)).prepare("SELECT upd FROM queue").all();
+  const owner = String(env.OWNER_CHAT);
+  return (r.results || []).filter(x => {
+    try { const u = JSON.parse(x.upd); const m = u.message || u.edited_message; return m && String(m.chat?.id) !== owner && !m._welcomed; }
+    catch (e) { return false; }
+  }).length;
+}
+
+export async function showOffers(env, chat, all = false) {
+  const ui = await kvGet(env, "ui", null);
+  if (!ui) return asCommand(env, chat, all ? "/offers" : "/offers");
+  const waiting = await pendingBrokerMsgs(env);
+  const waitNote = waiting ? `\n\n⏳ Ещё ${waiting} сообщ. от маклеров разбираю — карточки придут через 1–2 минуты.` : "";
+  if (waiting) await wake(env);
+  if (!ui.offers_total) {
+    const rows = [];
+    if (ui.shortlist) rows.push([{ text: `📋 Шортлист (${ui.shortlist})`, callback_data: "s:ref" }]);
+    rows.push([{ text: ui.written ? "📇 Написать ещё маклерам" : "📇 Разослать запрос маклерам", callback_data: "b" }]);
+    const hint = ui.written
+      ? `\nВы написали ${ui.written} маклерам — их ответы придут сюда карточками.\n` +
+        "Если кто-то ответил вам в WhatsApp, просто перешлите его сообщение сюда — сделаю такую же карточку с анализом цены."
+      : "\nЧтобы они появились, разошлите запрос маклерам — это пара нажатий.";
+    await say(env, chat, (waiting ? "Новых карточек пока нет." : "Новых вариантов пока нет.") +
+      (ui.shortlist ? ` В шортлисте — ${ui.shortlist}.` : "") + hint + waitNote, { reply_markup: { inline_keyboard: rows } });
+    return;
+  }
+  const batch = all ? ui.offers.length : Math.max(1, ui.free || 2);
+  for (const o of ui.offers.slice(0, batch)) {
+    if (o.photos && o.photos.length) {
+      const media = o.photos.map((f, i) => ({ type: "photo", media: f, ...(i === 0 ? { caption: o.text.slice(0, 1000), parse_mode: "HTML" } : {}) }));
+      await tg(env, "sendMediaGroup", { chat_id: chat, media });
+      await say(env, chat, "Что делаем с этим вариантом?", { reply_markup: triageKb(o.oid) });
+    } else {
+      await say(env, chat, o.text, { parse_mode: "HTML", reply_markup: triageKb(o.oid) });
+    }
+  }
+  const rest = ui.offers_total - Math.min(batch, ui.offers_total);
+  if (rest > 0) await say(env, chat, `Маклеры прислали ещё <b>${rest}</b> — показать?`, { parse_mode: "HTML",
+    reply_markup: { inline_keyboard: [[{ text: `Показать ещё ${rest} →`, callback_data: "off2" }]] } });
+  else if (waitNote) await say(env, chat, waitNote.trim());
+}
+
+export async function startOutreach(env, chat) {
+  const ui = await kvGet(env, "ui", null);
+  const iv = await kvGet(env, ivKey(chat), null);
+  // нет снимка или запрос поменялся после него — ссылки со старым текстом слать нельзя
+  if (!ui || (iv && iv.sentAt && iv.sentAt > (ui.at || 0))) return asCommand(env, chat, "/brokers");
+  if (!ui.brokers || !ui.brokers.length) { await say(env, chat, ui.brokers_empty || "Маклеров пока нет."); return; }
+  await kvSet(env, "out", { sent: 0, skipped: 0, done: [], at: Date.now() });
+  await say(env, chat, ui.header, { parse_mode: "HTML" });
+  await nextBroker(env, chat);
+}
+
+async function nextBroker(env, chat) {
+  const ui = await kvGet(env, "ui", null) || {};
+  const st = await kvGet(env, "out", null) || { sent: 0, skipped: 0, done: [] };
+  const left = (ui.brokers || []).filter(b => !st.done.includes(b.bid));
+  if (!left.length) {
+    const more = (ui.brokers_total || 0) - st.done.length;
+    if (more > 0) {                                   // в снимке кончились — Python пришлёт ещё
+      await wake(env);
+      await say(env, chat, `Ещё ${more} маклеров — подгружаю следующую порцию, пришлю через 1–2 минуты. Нажмите «📇 Маклерам» чуть позже.`);
+    } else {
+      await say(env, chat, `✅ Рассылка закончена: написано ${st.sent}, пропущено ${st.skipped}. ` +
+        "Новые маклеры добавляются сами — загляните через пару часов.");
+    }
+    return;
+  }
+  const b = left[0];
+  const progress = `\n\n<i>Написано ${st.sent} · пропущено ${st.skipped} · в очереди ещё ${Math.max(0, (ui.brokers_total || left.length) - st.done.length - 1)}</i>`;
+  await say(env, chat, b.body + progress, { parse_mode: "HTML", reply_markup: { inline_keyboard: [b.row,
+    [{ text: "✅ Отправил → следующий", callback_data: `bw:${b.bid}` }, { text: "⏭ Пропустить", callback_data: `bx:${b.bid}` }]] } });
+}
+
 async function startAddMode(env, chat) {
   const iv = (await kvGet(env, ivKey(chat), null)) || emptyIv();
   iv.mode = "add"; iv.addAt = Date.now();
@@ -495,6 +576,8 @@ export async function interviewTurn(env, chat, text) {
     return;
   }
   if (intent === "add_offer") return startAddMode(env, chat);
+  if (intent === "show_offers") { await kvSet(env, ivKey(chat), iv); return showOffers(env, chat); }
+  if (intent === "brokers") { await kvSet(env, ivKey(chat), iv); return startOutreach(env, chat); }
   if (INTENT_CMD[intent]) {
     await kvSet(env, ivKey(chat), iv);
     await asCommand(env, chat, INTENT_CMD[intent], fin.lang === "uz" ? "uz" : "ru");
@@ -502,6 +585,7 @@ export async function interviewTurn(env, chat, text) {
   }
   await kvSet(env, ivKey(chat), iv);
   if (ready) {
+    iv.sentAt = Date.now(); await kvSet(env, ivKey(chat), iv);
     await enqueue(env, { message: { chat: { id: +chat || chat, type: "private" }, from: { id: +chat || chat },
       date: Math.floor(Date.now() / 1000),
       web_app_data: { data: JSON.stringify({ v: 3, replace: true, src: "chat", ans: fin }) } } });
@@ -538,10 +622,44 @@ export async function handleUpdate(env, upd) {
     const chat = String(cb.message?.chat?.id ?? "");
     if (chat !== owner) return "skip";
     const data = cb.data || "";
+    if (data === "b" || data === "off2" || data === "q:ok") {
+      await tg(env, "answerCallbackQuery", { callback_query_id: cb.id });
+      if (data === "off2") await showOffers(env, chat, true); else await startOutreach(env, chat);
+      return "ui";
+    }
+    if (/^b[wx]:/.test(data)) {                  // рассылка по одному — следующий сразу, сохранит Python
+      const st = await kvGet(env, "out", null) || { sent: 0, skipped: 0, done: [] };
+      const bid = data.slice(3);
+      if (!st.done.includes(bid)) { st.done.push(bid); st[data[1] === "w" ? "sent" : "skipped"] += 1; }
+      await kvSet(env, "out", st);
+      await tg(env, "answerCallbackQuery", { callback_query_id: cb.id, text: data[1] === "w" ? "✅ Отмечено" : "Пропущен" });
+      await tg(env, "editMessageReplyMarkup", { chat_id: chat, message_id: cb.message.message_id, reply_markup: { inline_keyboard: [] } });
+      await nextBroker(env, chat);
+      upd.callback_query = { ...cb, _worker_done: true };
+      await queueAndWake(env, upd);
+      return "outreach";
+    }
+    if (/^t:n:\d+$/.test(data)) {               // «Мимо» — сразу спросить причину
+      const oid = data.split(":")[2];
+      await tg(env, "answerCallbackQuery", { callback_query_id: cb.id, text: "Выберите причину" });
+      await say(env, chat, `Почему вариант #${oid} не подошёл? Маклеру уйдёт вежливый отказ с подсказкой.`,
+        { reply_markup: { inline_keyboard: DECLINE.map(([c, t]) => [{ text: t, callback_data: `t:r:${oid}:${c}` }]) } });
+      return "triage";
+    }
+    if (/^t:[slr]:/.test(data)) {
+      await tg(env, "answerCallbackQuery", { callback_query_id: cb.id,
+        text: data[2] === "s" ? "👍 В шортлисте" : data[2] === "l" ? "🕐 Отложено" : "👎 Отмечено" });
+      if (data[2] !== "s") await tg(env, "editMessageReplyMarkup", { chat_id: chat, message_id: cb.message.message_id, reply_markup: { inline_keyboard: [] } });
+      upd.callback_query = { ...cb, _toast_done: true };
+      await queueAndWake(env, upd);
+      return "triage";
+    }
     if (data.startsWith("cmd:")) {               // кнопки меню «⋯ Ещё» и «Мой поиск»
       const cmd = data.slice(4);
       await tg(env, "answerCallbackQuery", { callback_query_id: cb.id });
       if (cmd === "/add") return (await startAddMode(env, chat), "add_mode");
+      if (cmd === "/brokers") return (await startOutreach(env, chat), "ui");
+      if (cmd === "/offers") return (await showOffers(env, chat), "ui");
       if (cmd === "/done") {
         const iv = (await kvGet(env, ivKey(chat), null)) || emptyIv();
         iv.mode = ""; await kvSet(env, ivKey(chat), iv);
@@ -586,8 +704,8 @@ export async function handleUpdate(env, upd) {
 
   // кнопки внизу — обычный текст с подписью кнопки
   if (text === BTN.search) return (await showMySearch(env, chat, L), "my_search");
-  if (text === BTN.offers) return (await asCommand(env, chat, "/offers", L), "queued");
-  if (text === BTN.brokers) return (await asCommand(env, chat, "/brokers", L), "queued");
+  if (text === BTN.offers || /^\/(offers|varianty)(@\w+)?$/i.test(text)) return (await showOffers(env, chat), "ui");
+  if (text === BTN.brokers || /^\/(brokers|makler|outreach)(@\w+)?$/i.test(text)) return (await startOutreach(env, chat), "ui");
   if (text === BTN.more) {
     await say(env, chat, "Что ещё могу:", { reply_markup: MORE_MENU });
     return "more";
@@ -674,6 +792,13 @@ export default {
         await kvSet(env, "last_wake", 0);
         const alive = await wake(env);
         return json({ alive, last_wake: await kvGet(env, "last_wake", 0), last_wake_status: await kvGet(env, "last_wake_status", null) });
+      }
+      if (p === "/svc/snapshot" && req.method === "POST") {
+        const snap = await req.json().catch(() => null);
+        if (!snap || !Array.isArray(snap.offers)) return json({ ok: false }, 400);
+        snap.at = Date.now();
+        await kvSet(env, "ui", snap);
+        return json({ ok: true });
       }
       if (p === "/svc/bye") { await kvSet(env, "py_alive", null); return json({ ok: true }); }
       if (p === "/svc/setup") {

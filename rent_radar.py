@@ -11,6 +11,7 @@ Telegram-каналы (публичные веб-превью t.me/s/..., без
 Запуск: python3 rent_radar.py
 """
 
+import hashlib
 import html as html_lib
 import json
 import logging
@@ -1877,31 +1878,64 @@ def ranked_brokers(store, deal, limit=200):
     return sorted(pool, key=lambda b: (-len(want & set(b["districts"])), -(b["ads"] or 0)))
 
 
+def _kind(deal):
+    return "по продаже" if deal == "sale" else "по аренде"
+
+
+def outreach_empty_text(store, deal) -> str:
+    total, withph, _ = store.broker_stats(deal)
+    return (f"📇 Новых маклеров {_kind(deal)} с контактом пока нет.\n"
+            f"Всего в базе {_kind(deal)}: {total} (с контактом {withph}).\n"
+            + ("Собираю их с Realt24, Joymee, Realting, Uybor и из Telegram-каналов — "
+               "загляните через час — кнопка «📇 Маклерам»" if deal == "sale" else
+               "База пополняется по мере работы радара — попробуйте позже."))
+
+
+def outreach_header(store, deal, text, n) -> str:
+    _, _, by_status = store.broker_stats(deal)
+    want = request_districts(store)
+    return (f"📇 <b>Рассылка маклерам {_kind(deal)}</b> — в очереди {n}\n"
+            + (f"Сначала те, кто работает в районах: {escape_html(', '.join(sorted(want)))}.\n" if want else "")
+            + f"Уже написано раньше: {by_status.get('contacted', 0)}.\n\n"
+            "Текст запроса:\n"
+            f"<code>{escape_html(text)}</code>\n\n"
+            "Покажу маклеров по одному: жмите «WhatsApp» или «Telegram» — откроется чат с "
+            "набранным текстом, отправьте и нажмите «✅ Отправил → следующий».")
+
+
+def broker_card(b, deal, text):
+    """(текст карточки без строки прогресса, первая строка кнопок со ссылками)."""
+    d = ", ".join(b["districts"][:3]) or "—"
+    price = ""
+    if deal == "rent" and b["min_price"] and b["max_price"]:
+        price = f" · ${b['min_price']:.0f}–{b['max_price']:.0f}"
+    phone = b["phone"] or ""
+    contact = (f"📞 {escape_html(fmt_phone(phone) if len(phone) == 9 else phone)}" if phone
+               else f"✈️ @{escape_html(b['tg'])}")
+    body = (f"📇 <b>{escape_html(b['name'] or 'Маклер')}</b> · {escape_html(b['source'])}\n"
+            f"{contact}\n"
+            f"🏘 {b['ads']} объявлений" + (f" · районы: {escape_html(d)}" if b["districts"] else "") + price)
+    row = ([{"text": "📱 WhatsApp с текстом", "url": wa_link(phone, text)},
+            {"text": "✈️ Telegram", "url": tg_phone_link(phone)}] if phone else
+           [{"text": "✈️ Telegram с текстом", "url": tg_user_link(b["tg"], text)}])
+    return body, row
+
+
+def outreach_progress(st, left) -> str:
+    return (f"\n\n<i>Написано {st.get('sent', 0)} · пропущено {st.get('skipped', 0)} · "
+            f"в очереди ещё {left}</i>")
+
+
 def send_broker_cards(cfg, store, settings, limit=10, text=None, deal=None) -> str:
     """Рассылка маклерам — по одному: карточка, «Отправил → следующий», прогресс."""
     text = text or store.get_kv("request_text") or outreach_text(cfg, settings)
     deal = deal or request_deal(store)
-    kind = "по продаже" if deal == "sale" else "по аренде"
     pool = ranked_brokers(store, deal)
-    total, withph, by_status = store.broker_stats(deal)
     if not pool:
-        send_telegram(cfg, f"📇 Новых маклеров {kind} с контактом пока нет.\n"
-                           f"Всего в базе {kind}: {total} (с контактом {withph}).\n"
-                           + ("Собираю их с Realt24, Joymee, Realting, Uybor и из Telegram-каналов — "
-                              "загляните через час — кнопка «📇 Маклерам»" if deal == "sale" else
-                              "База пополняется по мере работы радара — попробуйте позже."))
+        send_telegram(cfg, outreach_empty_text(store, deal))
         return ""
     store.set_kv("outreach", {"deal": deal, "text": text, "sent": 0, "skipped": 0})
-    want = request_districts(store)
-    send_telegram(cfg, (
-        f"📇 <b>Рассылка маклерам {kind}</b> — в очереди {len(pool)}\n"
-        + (f"Сначала те, кто работает в районах: {escape_html(', '.join(sorted(want)))}.\n" if want else "")
-        + f"Уже написано раньше: {by_status.get('contacted', 0)}.\n\n"
-        "Текст запроса:\n"
-        f"<code>{escape_html(text)}</code>\n\n"
-        "Покажу маклеров по одному: жмите «WhatsApp» или «Telegram» — откроется чат с "
-        "набранным текстом, отправьте и нажмите «✅ Отправил → следующий». "
-        "Ответы маклеров из WhatsApp просто перешлите сюда — соберу в карточку."))
+    send_telegram(cfg, outreach_header(store, deal, text, len(pool)))
     send_next_broker(cfg, store)
     return ""
 
@@ -1918,31 +1952,73 @@ def send_next_broker(cfg, store) -> bool:
                            "загляните через пару часов — кнопка «📇 Маклерам».")
         return False
     b = pool[0]
-    d = ", ".join(b["districts"][:3]) or "—"
-    price = ""
-    if deal == "rent" and b["min_price"] and b["max_price"]:
-        price = f" · ${b['min_price']:.0f}–{b['max_price']:.0f}"
-    phone = b["phone"] or ""
-    contact = (f"📞 {escape_html(fmt_phone(phone) if len(phone) == 9 else phone)}" if phone
-               else f"✈️ @{escape_html(b['tg'])}")
-    done = st.get("sent", 0) + st.get("skipped", 0)
-    body = (f"📇 <b>{escape_html(b['name'] or 'Маклер')}</b> · {escape_html(b['source'])}\n"
-            f"{contact}\n"
-            f"🏘 {b['ads']} объявлений" + (f" · районы: {escape_html(d)}" if b["districts"] else "") + price
-            + f"\n\n<i>Написано {st.get('sent', 0)} · пропущено {st.get('skipped', 0)} · "
-              f"в очереди ещё {len(pool) - 1}</i>")
-    first_row = ([{"text": "📱 WhatsApp с текстом", "url": wa_link(phone, text)},
-                  {"text": "✈️ Telegram", "url": tg_phone_link(phone)}] if phone else
-                 [{"text": "✈️ Telegram с текстом", "url": tg_user_link(b["tg"], text)}])
+    body, first_row = broker_card(b, deal, text)
     kb = {"inline_keyboard": [
         first_row,
         [{"text": "✅ Отправил → следующий", "callback_data": f"bw:{b['bid']}"},
          {"text": "⏭ Пропустить", "callback_data": f"bx:{b['bid']}"}],
     ]}
     tg_call(cfg, "sendMessage", {
-        "chat_id": cfg["telegram_chat_id"], "text": body, "parse_mode": "HTML",
-        "reply_markup": json.dumps(kb, ensure_ascii=False)})
-    return bool(done >= 0)
+        "chat_id": cfg["telegram_chat_id"], "text": body + outreach_progress(st, len(pool) - 1),
+        "parse_mode": "HTML", "reply_markup": json.dumps(kb, ensure_ascii=False)})
+    return True
+
+
+# ------------------------------- снимок для воркера: «Варианты» и «Маклерам» сразу ----
+# Python спит большую часть суток, а кнопки должны отвечать за секунды. Поэтому
+# Python заранее отдаёт воркеру готовые карточки (варианты, очередь маклеров, текст
+# запроса), а воркер показывает их сам. Нажатия потом доходят до Python и сохраняются.
+SNAPSHOT_EVERY = 15
+
+
+def ui_snapshot(cfg, store, settings) -> dict:
+    pool = concierge.offers_by_status(store, "new") + concierge.offers_by_status(store, "later")
+    idx = concierge.price_index(store)
+    offers = [{"oid": o["oid"], "photos": (o["photos"] or [])[:4],
+               "text": concierge.offer_card(store, cfg, o, idx=idx, pos=i + 1, total=len(pool))}
+              for i, o in enumerate(pool[:12])]
+    shortlist = len(concierge.offers_by_status(store, "shortlist")) + \
+        len(concierge.offers_by_status(store, "asked"))
+    written = store.conn.execute("SELECT COUNT(*) FROM brokers WHERE status='contacted'").fetchone()[0]
+    deal = request_deal(store)
+    text = store.get_kv("request_text") or outreach_text(cfg, settings)
+    ranked = ranked_brokers(store, deal)
+    brokers = []
+    for b in ranked[:40]:
+        body, row = broker_card(b, deal, text)
+        brokers.append({"bid": b["bid"], "body": body, "row": row})
+    return {"offers": offers, "offers_total": len(pool), "shortlist": shortlist, "written": written,
+            "free": cfg.get("free_offers", 2), "deal": deal,
+            "brokers": brokers, "brokers_total": len(ranked),
+            "header": outreach_header(store, deal, text, len(ranked)) if ranked else "",
+            "brokers_empty": outreach_empty_text(store, deal) if not ranked else ""}
+
+
+def push_snapshot(cfg, store, settings, force=False) -> bool:
+    if not cfg.get("worker_url"):
+        return False
+    now = time.time()
+    last = store.get_kv("snapshot_meta") or {}
+    if not force and now - last.get("at", 0) < SNAPSHOT_EVERY:
+        return False
+    try:
+        snap = ui_snapshot(cfg, store, settings)
+    except Exception as e:
+        log.warning("снимок для воркера не собран: %s", e)
+        return False
+    sig = hashlib.sha1(json.dumps(snap, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+    if sig == last.get("sig") and now - last.get("at", 0) < 600:
+        store.set_kv("snapshot_meta", {"at": now, "sig": sig, "pushed": last.get("pushed", 0)})
+        return False
+    try:
+        r = requests.post(cfg["worker_url"] + "/svc/snapshot", json=snap, timeout=20,
+                          headers={"x-svc": cfg.get("worker_key", ""), "user-agent": "rano-radar/1.0"})
+        ok = r.status_code == 200
+    except requests.RequestException as e:
+        log.warning("снимок не отправлен: %s", e)
+        ok = False
+    store.set_kv("snapshot_meta", {"at": now, "sig": sig if ok else "", "pushed": now if ok else last.get("pushed", 0)})
+    return ok
 
 
 def run_search(cfg, store, settings, limit=5, days=7) -> str:
@@ -1980,6 +2056,17 @@ def run_search(cfg, store, settings, limit=5, days=7) -> str:
         send_listing(cfg, settings, l, likely_makler=False)
         time.sleep(1)
     return ""
+
+
+def apply_worker_done(data, cfg, store):
+    """Воркер сам провёл нажатие (рассылка по одному) — здесь только сохраняем статус."""
+    kind, _, bid = data.partition(":")
+    if kind in ("bw", "bx") and bid:
+        store.broker_status(bid, "contacted" if kind == "bw" else "skipped")
+        st = store.get_kv("outreach") or {}
+        key = "sent" if kind == "bw" else "skipped"
+        st[key] = st.get(key, 0) + 1
+        store.set_kv("outreach", st)
 
 
 def handle_callback(data: str, settings: dict, store, cfg: dict, message_id=None):
@@ -2304,6 +2391,10 @@ def process_commands(cfg: dict, store, long_poll: int = 0) -> dict:
             msg = cb.get("message") or {}
             if str((msg.get("chat") or {}).get("id") or "") != str(cfg["telegram_chat_id"]):
                 continue
+            if cb.get("_worker_done"):          # воркер уже ответил и показал следующее — сохраняем
+                apply_worker_done(cb.get("data") or "", cfg, store)
+                changed = True
+                continue
             toast, view = handle_callback(cb.get("data") or "", settings, store, cfg,
                                           msg.get("message_id"))
             # подсказка-«всплывашка»; для старых нажатий Telegram её отклоняет — это нормально
@@ -2331,12 +2422,14 @@ def process_commands(cfg: dict, store, long_poll: int = 0) -> dict:
             if concierge.apply_webapp_data(cfg, store, wad["data"]):
                 log.info("параметры получены из мини-аппа")
                 changed = True
+                push_snapshot(cfg, store, settings, force=True)   # новый текст запроса — в ссылки маклерам
             continue
 
         text = (msg.get("text") or "").strip()
         if store.get_kv("awaiting_text") and text and not text.startswith("/"):
             store.set_kv("request_text", text)
             store.set_kv("awaiting_text", False)
+            push_snapshot(cfg, store, settings, force=True)
             tg_call(cfg, "sendMessage", {"chat_id": cfg["telegram_chat_id"],
                                          "text": "✅ Текст запроса сохранён.",
                                          "reply_markup": json.dumps({"inline_keyboard": [[
@@ -2878,6 +2971,7 @@ def run():
         # long-poll: команды и нажатия кнопок ловим за ~секунду, а не раз в проход
         settings = process_commands(cfg, store, long_poll=0 if once else 20)
         flush_pending_offer(cfg, store, sale_store)
+        push_snapshot(cfg, store, settings)
         eff = effective_cfg(cfg, settings)
         market = analyst.market_stats(store)
         for name, scfg in enabled.items():
@@ -2987,6 +3081,10 @@ def run():
             time.sleep(3 - elapsed)
 
     if cfg.get("worker_url") and not once:
+        try:                                       # свежие карточки — воркеру, пока мы спим
+            push_snapshot(cfg, store, {**default_settings(), **(store.get_kv("settings") or {})}, force=True)
+        except Exception as e:
+            log.warning("финальный снимок не отправлен: %s", e)
         worker_call(cfg, "/svc/bye", timeout=10)   # воркер будет будить нас сам
     log.info("Готово" if once or deadline else "Остановлено")
 

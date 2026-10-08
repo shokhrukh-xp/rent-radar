@@ -1704,3 +1704,36 @@ for t in (rr.HELP_TEXT,):
     assert "Мой поиск" in t and "/new" not in t and "/brokers" not in t
 wdb.unlink(missing_ok=True)
 print("OK — без команд: кнопки внизу, понятные подсказки, маклер не получает приветствие дважды")
+
+# ============ мгновенные «Варианты»/«Маклерам»: снимок для воркера ============
+sdb2 = Path("/tmp/test_snap.db"); sdb2.unlink(missing_ok=True)
+ss2 = rr.Store(sdb2)
+ss2.set_kv("anketa", {"ans": {"deal": "buy", "districts": [str(rr.DISTRICT_LIST.index("Мирабад"))]}})
+ss2.set_kv("request_text", "Здравствуйте! Хочу купить квартиру в Ташкенте.")
+for i in range(3):
+    cg.save_offer(ss2, cfg, 700 + i, f"М{i}", f"2 комн Мирабад 5{i} м2 4{i} 000$", [f"p{i}"] if i == 0 else [])
+cg.set_offer_status(ss2, 3, "shortlist")
+ss2.upsert_broker("tel:901112233", "Realt24", "Ольга", "901112233", 12, "Мирабад", None, deal="sale")
+ss2.upsert_broker("tel:909998877", "Realt24", "", "909998877", 40, "Сергели", None, deal="sale")
+snap = rr.ui_snapshot(cfg, ss2, rr.default_settings())
+assert snap["offers_total"] == 2 and snap["shortlist"] == 1 and snap["deal"] == "sale"
+assert snap["offers"][0]["photos"] == ["p0"] and "Вариант 1 из 2" in snap["offers"][0]["text"]
+assert [b["bid"] for b in snap["brokers"]] == ["tel:901112233", "tel:909998877"]      # сначала Мирабад
+assert snap["brokers"][0]["row"][0]["url"].startswith("https://wa.me/998901112233?text=")
+assert "Хочу купить" in snap["header"]
+POSTED = []
+class _P:
+    status_code = 200
+wcfg2 = dict(cfg, worker_url="https://w.example", worker_key="k")
+with mock.patch.object(rr.requests, "post", lambda url, json=None, **k: (POSTED.append((url, json)), _P())[1]):
+    assert rr.push_snapshot(wcfg2, ss2, rr.default_settings(), force=True)
+    assert not rr.push_snapshot(wcfg2, ss2, rr.default_settings())            # чаще 15 с — нет
+    assert not rr.push_snapshot(wcfg2, ss2, rr.default_settings(), force=True)  # без изменений — нет
+assert POSTED[0][0] == "https://w.example/svc/snapshot" and POSTED[0][1]["brokers_total"] == 2
+# нажатия, которые воркер уже провёл, — только сохраняются (никаких сообщений)
+with mock.patch.object(rr, "tg_call", lambda *a, **k: (_ for _ in ()).throw(AssertionError("не писать"))):
+    rr.apply_worker_done("bw:tel:901112233", cfg, ss2)
+    rr.apply_worker_done("bx:tel:909998877", cfg, ss2)
+assert not ss2.brokers(status="new", deal="sale") and ss2.get_kv("outreach") == {"sent": 1, "skipped": 1}
+sdb2.unlink(missing_ok=True)
+print("OK — мгновенные кнопки: снимок вариантов и маклеров для воркера, сохранение нажатий")

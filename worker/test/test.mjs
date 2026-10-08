@@ -246,6 +246,54 @@ assert.equal(got.at(-1).message._owner_offer, true);
 await handleUpdate(env, { update_id: ++uid, callback_query: { id: "c10", data: "cmd:/done", message: { message_id: 4, chat: { id: +OWNER } } } });
 assert.match(texts().at(-1), /Готово/);
 
+// ── снимок от Python: «Варианты» и «Маклерам» отвечают сразу, без очереди
+const post = (path, body) => worker.fetch(new Request("https://w.example" + path, { method: "POST",
+  headers: { "x-svc": "svc", "content-type": "application/json" }, body: JSON.stringify(body) }), env, { waitUntil() {} });
+await drain();
+// снимок свежее последнего запроса: ставим sentAt в прошлое
+{ const row = await env.DB.prepare("SELECT v FROM kv WHERE k=?").bind("iv:" + OWNER).first();
+  const ivx = JSON.parse(row.v); ivx.sentAt = Date.now() - 60e3;
+  await env.DB.prepare("UPDATE kv SET v=? WHERE k=?").bind(JSON.stringify(ivx), "iv:" + OWNER).run(); }
+assert.equal((await post("/svc/snapshot", { offers: [
+  { oid: 7, photos: ["ph7"], text: "🏠 <b>Вариант 1 из 3</b>" }, { oid: 8, photos: [], text: "🏠 Вариант 2 из 3" },
+  { oid: 9, photos: [], text: "🏠 Вариант 3 из 3" }], offers_total: 3, shortlist: 1, written: 2, free: 2, deal: "sale",
+  brokers: [{ bid: "tel:1", body: "📇 <b>А</b>", row: [{ text: "📱 WhatsApp с текстом", url: "https://wa.me/1" }] },
+            { bid: "tel:2", body: "📇 <b>Б</b>", row: [{ text: "📱 WhatsApp с текстом", url: "https://wa.me/2" }] }],
+  brokers_total: 2, header: "📇 <b>Рассылка</b>", brokers_empty: "" })).status, 200);
+await env.DB.prepare("DELETE FROM kv WHERE k='py_alive'").run();       // Python спит
+sent.length = 0;
+await handleUpdate(env, msg(BTN.offers));
+assert.equal(sent.filter(x => x.m === "sendMediaGroup").length, 1);       // вариант с фото — альбомом
+assert.ok(sent.some(x => x.text === "🏠 Вариант 2 из 3" && x.reply_markup.inline_keyboard[0][2].callback_data === "t:n:8"));
+assert.ok(sent.some(x => /ещё <b>1<\/b>/.test(x.text || "")));          // честная подводка к третьему
+assert.equal((await drain()).length, 0);                                  // Python не понадобился
+sent.length = 0;
+await handleUpdate(env, { update_id: ++uid, callback_query: { id: "o2", data: "off2", message: { message_id: 5, chat: { id: +OWNER } } } });
+assert.equal(sent.filter(x => x.m === "sendMessage" && /Вариант/.test(x.text || "")).length, 2);
+// «Мимо» → причины сразу; выбор причины уходит Python
+sent.length = 0;
+await handleUpdate(env, { update_id: ++uid, callback_query: { id: "n1", data: "t:n:8", message: { message_id: 6, chat: { id: +OWNER } } } });
+assert.ok(JSON.stringify(sent.at(-1).reply_markup).includes("t:r:8:p"));
+await handleUpdate(env, { update_id: ++uid, callback_query: { id: "n2", data: "t:r:8:p", message: { message_id: 7, chat: { id: +OWNER } } } });
+assert.equal((await drain()).at(-1).callback_query.data, "t:r:8:p");
+// рассылка по одному: следующий маклер — сразу, статус уходит Python с пометкой _worker_done
+sent.length = 0;
+await handleUpdate(env, msg(BTN.brokers));
+assert.match(texts().at(-2), /Рассылка/); assert.match(texts().at(-1), /📇 <b>А<\/b>[\s\S]*в очереди ещё 1/);
+await handleUpdate(env, { update_id: ++uid, callback_query: { id: "w1", data: "bw:tel:1", message: { message_id: 8, chat: { id: +OWNER } } } });
+assert.match(texts().at(-1), /📇 <b>Б<\/b>[\s\S]*Написано 1/);
+assert.ok(sent.some(x => x.m === "editMessageReplyMarkup" && x.message_id === 8));
+await handleUpdate(env, { update_id: ++uid, callback_query: { id: "w2", data: "bx:tel:2", message: { message_id: 9, chat: { id: +OWNER } } } });
+assert.match(texts().at(-1), /Рассылка закончена: написано 1, пропущено 1/);
+got = await drain();
+assert.deepEqual(got.map(u => [u.callback_query.data, u.callback_query._worker_done]), [["bw:tel:1", true], ["bx:tel:2", true]]);
+// запрос поменялся после снимка — к Python, чтобы ссылки не ушли со старым текстом
+{ const row = await env.DB.prepare("SELECT v FROM kv WHERE k=?").bind("iv:" + OWNER).first();
+  const ivx = JSON.parse(row.v); ivx.sentAt = Date.now() + 60e3;
+  await env.DB.prepare("UPDATE kv SET v=? WHERE k=?").bind(JSON.stringify(ivx), "iv:" + OWNER).run(); }
+await handleUpdate(env, msg(BTN.brokers));
+assert.equal((await drain()).at(-1).message.text, "/brokers");
+
 // ── /svc без ключа — 401
 r = await worker.fetch(new Request("https://w.example/svc/updates"), env, { waitUntil() {} });
 assert.equal(r.status, 401);
