@@ -724,23 +724,24 @@ const GREET = {
     "e.g. \"buy a 2-room flat in the centre up to $50,000, mortgage needed\". Everything else is in the buttons below.",
 };
 // Профиль бота: «О боте» (до 120 символов) и экран до Start (до 512) — русский по умолчанию, узбекский отдельно
+export const AVATAR_URL = "https://raw.githubusercontent.com/shokhrukh-xp/rent-radar/main/docs/brand/rano_avatar_navy.jpg";
 export const PROFILE = {
   name: { "": "Ra'no · поиск жилья", uz: "Ra'no · uy qidirish" },
   short: {
-    "": "Ra'no 👋 ищет квартиры в Ташкенте сама и через маклеров. Аренда, покупка и честный разбор цен.",
-    uz: "Ra'no 👋 Toshkentda kvartirani o'zi va maklerlar orqali qidiradi. Ijara, sotib olish, narx tahlili.",
+    "": "Ra'no 👋 сама ищет квартиры в Ташкенте на сайтах и в Telegram-каналах, а если пусто — подключит маклеров.",
+    uz: "Ra'no 👋 Toshkentda kvartirani saytlar va Telegram-kanallardan o'zi qidiradi, topilmasa — maklerlarni ulaydi.",
   },
   long: {
     "": "Привет! Я Ra'no 👋 — ИИ-ассистент, которая обожает квартиры в Ташкенте: аренда и покупка.\n\n" +
-      "🔎 Ищу сама — каждый день смотрю Uybor, Realt24, Joymee, Realting, Yangiuylar и Telegram-каналы. " +
-      "Выгодное приношу сразу, остальное — подборкой.\n" +
-      "📇 Через маклеров — готовлю запрос, вы отправляете его в пару нажатий, варианты приходят карточками.\n" +
+      "🔎 Сначала ищу сама — каждый день смотрю Uybor, Realt24, Joymee, Realting, Yangiuylar и Telegram-каналы. " +
+      "Выгодное приношу сразу, остальное — подборкой, без повторов.\n" +
+      "📇 На сайтах пусто — подключу маклеров: запрос готовлю я, вы отправляете в пару нажатий.\n" +
       "📊 К каждому варианту — честный разбор цены: дешевле рынка или кто-то загнул 😉\n\n" +
       "Маклерам: жмите Start и присылайте варианты — передам клиенту сразу 🙌",
     uz: "Salom! Men Ra'no 👋 — Toshkentdagi kvartiralarni juda yaxshi ko'radigan AI-yordamchiman: ijara va sotib olish.\n\n" +
-      "🔎 O'zim qidiraman — har kuni Uybor, Realt24, Joymee, Realting, Yangiuylar va Telegram-kanallarni ko'raman. " +
-      "Zo'r variantlarni darhol, qolganini to'plam qilib yuboraman.\n" +
-      "📇 Maklerlar orqali — so'rov tayyorlayman, siz uni bir-ikki bosishda yuborasiz.\n" +
+      "🔎 Avval o'zim qidiraman — har kuni Uybor, Realt24, Joymee, Realting, Yangiuylar va Telegram-kanallarni ko'raman. " +
+      "Zo'rini darhol, qolganini to'plamda yuboraman.\n" +
+      "📇 Saytlarda topilmasa — maklerlarni ulayman: so'rovni men tayyorlayman.\n" +
       "📊 Har bir variantga — halol narx tahlili 😉\n\n" +
       "Maklerlar uchun: Start ni bosing va variantlarni yuboring — mijozga darhol yetkazaman 🙌",
   },
@@ -1304,16 +1305,30 @@ export default {
           text: "Кнопки — внизу: «🔎 Ищет Ra'no», «📇 Через маклеров», «⋯ Ещё». " +
                 "Команды запоминать не нужно — можно и просто написать, что хотите сделать." });
         const profile = {};
-        for (const lang of ["", "uz"]) {
+        // и для ru/en явно: старые языковые описания из BotFather перекрывают общее
+        for (const lang of ["", "ru", "en", "uz"]) {
           const lc = lang ? { language_code: lang } : {};
-          profile[lang || "ru"] = {
-            name: (await tg(env, "setMyName", { name: PROFILE.name[lang], ...lc })).ok,
-            short: (await tg(env, "setMyShortDescription", { short_description: PROFILE.short[lang], ...lc })).ok,
-            long: (await tg(env, "setMyDescription", { description: PROFILE.long[lang], ...lc })).ok,
+          const t = lang === "uz" ? "uz" : "";
+          profile[lang || "default"] = {
+            name: (await tg(env, "setMyName", { name: PROFILE.name[t], ...lc })).ok,
+            short: (await tg(env, "setMyShortDescription", { short_description: PROFILE.short[t], ...lc })).ok,
+            long: (await tg(env, "setMyDescription", { description: PROFILE.long[t], ...lc })).ok,
+            now: (await tg(env, "getMyShortDescription", lc)).result?.short_description,
           };
         }
         const info = await tg(env, "getWebhookInfo", {});
         return json({ hook, menu, menuOwner, cmds, cmdsAll, profile, info: info.result });
+      }
+      if (p === "/svc/avatar") {         // аватар бота (Bot API 9.4 setMyProfilePhoto) из публичного репо
+        const src = url.searchParams.get("src") || AVATAR_URL;
+        const img = await fetch(src);
+        if (!img.ok) return json({ ok: false, error: `картинка не скачалась: ${img.status}` });
+        const form = new FormData();
+        form.append("photo", JSON.stringify({ type: "static", photo: "attach://avatar" }));
+        form.append("avatar", new Blob([await img.arrayBuffer()], { type: "image/jpeg" }), "avatar.jpg");
+        const r = await fetch(`https://api.telegram.org/bot${await botToken(env)}/setMyProfilePhoto`, { method: "POST", body: form });
+        const res = await r.json().catch(() => ({ ok: false }));
+        return json({ ok: res.ok, description: res.description });
       }
       if (p === "/svc/try") {            // проверка промпта вживую, без Telegram и очереди
         if (url.searchParams.get("reset")) await kvSet(env, "iv:test", emptyIv());
