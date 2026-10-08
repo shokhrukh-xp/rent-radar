@@ -575,7 +575,7 @@ def parse_offer(text, cfg):
     """Грубый разбор сообщения маклера (до подключения модели)."""
     rr = _rr()
     t = text or ""
-    val, cur = rr.extract_price_from_text(t)
+    val, cur = rr.extract_price_from_text(t, max_usd=3_000_000)   # маклеры шлют и продажу
     out = {
         "rooms": rr.extract_rooms(t),
         "district": rr.canon_district(t),
@@ -627,6 +627,81 @@ def save_offer(store, cfg, chat_id, name, text, photos, media_group=None):
          p["floor"], p["floors_total"], now))
     store.conn.commit()
     return cur.lastrowid, True
+
+
+def merge_into_offer(store, cfg, oid, text, photos):
+    """Маклер прислал вариант по частям (текст, потом фото) — дописываем в тот же."""
+    o = get_offer(store, oid)
+    if not o:
+        return
+    new_text = "\n".join(x for x in [(o["text"] or "").strip(), (text or "").strip()] if x)
+    ph = (o["photos"] + photos)[:8]
+    p = parse_offer(new_text, cfg)
+    sets = {"text": new_text, "photos": json.dumps(ph)}
+    for k in ("district", "rooms", "area", "price_usd", "price_raw", "floor", "floors_total"):
+        if not o.get(k) and p.get(k):
+            sets[k] = p[k]
+    store.conn.execute("UPDATE broker_offers SET " + ", ".join(f"{k}=?" for k in sets)
+                       + " WHERE oid=?", (*sets.values(), oid))
+    store.conn.commit()
+
+
+def pending_answer(store, chat_id, hours=72):
+    """Вариант этого маклера, по которому ждём ответ на уточнения."""
+    since = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+    r = store.conn.execute(
+        "SELECT oid FROM broker_offers WHERE broker_chat=? AND status='asked' "
+        "AND asked_at>=? ORDER BY asked_at DESC LIMIT 1", (str(chat_id), since)).fetchone()
+    return r[0] if r else None
+
+
+def attach_answer(cfg, store, oid, text):
+    """Ответ маклера на «уточните детали» — к своему варианту, а не новой карточкой."""
+    rr = _rr()
+    o = get_offer(store, oid)
+    if not o:
+        return
+    note = ((o.get("note") or "") + "\n" if o.get("note") else "") + "💬 " + (text or "").strip()[:600]
+    p = parse_offer(text, cfg)
+    sets = {"note": note[-1500:], "replied_at": datetime.now(timezone.utc).isoformat(),
+            "status": "shortlist"}
+    for k in ("area", "floor", "floors_total", "price_usd", "price_raw"):
+        if not o.get(k) and p.get(k):
+            sets[k] = p[k]
+    store.conn.execute("UPDATE broker_offers SET " + ", ".join(f"{k}=?" for k in sets)
+                       + " WHERE oid=?", (*sets.values(), oid))
+    store.conn.commit()
+    o = get_offer(store, oid)
+    rr.tg_call(cfg, "sendMessage", {
+        "chat_id": cfg["telegram_chat_id"], "parse_mode": "HTML",
+        "text": f"💬 <b>Ответ маклера по варианту #{oid}</b>\n\n"
+                f"{rr.escape_html((text or '').strip()[:800])}\n\n"
+                + offer_card(store, cfg, o)[:1500],
+        "reply_markup": json.dumps({"inline_keyboard": [[
+            {"text": "📋 Шортлист", "callback_data": "s:ref"}]]}, ensure_ascii=False)})
+
+
+def request_summary(store) -> str:
+    """Суть запроса для маклера, который пришёл в бота сам: что ищем, без просьб и ссылок."""
+    text = store.get_kv("request_text") or ""
+    keep = []
+    for line in text.split("\n"):
+        if line.startswith(("Если есть", "Mos variant", "Варианты присылайте", "Variantlarni",
+                            "Нажмите на ссылку", "Havolani", "Спасибо", "Rahmat", "Либо мне", "Yoki")):
+            continue
+        keep.append(line.replace("Здравствуйте! ", "").replace("Assalomu alaykum! ", ""))
+    return "\n".join(x for x in keep if x.strip())
+
+
+def broker_welcome(cfg, store) -> str:
+    a = cfg.get("assistant_name", "Ra'no")
+    want = request_summary(store)
+    return (f"Здравствуйте! Я {a}, ИИ-ассистент — веду поиск жилья для клиента.\n"
+            + (f"\nКлиент ищет:\n{want}\n" if want else "")
+            + "\nПришлите подходящие варианты: фото, точный адрес, этаж, площадь, цену и "
+              "комиссию — одним сообщением или альбомом. Я сразу передам клиенту.\n\n"
+              f"Assalomu alaykum! Men {a}, AI-yordamchiman. Mos variantlarni yuboring: foto, "
+              "manzil, qavat, maydon, narx va vositachilik haqi.")
 
 
 def get_offer(store, oid):
@@ -798,17 +873,32 @@ def _more_teaser(cfg, remaining):
         "reply_markup": json.dumps(kb, ensure_ascii=False)})
 
 
-def decline_text(cfg):
+DECLINE_REASONS = [
+    ("p", "💸 Дорого", "клиенту дороговато — если есть дешевле, присылайте"),
+    ("d", "📍 Район", "не подходит район"),
+    ("c", "🛠 Состояние", "не подошло состояние квартиры"),
+    ("a", "📐 Площадь/планировка", "не подошли площадь или планировка"),
+    ("x", "Без причины", ""),
+]
+
+
+def decline_text(cfg, reason=""):
     a = cfg.get("assistant_name", "Ra'no")
-    return (f"Спасибо! Этот вариант клиенту не подошёл. "
+    why = next((w for c, _, w in DECLINE_REASONS if c == reason), "")
+    return (f"Спасибо! Этот вариант клиенту не подошёл" + (f": {why}" if why else "") + ". "
             f"Если появится что-то ближе к параметрам — присылайте, посмотрю. "
             f"({a})")
+
+
+def can_message_broker(o) -> bool:
+    """Боту можно писать только маклерам, которые сами писали в бота (не пересланным)."""
+    return str(o.get("broker_chat") or "").lstrip("-").isdigit()
 
 
 def handle_triage_cb(data, cfg, store):
     rr = _rr()
     _, kind, sid = data.split(":", 2)
-    oid = int(sid)
+    oid = int(sid.partition(":")[0])
     o = get_offer(store, oid)
     if not o:
         return "Вариант не найден", True
@@ -819,10 +909,25 @@ def handle_triage_cb(data, cfg, store):
     if kind == "l":
         set_offer_status(store, oid, "later")
         return "Отложено", True
+    if kind == "n":                          # сначала причина — от неё зависит подсказка маклеру
+        rows = [[{"text": t, "callback_data": f"t:r:{oid}:{c}"}] for c, t, _ in DECLINE_REASONS]
+        rr.tg_call(cfg, "sendMessage", {
+            "chat_id": cfg["telegram_chat_id"],
+            "text": f"Почему вариант #{oid} не подошёл?"
+                    + (" Маклеру уйдёт вежливый отказ с подсказкой." if can_message_broker(o) else ""),
+            "reply_markup": json.dumps({"inline_keyboard": rows}, ensure_ascii=False)})
+        return "Выберите причину", True
+    reason = sid.partition(":")[2] if kind == "r" else ""
     set_offer_status(store, oid, "rejected")
-    rr.tg_call(cfg, "sendMessage",
-               {"chat_id": o["broker_chat"], "text": decline_text(cfg)})
-    return "Отказ отправлен маклеру", True
+    if reason:
+        store.conn.execute("UPDATE broker_offers SET note=COALESCE(note,'') || ? WHERE oid=?",
+                           (f"\n👎 {next((t for c, t, _ in DECLINE_REASONS if c == reason), '')}", oid))
+        store.conn.commit()
+    if can_message_broker(o):
+        rr.tg_call(cfg, "sendMessage",
+                   {"chat_id": o["broker_chat"], "text": decline_text(cfg, reason)})
+        return "Отказ отправлен маклеру", True
+    return "Отмечено: мимо", True
 
 
 # ============================================== ШОРТЛИСТ И ЗАПРОСЫ ======
@@ -896,7 +1001,7 @@ def show_shortlist(cfg, store, message_id=None):
     rr.tg_call(cfg, "sendMessage", payload)
 
 
-def details_question(o, cfg=None):
+def details_question(o, cfg=None, deal="rent"):
     cfg = cfg or {}
     a = cfg.get("assistant_name", "Ra'no")
     q = [f"Здравствуйте! Это {a}, ассистент по поиску жилья.",
@@ -916,9 +1021,15 @@ def details_question(o, cfg=None):
         items.append("Какой этаж и этажность?")
     if not o["area"]:
         items.append("Какая площадь?")
-    if not o["price_usd"]:
-        items.append("Какая цена в месяц?")
-    items += ["Размер депозита и комиссии?", "Когда можно посмотреть?"]
+    if deal == "buy":
+        if not o["price_usd"]:
+            items.append("Какая цена и есть ли торг?")
+        items += ["Документы в порядке (кадастр, собственник)? Возможна ипотека?",
+                  "Размер комиссии?", "Когда можно посмотреть?"]
+    else:
+        if not o["price_usd"]:
+            items.append("Какая цена в месяц?")
+        items += ["Размер депозита и комиссии?", "Когда можно посмотреть?"]
     q += [f"{i}. {t}" for i, t in enumerate(items, 1)]
     return "\n".join(q)
 
@@ -928,14 +1039,19 @@ def request_details(cfg, store):
     sel = store.get_kv("sl_sel", []) or []
     if not sel:
         return "Ничего не выбрано"
+    deal = (get_anketa(store).get("ans") or {}).get("deal", "rent")
     sent = 0
+    manual = []
     for oid in sel:
         o = get_offer(store, oid)
         if not o:
             continue
+        if not can_message_broker(o):        # пересланный из WhatsApp — уточняете сами
+            manual.append(o)
+            continue
         ok = rr.tg_call(cfg, "sendMessage",
                         {"chat_id": o["broker_chat"],
-                         "text": details_question(o, cfg)})
+                         "text": details_question(o, cfg, deal)})
         if ok is not None:
             store.conn.execute(
                 "UPDATE broker_offers SET status='asked', asked_at=? WHERE oid=?",
@@ -943,8 +1059,12 @@ def request_details(cfg, store):
             sent += 1
     store.conn.commit()
     store.set_kv("sl_sel", [])
-    rr.send_telegram(cfg, f"📨 Запросы отправлены маклерам по {sent} вариантам.\n"
-                          "Ответы придут сюда же — обновлю карточки.")
+    if sent:
+        rr.send_telegram(cfg, f"📨 Запросы отправлены маклерам по {sent} вариантам.\n"
+                              "Ответы придут сюда же — прикреплю к карточкам.")
+    for o in manual:                         # готовый текст, чтобы отправить самому
+        rr.send_telegram(cfg, f"✍️ Вариант #{o['oid']} пришёл не через бота — уточните сами, "
+                              f"текст готов:\n\n<code>{rr.escape_html(details_question(o, cfg, deal))}</code>")
     return f"Отправлено: {sent}"
 
 

@@ -168,6 +168,40 @@ assert.equal(q.result[0].message.text, "/start p1DBB");
 await handleUpdate(env, msg("ещё что-то"));
 assert.match(texts().at(-1), /попробуйте ещё раз/);
 
+// ── маклер: мгновенный ответ (не на /start), не чаще раза в 20 минут; пометка _acked для Python
+let qq = await (await svc("/svc/updates?after=0")).json();
+let lastId = qq.result.length ? qq.result.at(-1).update_id : 0;
+sent.length = 0;
+await handleUpdate(env, msg("/start", "4242"));
+assert.equal(sent.filter(x => x.m === "sendMessage" && String(x.chat_id) === "4242").length, 0);
+await handleUpdate(env, msg("Продаю 2 комн Мирабад 44 000$", "4242"));
+await handleUpdate(env, { update_id: ++uid, message: { message_id: uid, chat: { id: 4242 }, photo: [{ file_id: "x" }] } });
+const acks = sent.filter(x => x.m === "sendMessage" && String(x.chat_id) === "4242");
+assert.equal(acks.length, 1); assert.match(acks[0].text, /получила/);
+qq = await (await svc(`/svc/updates?after=${lastId}`)).json();
+assert.equal(qq.result.length, 3);
+assert.equal(qq.result[0].message._acked, undefined);            // /start — без ответа воркера
+assert.equal(qq.result[1].message._acked, true);
+assert.equal(qq.result[2].message._acked, true);                 // второе — в окне 20 минут
+lastId = qq.result.at(-1).update_id;
+
+// ── владелец пересылает вариант / фото / режим /add → в очередь как _owner_offer, не в интервью
+await handleUpdate(env, msg("2-комн Яккасарай 41 000$", OWNER, { forward_origin: { type: "user", sender_user: { first_name: "Б" } } }));
+await handleUpdate(env, { update_id: ++uid, message: { message_id: uid, chat: { id: +OWNER }, from: { id: +OWNER }, photo: [{ file_id: "p" }] } });
+await handleUpdate(env, msg("/add"));
+assert.match(texts().at(-1), /Перешлите или вставьте вариант/);
+await handleUpdate(env, msg("Вот ещё вариант от маклера: 3/9, 55 м², 47 000$"));
+await handleUpdate(env, msg("/done"));
+qq = await (await svc(`/svc/updates?after=${lastId}`)).json();
+assert.equal(qq.result.length, 3);
+assert.ok(qq.result.every(u => u.message._owner_offer === true));
+lastId = qq.result.at(-1).update_id;
+geminiQueue.push({ reply: "Поняла.", ready: false, set: [] });
+await handleUpdate(env, msg("а бюджет можно до 50"));            // после /done — снова интервью
+assert.equal(texts().at(-1), "Поняла.");
+qq = await (await svc(`/svc/updates?after=${lastId}`)).json();
+assert.equal(qq.result.length, 0);
+
 // ── /svc без ключа — 401
 r = await worker.fetch(new Request("https://w.example/svc/updates"), env, { waitUntil() {} });
 assert.equal(r.status, 401);

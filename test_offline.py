@@ -665,9 +665,16 @@ assert rr.tg_phone_link("901112233") == "https://t.me/+998901112233"
 
 # кнопки воронки
 sb = rr.default_settings()
-assert rr.handle_callback("bw:olx:77", sb, bs, cfg)[0] == "Отмечено: написал"
-assert rr.handle_callback("bx:olx:88", sb, bs, cfg)[0] == "Пропущен"
+_NX = []
+with mock.patch.object(rr, "tg_call", lambda c, m, pl, **k: (_NX.append((m, pl)), {"ok": True})[1]), \
+        mock.patch.object(rr, "send_telegram", lambda c, t: (_NX.append(("t", {"text": t})), True)[1]):
+    assert rr.handle_callback("bw:olx:77", sb, bs, cfg, message_id=5)[0] == "✅ Отмечено"
+    assert rr.handle_callback("bx:olx:88", sb, bs, cfg)[0] == "Пропущен"
 assert bs.brokers(status="skipped", with_phone=False)[0]["bid"] == "olx:88"
+assert any(m == "editMessageReplyMarkup" for m, _ in _NX)          # кнопки пройденной карточки убраны
+assert bs.get_kv("outreach")["sent"] == 1 and bs.get_kv("outreach")["skipped"] == 1
+nxt = [pl for m, pl in _NX if m == "sendMessage" and "reply_markup" in pl]
+assert nxt and "Отправил → следующий" in nxt[-1]["reply_markup"] and "Мак" in nxt[-1]["text"]   # следующий в очереди
 assert "'b'" in str(rr.kb_menu(cfg, sb))
 bdb.unlink(missing_ok=True)
 
@@ -854,10 +861,15 @@ with mock.patch.object(rr, "tg_call", fake_tg):
     t, _ = cg.handle_triage_cb("t:l:2", cfg, cs)
     assert cg.get_offer(cs, 2)["status"] == "later"
     SENT.clear()
-    t, _ = cg.handle_triage_cb("t:n:3", cfg, cs)
-    assert cg.get_offer(cs, 3)["status"] == "rejected"
-    assert any(m == "sendMessage" and "не подошёл" in pl.get("text", "")
-               for m, pl in SENT), "маклеру должен уйти отказ"
+    t, _ = cg.handle_triage_cb("t:n:3", cfg, cs)                 # сначала — причина
+    assert cg.get_offer(cs, 3)["status"] != "rejected"
+    rk = json.loads(SENT[-1][1]["reply_markup"])["inline_keyboard"]
+    assert [r[0]["callback_data"] for r in rk][0] == "t:r:3:p"
+    SENT.clear()
+    t, _ = cg.handle_triage_cb("t:r:3:p", cfg, cs)
+    assert cg.get_offer(cs, 3)["status"] == "rejected" and "Дорого" in cg.get_offer(cs, 3)["note"]
+    dec = [pl for m, pl in SENT if m == "sendMessage" and "не подошёл" in pl.get("text", "")]
+    assert dec and "дешевле" in dec[0]["text"], "маклеру — отказ с подсказкой"
 
 # --- шортлист: сводка, выбор, запрос деталей ---
 cg.set_offer_status(cs, 4, "shortlist")
@@ -898,7 +910,68 @@ with mock.patch.object(rr, "tg_call", fake_tg):
                            "ORDER BY oid DESC LIMIT 1").fetchone()
     assert last[1] == "Шухрат" and json.loads(last[2]) == ["big"]   # взят крупный размер
     assert any(str(pl.get("chat_id")) == "777" for m, pl in SENT)   # маклеру ушло спасибо
-    assert cs.get_kv("pending_offer")["oid"] == last[0]
+    assert str(last[0]) in cs.get_kv("pending_offers")
+
+# --- путь маклера: /start, части одного варианта, ответ на уточнения, мгновенный ответ воркера ---
+cg.save_anketa(cs, {"i": 99, "ans": {"lang": "ru", "deal": "buy", "object": "flat", "city": "tashkent",
+                                     "rooms": ["2"], "budget": "45000", "contact": "bot"}})
+cs.set_kv("request_text", cg.compose_request(cfg, cs))
+with mock.patch.object(rr, "tg_call", fake_tg):
+    SENT.clear()
+    n_before = cs.conn.execute("SELECT COUNT(*) FROM broker_offers").fetchone()[0]
+    rr.handle_broker_message(cfg, cs, {"chat": {"id": 888, "first_name": "Нодир"}, "text": "/start"})
+    assert cs.conn.execute("SELECT COUNT(*) FROM broker_offers").fetchone()[0] == n_before   # не «вариант»
+    w = [pl for m, pl in SENT if str(pl.get("chat_id")) == "888"][0]["text"]
+    assert "Клиент ищет" in w and "купить квартиру" in w and "45 000" in w
+    SENT.clear()
+    rr.handle_broker_message(cfg, cs, {"chat": {"id": 888}, "text": "Продаю 2 комн Мирабад 52 м2 44 000$",
+                                       "_acked": True})
+    assert not [pl for m, pl in SENT if str(pl.get("chat_id")) == "888"]   # воркер уже ответил
+    rr.handle_broker_message(cfg, cs, {"chat": {"id": 888}, "photo": [{"file_id": "f1", "width": 9, "height": 9}]})
+    rr.handle_broker_message(cfg, cs, {"chat": {"id": 888}, "text": "5/9 этаж, ремонт, документы готовы"})
+    rows = cs.conn.execute("SELECT oid, text, photos, floor FROM broker_offers WHERE broker_chat='888'").fetchall()
+    assert len(rows) == 1, rows                                     # три сообщения — один вариант
+    oid8 = rows[0][0]
+    assert json.loads(rows[0][2]) == ["f1"] and rows[0][3] == 5 and "ремонт" in rows[0][1]
+    # показ — когда маклер замолчал
+    SENT.clear()
+    rr.flush_pending_offer(cfg, cs)
+    assert not SENT                                                  # ещё пишет
+    pend = cs.get_kv("pending_offers"); pend[str(oid8)]["at"] -= 100; cs.set_kv("pending_offers", pend)
+    with mock.patch.object(rr, "send_offer_analysis", lambda *a, **k: SENT.append(("analysis", {}))):
+        rr.flush_pending_offer(cfg, cs)
+    assert any("Вариант" in (pl.get("text", "") + pl.get("caption", "") + pl.get("media", "")) for _, pl in SENT)
+    assert ("analysis", {}) in SENT                                  # покупка → анализ цены
+    # уточнения → ответ прикрепляется к варианту
+    cg.set_offer_status(cs, oid8, "shortlist"); cs.set_kv("sl_sel", [oid8])
+    SENT.clear()
+    cg.request_details(cfg, cs)
+    q = [pl for m, pl in SENT if str(pl.get("chat_id")) == "888"][0]["text"]
+    assert "ипотека" in q and "в месяц" not in q                     # вопросы про покупку
+    SENT.clear()
+    rr.handle_broker_message(cfg, cs, {"chat": {"id": 888}, "text": "Да актуально, Мирабад ул. Шахрисабз 5, торг есть"})
+    assert cs.conn.execute("SELECT COUNT(*) FROM broker_offers WHERE broker_chat='888'").fetchone()[0] == 1
+    o8 = cg.get_offer(cs, oid8)
+    assert o8["status"] == "shortlist" and "Шахрисабз" in o8["note"]
+    assert any("Ответ маклера по варианту" in pl.get("text", "") for m, pl in SENT)
+
+# --- владелец пересылает вариант из WhatsApp/другого чата ---
+with mock.patch.object(rr, "tg_call", fake_tg), \
+        mock.patch.object(rr, "send_telegram", lambda c, t: (SENT.append(("t", {"text": t})), True)[1]):
+    SENT.clear()
+    rr.handle_owner_offer(cfg, cs, {"chat": {"id": 1}, "_owner_offer": True,
+                                    "forward_origin": {"type": "user", "sender_user": {"first_name": "Бахтиёр"}},
+                                    "text": "2-комн Яккасарай 48 м² 41 000$, 3/5"})
+    rr.handle_owner_offer(cfg, cs, {"chat": {"id": 1}, "_owner_offer": True,
+                                    "forward_origin": {"type": "user", "sender_user": {"first_name": "Бахтиёр"}},
+                                    "photo": [{"file_id": "w1", "width": 9, "height": 9}]})
+    ow = cs.conn.execute("SELECT oid, broker_name, broker_chat, photos, price_usd FROM broker_offers "
+                         "WHERE broker_chat='owner'").fetchall()
+    assert len(ow) == 1 and ow[0][1] == "Бахтиёр" and json.loads(ow[0][3]) == ["w1"] and ow[0][4] == 41000
+    assert any("Принято" in pl.get("text", "") for _, pl in SENT)
+    SENT.clear()
+    cg.handle_triage_cb(f"t:r:{ow[0][0]}:d", cfg, cs)              # «мимо» — боту писать некому
+    assert not [pl for m, pl in SENT if str(pl.get("chat_id")) == "owner"]
 
 st = cg.concierge_status(cs)
 assert "Консьерж" in st and "маклеров" in st
@@ -1501,7 +1574,7 @@ with _mk.patch.object(rr, "tg_call", lambda c, m, pl, **k: (CARDS.append(pl), {"
     rr.send_broker_cards(cfg, bs, rr.default_settings(), text="Хочу купить квартиру")
 head = CARDS[0]["text"]
 assert "по продаже" in head, head
-assert len(CARDS) == 1 + len(sale)                                # заголовок + все продающие
+assert len(CARDS) == 2 and "в очереди ещё" in CARDS[1]["text"]   # заголовок + первый маклер (по одному)
 assert all("$" not in c.get("text", "") for c in CARDS[1:])      # без арендного диапазона цен
 bs.set_kv("anketa", {"ans": {"deal": "rent"}})
 CARDS.clear()
@@ -1588,3 +1661,27 @@ kb = json.loads(card["reply_markup"])["inline_keyboard"]
 assert kb[0][0]["url"].startswith("https://t.me/agency_a?text=") and "WhatsApp" not in json.dumps(kb, ensure_ascii=False)
 rdb.unlink(missing_ok=True)
 print("OK — Realting: агентства Ташкента с Telegram, обход каталога по кругу, карточка с Telegram-ссылкой")
+
+# ============ путь клиента: параметры чата управляют поиском покупки; маклеры — по районам ============
+edb = Path("/tmp/test_eff.db"); edb.unlink(missing_ok=True)
+es = rr.Store(edb)
+base = rr.deep_merge(rr.DEFAULT_CONFIG, {"sale_search": {"enabled": False}})
+assert rr.effective_sale_cfg(base, es) is base                       # нет покупки в чате — как в настройках
+es.set_kv("anketa", {"ans": {"deal": "buy", "object": "flat", "rooms": ["2", "4"], "budget": "50000",
+                             "districts": [], "note": "ближе к центру"}})
+ss = rr.effective_sale_cfg(base, es)["sale_search"]
+assert ss["enabled"] and ss["max_price_usd"] == 50000 and ss["rooms"] == [2, 4, 5, 6]
+assert ss["districts"] == base["sale_search"]["districts"]            # районов нет — центр из настроек
+es.set_kv("anketa", {"ans": {"deal": "buy", "object": "flat", "rooms": [], "budget": "60000",
+                             "districts": [str(rr.DISTRICT_LIST.index("Чиланзар"))]}})
+ss = rr.effective_sale_cfg(base, es)["sale_search"]
+assert ss["districts"] == ["Чиланзар"] and ss["rooms"] == []
+es.set_kv("anketa", {"ans": {"deal": "rent", "budget": "900"}})
+assert rr.effective_sale_cfg(base, es) is base
+# ранжирование: сначала маклеры нужных районов
+es.set_kv("anketa", {"ans": {"deal": "buy", "districts": [], "note": "ближе к центру"}})
+es.upsert_broker("a", "X", "Окраина", "901000001", 90, "Сергели", None, deal="sale")
+es.upsert_broker("b", "X", "Центр", "901000002", 5, "Мирабад", None, deal="sale")
+assert [b["bid"] for b in rr.ranked_brokers(es, "sale")] == ["b", "a"]
+edb.unlink(missing_ok=True)
+print("OK — путь клиента: параметры чата → поиск покупки, маклеры нужных районов первыми")

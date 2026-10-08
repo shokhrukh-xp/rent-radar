@@ -280,12 +280,13 @@ def _num(s: str):
     return int(digits) if digits else None
 
 
-def extract_price_from_text(text: str):
-    """Возвращает (value, currency) или (None, None)."""
+def extract_price_from_text(text: str, max_usd: int = 20000):
+    """Возвращает (value, currency) или (None, None).
+    max_usd: для аренды цена выше $20 000 — ошибка; для продажи (варианты маклеров) — норма."""
     m = PRICE_USD_RE.search(text or "")
     if m:
         v = _num(m.group(1))
-        if v and 30 <= v <= 20000:
+        if v and 30 <= v <= max_usd:
             return v, "USD"
     m = PRICE_UZS_RE.search(text or "")
     if m:
@@ -1166,6 +1167,7 @@ HELP_TEXT = """🏠 <b>Ra'no</b> — ваш ассистент по поиску
 /rooms — комнатность
 /district — районы
 /new — описать поиск заново: просто напишите, что ищете, своими словами
+/add — добавить вариант, который маклер прислал в WhatsApp (перешлите или вставьте текст и фото)
 /anketa — то же; /steps — старый пошаговый режим
 /shortlist — шортлист и запрос деталей у маклеров
 /offers — показать новые варианты от маклеров
@@ -1358,6 +1360,7 @@ def handle_command(text: str, settings: dict, store, cfg: dict):
     low = t.lower()
     cmd, _, arg = low.partition(" ")
     cmd = cmd.split("@")[0]
+    cfg = effective_sale_cfg(cfg, store)       # покупка из чата меняет и поиск /sale
     arg = arg.strip()
     raw_arg = t.partition(" ")[2].strip()
 
@@ -1555,6 +1558,28 @@ BROKER_POST_WORDS = ("агентств", "риелт", "риэлт", "макле
 def _sale_post(text: str) -> bool:
     low = (text or "").lower()
     return any(w in low for w in SALE_POST_WORDS) and not any(w in low for w in RENT_POST_WORDS)
+
+
+def effective_sale_cfg(cfg, store):
+    """Покупка из чата-интервью → поиск Uybor по тем же параметрам.
+    Без районов в запросе — районы из настроек (по умолчанию центр)."""
+    ans = (store.get_kv("anketa") or {}).get("ans") or {}
+    if ans.get("deal") != "buy" or ans.get("object", "flat") != "flat":
+        return cfg
+    ss = dict(cfg.get("sale_search") or {})
+    b = str(ans.get("budget") or "")
+    if b.isdigit() and int(b) >= 5000:
+        ss["max_price_usd"] = int(b)
+    rooms = sorted({int(r) for r in (ans.get("rooms") or []) if str(r).isdigit()})
+    if 4 in rooms:
+        rooms += [5, 6]
+    ss["rooms"] = rooms
+    ds = [DISTRICT_LIST[int(i)] for i in (ans.get("districts") or [])
+          if str(i).isdigit() and int(i) < len(DISTRICT_LIST)]
+    if ds:
+        ss["districts"] = ds
+    ss["enabled"] = True
+    return {**cfg, "sale_search": ss}
 
 
 def harvest_sale_brokers(cfg, store) -> int:
@@ -1848,54 +1873,92 @@ def request_deal(store) -> str:
     return "sale" if ans.get("deal") == "buy" else "rent"
 
 
+CENTRAL_DISTRICTS = {"Мирабад", "Яккасарай", "Шайхантахур", "Юнусабад"}
+
+
+def request_districts(store) -> set:
+    """Районы из запроса; «ближе к центру» без районов — центральные."""
+    ans = (store.get_kv("anketa") or {}).get("ans") or {}
+    ds = {DISTRICT_LIST[int(i)] for i in (ans.get("districts") or []) if str(i).isdigit()
+          and int(i) < len(DISTRICT_LIST)}
+    if not ds and "центр" in str(ans.get("note") or "").lower():
+        ds = set(CENTRAL_DISTRICTS)
+    return ds
+
+
+def ranked_brokers(store, deal, limit=200):
+    """Сначала те, кто работает в нужных районах, потом — у кого больше объявлений."""
+    want = request_districts(store)
+    pool = store.brokers(status="new", with_phone=True, limit=limit, deal=deal)
+    return sorted(pool, key=lambda b: (-len(want & set(b["districts"])), -(b["ads"] or 0)))
+
+
 def send_broker_cards(cfg, store, settings, limit=10, text=None, deal=None) -> str:
-    """Карточки маклеров с готовым текстом — отправка в один тап."""
+    """Рассылка маклерам — по одному: карточка, «Отправил → следующий», прогресс."""
     text = text or store.get_kv("request_text") or outreach_text(cfg, settings)
     deal = deal or request_deal(store)
     kind = "по продаже" if deal == "sale" else "по аренде"
-    pool = store.brokers(status="new", with_phone=True, limit=limit, deal=deal)
+    pool = ranked_brokers(store, deal)
     total, withph, by_status = store.broker_stats(deal)
     if not pool:
-        send_telegram(cfg, f"📇 Новых маклеров {kind} с телефоном пока нет.\n"
-                           f"Всего в базе {kind}: {total} (с телефоном {withph}).\n"
+        send_telegram(cfg, f"📇 Новых маклеров {kind} с контактом пока нет.\n"
+                           f"Всего в базе {kind}: {total} (с контактом {withph}).\n"
                            + ("Собираю их с Realt24, Joymee, Realting, Uybor и из Telegram-каналов — "
                               "загляните через час: /brokers" if deal == "sale" else
                               "База пополняется по мере работы радара — попробуйте позже."))
         return ""
-
+    store.set_kv("outreach", {"deal": deal, "text": text, "sent": 0, "skipped": 0})
+    want = request_districts(store)
     send_telegram(cfg, (
-        f"📇 <b>Рассылка маклерам {kind}</b> — {len(pool)} контактов\n"
-        f"В базе {kind} всего {total}, с телефоном {withph}, уже написано "
-        f"{by_status.get('contacted', 0)}.\n\n"
-        "Текст запроса (собран из ваших фильтров):\n"
+        f"📇 <b>Рассылка маклерам {kind}</b> — в очереди {len(pool)}\n"
+        + (f"Сначала те, кто работает в районах: {escape_html(', '.join(sorted(want)))}.\n" if want else "")
+        + f"Уже написано раньше: {by_status.get('contacted', 0)}.\n\n"
+        "Текст запроса:\n"
         f"<code>{escape_html(text)}</code>\n\n"
-        "Жмите «WhatsApp» — откроется чат с уже набранным текстом, "
-        "останется нажать отправить."))
-
-    for b in pool:
-        d = ", ".join(b["districts"][:3]) or "—"
-        price = ""
-        if deal == "rent" and b["min_price"] and b["max_price"]:
-            price = f" · ${b['min_price']:.0f}–{b['max_price']:.0f}"
-        phone = b["phone"] or ""
-        contact = (f"📞 {escape_html(fmt_phone(phone) if len(phone) == 9 else phone)}" if phone
-                   else f"✈️ @{escape_html(b['tg'])}")
-        body = (f"📇 <b>{escape_html(b['name'] or 'Маклер')}</b> · {escape_html(b['source'])}\n"
-                f"{contact}\n"
-                f"🏘 {b['ads']} объявлений" + (f" · районы: {escape_html(d)}" if b["districts"] else "") + price)
-        first_row = ([{"text": "📱 WhatsApp с текстом", "url": wa_link(phone, text)},
-                      {"text": "✈️ Telegram", "url": tg_phone_link(phone)}] if phone else
-                     [{"text": "✈️ Telegram с текстом", "url": tg_user_link(b["tg"], text)}])
-        kb = {"inline_keyboard": [
-            first_row,
-            [{"text": "✅ Написал", "callback_data": f"bw:{b['bid']}"},
-             {"text": "🚫 Пропустить", "callback_data": f"bx:{b['bid']}"}],
-        ]}
-        tg_call(cfg, "sendMessage", {
-            "chat_id": cfg["telegram_chat_id"], "text": body, "parse_mode": "HTML",
-            "reply_markup": json.dumps(kb, ensure_ascii=False)})
-        time.sleep(0.7)
+        "Покажу маклеров по одному: жмите «WhatsApp» или «Telegram» — откроется чат с "
+        "набранным текстом, отправьте и нажмите «✅ Отправил → следующий». "
+        "Ответы маклеров из WhatsApp можно переслать сюда: /add"))
+    send_next_broker(cfg, store)
     return ""
+
+
+def send_next_broker(cfg, store) -> bool:
+    """Следующая карточка маклера в рассылке."""
+    st = store.get_kv("outreach") or {}
+    deal = st.get("deal") or request_deal(store)
+    text = st.get("text") or store.get_kv("request_text") or ""
+    pool = ranked_brokers(store, deal)
+    if not pool:
+        send_telegram(cfg, f"✅ Рассылка закончена: написано {st.get('sent', 0)}, "
+                           f"пропущено {st.get('skipped', 0)}. Новые маклеры добавляются сами — "
+                           "/brokers через пару часов.")
+        return False
+    b = pool[0]
+    d = ", ".join(b["districts"][:3]) or "—"
+    price = ""
+    if deal == "rent" and b["min_price"] and b["max_price"]:
+        price = f" · ${b['min_price']:.0f}–{b['max_price']:.0f}"
+    phone = b["phone"] or ""
+    contact = (f"📞 {escape_html(fmt_phone(phone) if len(phone) == 9 else phone)}" if phone
+               else f"✈️ @{escape_html(b['tg'])}")
+    done = st.get("sent", 0) + st.get("skipped", 0)
+    body = (f"📇 <b>{escape_html(b['name'] or 'Маклер')}</b> · {escape_html(b['source'])}\n"
+            f"{contact}\n"
+            f"🏘 {b['ads']} объявлений" + (f" · районы: {escape_html(d)}" if b["districts"] else "") + price
+            + f"\n\n<i>Написано {st.get('sent', 0)} · пропущено {st.get('skipped', 0)} · "
+              f"в очереди ещё {len(pool) - 1}</i>")
+    first_row = ([{"text": "📱 WhatsApp с текстом", "url": wa_link(phone, text)},
+                  {"text": "✈️ Telegram", "url": tg_phone_link(phone)}] if phone else
+                 [{"text": "✈️ Telegram с текстом", "url": tg_user_link(b["tg"], text)}])
+    kb = {"inline_keyboard": [
+        first_row,
+        [{"text": "✅ Отправил → следующий", "callback_data": f"bw:{b['bid']}"},
+         {"text": "⏭ Пропустить", "callback_data": f"bx:{b['bid']}"}],
+    ]}
+    tg_call(cfg, "sendMessage", {
+        "chat_id": cfg["telegram_chat_id"], "text": body, "parse_mode": "HTML",
+        "reply_markup": json.dumps(kb, ensure_ascii=False)})
+    return bool(done >= 0)
 
 
 def run_search(cfg, store, settings, limit=5, days=7) -> str:
@@ -2028,7 +2091,16 @@ def handle_callback(data: str, settings: dict, store, cfg: dict, message_id=None
     if act in ("bw", "bx") or data.startswith(("bw:", "bx:")):
         kind, _, bid = data.partition(":")
         store.broker_status(bid, "contacted" if kind == "bw" else "skipped")
-        return ("Отмечено: написал" if kind == "bw" else "Пропущен"), None
+        st = store.get_kv("outreach") or {}
+        st["sent" if kind == "bw" else "skipped"] = st.get("sent" if kind == "bw" else "skipped", 0) + 1
+        store.set_kv("outreach", st)
+        if message_id:                       # кнопки у пройденной карточки больше не нужны
+            tg_call(cfg, "editMessageReplyMarkup", {"chat_id": cfg["telegram_chat_id"],
+                                                    "message_id": message_id,
+                                                    "reply_markup": json.dumps({"inline_keyboard": []})},
+                    quiet=True)
+        send_next_broker(cfg, store)
+        return ("✅ Отмечено" if kind == "bw" else "Пропущен"), None
     if act == "s":
         send_telegram(cfg, status_text(cfg, settings, store))
         return "Статус отправлен", None
@@ -2052,6 +2124,38 @@ def broker_ack(cfg) -> str:
             f"uchun yozaman. Parametrlarga mos variantlar bo'lsa, yuboravering.")
 
 
+BROKER_QUIET_SECONDS = 40      # маклер замолчал — значит, вариант дописан, показываем
+
+
+def _offer_parts(msg):
+    text = (msg.get("text") or msg.get("caption") or "").strip()
+    photos = []
+    ph = msg.get("photo") or []
+    if ph:                                  # берём самый крупный размер
+        best = max(ph, key=lambda x: (x.get("width") or 0) * (x.get("height") or 0))
+        if best.get("file_id"):
+            photos.append(best["file_id"])
+    return text, photos
+
+
+def intake_offer(cfg, store, group, chat_key, name, text, photos, media_group=None):
+    """Общий приём варианта: склейка частей от одного отправителя, отложенный показ.
+    Возвращает (oid, новый_ли)."""
+    pend = store.get_kv("pending_offers") or {}
+    now = time.time()
+    frag = next((int(k) for k, v in pend.items()
+                 if v.get("group") == group and now - v.get("at", 0) < 180), None)
+    if frag and not media_group:
+        concierge.merge_into_offer(store, cfg, frag, text, photos)
+        pend[str(frag)]["at"] = now
+        store.set_kv("pending_offers", pend)
+        return frag, False
+    oid, is_new = concierge.save_offer(store, cfg, chat_key, name, text, photos, media_group)
+    pend[str(oid)] = {"at": now, "group": group}
+    store.set_kv("pending_offers", pend)
+    return oid, is_new
+
+
 def handle_broker_message(cfg, store, msg):
     """Маклер пишет боту напрямую — сохраняем вариант и показываем владельцу."""
     chat = msg.get("chat") or {}
@@ -2060,49 +2164,106 @@ def handle_broker_message(cfg, store, msg):
         return
     name = " ".join(x for x in [chat.get("first_name"), chat.get("last_name")] if x) \
         or chat.get("username") or "маклер"
-    text = (msg.get("text") or msg.get("caption") or "").strip()
-
-    photos = []
-    ph = msg.get("photo") or []
-    if ph:                                  # берём самый крупный размер
-        best = max(ph, key=lambda x: (x.get("width") or 0) * (x.get("height") or 0))
-        if best.get("file_id"):
-            photos.append(best["file_id"])
-
+    text, photos = _offer_parts(msg)
     if not text and not photos:
         return
 
+    # /start, «здравствуйте» — это не вариант: знакомим и показываем, что ищем
+    if not photos and (text.startswith("/") or (len(text) < 25 and not re.search(r"\d", text))):
+        last = store.get_kv(f"welcomed:{chat_id}") or 0
+        if text.startswith("/") or time.time() - last > 6 * 3600:
+            tg_call(cfg, "sendMessage", {"chat_id": chat_id,
+                                         "text": concierge.broker_welcome(cfg, store)})
+            store.set_kv(f"welcomed:{chat_id}", time.time())
+        return
+
+    # ответ на «уточните детали» — к своему варианту
+    if not photos:
+        asked = concierge.pending_answer(store, chat_id)
+        if asked:
+            concierge.attach_answer(cfg, store, asked, text)
+            if not msg.get("_acked"):
+                tg_call(cfg, "sendMessage", {"chat_id": chat_id,
+                                             "text": "Спасибо, передала клиенту! / Rahmat, mijozga yetkazdim!"})
+            return
+
     try:
-        oid, is_new = concierge.save_offer(store, cfg, chat_id, name, text, photos,
-                                           msg.get("media_group_id"))
+        oid, is_new = intake_offer(cfg, store, f"chat:{chat_id}", chat_id, name, text, photos,
+                                   msg.get("media_group_id"))
     except Exception as e:
         log.warning("не сохранил вариант от %s: %s", chat_id, e)
         return
-
-    # если по этому маклеру ждали ответ на уточнение — отметим
-    store.conn.execute(
-        "UPDATE broker_offers SET replied_at=? WHERE broker_chat=? AND status='asked'",
-        (datetime.now(timezone.utc).isoformat(), str(chat_id)))
-    store.conn.commit()
-
-    log.info("вариант #%s от %s (%s)", oid, name, "новый" if is_new else "доп. фото")
-    if is_new:
+    log.info("вариант #%s от %s (%s)", oid, name, "новый" if is_new else "дополнение")
+    if is_new and not msg.get("_acked"):      # воркер уже ответил маклеру мгновенно
         tg_call(cfg, "sendMessage", {"chat_id": chat_id, "text": broker_ack(cfg)})
-        store.set_kv("pending_offer", {"oid": oid, "at": time.time()})
 
 
-def flush_pending_offer(cfg, store):
-    """Показываем вариант через пару секунд — чтобы дособрались фото альбома."""
-    p = store.get_kv("pending_offer")
-    if not p:
+def forward_name(msg) -> str:
+    """От кого пересланное сообщение (чат WhatsApp не перешлёшь — тогда «вручную»)."""
+    fo = msg.get("forward_origin") or {}
+    u = fo.get("sender_user") or msg.get("forward_from") or {}
+    if u:
+        return " ".join(x for x in [u.get("first_name"), u.get("last_name")] if x) or u.get("username") or ""
+    if fo.get("sender_user_name") or msg.get("forward_sender_name"):
+        return fo.get("sender_user_name") or msg.get("forward_sender_name")
+    c = fo.get("chat") or fo.get("sender_chat") or msg.get("forward_from_chat") or {}
+    return c.get("title") or ""
+
+
+def handle_owner_offer(cfg, store, msg):
+    """Владелец переслал или вставил вариант (из WhatsApp, другого чата) — в карточки."""
+    text, photos = _offer_parts(msg)
+    if not text and not photos:
         return
-    if time.time() - p.get("at", 0) < 4:
+    who = forward_name(msg) or "добавлено вручную"
+    oid, is_new = intake_offer(cfg, store, f"owner:{who}", "owner", who, text, photos,
+                               msg.get("media_group_id"))
+    if is_new:
+        send_telegram(cfg, f"📥 Принято — вариант #{oid}. Допришлите фото или текст, если есть, "
+                           "карточка появится, как только закончите.")
+
+
+def flush_pending_offer(cfg, store, sale_store=None):
+    """Показываем вариант, когда отправитель замолчал: альбом и текст дособраны."""
+    pend = store.get_kv("pending_offers") or {}
+    if not pend:
         return
-    store.set_kv("pending_offer", None)
+    quiet = cfg.get("broker_quiet_seconds", BROKER_QUIET_SECONDS)
+    now = time.time()
+    due = [k for k, v in pend.items() if now - v.get("at", 0) >= quiet]
+    if not due:
+        return
+    for k in due:
+        pend.pop(k, None)
+    store.set_kv("pending_offers", pend)
+    for k in due:
+        try:
+            concierge.notify_offer(cfg, store, int(k))
+            if request_deal(store) == "sale":
+                send_offer_analysis(cfg, store, int(k), sale_store)
+        except Exception as e:
+            log.warning("не показал вариант %s: %s", k, e)
+
+
+def send_offer_analysis(cfg, store, oid, sale_store=None) -> bool:
+    """Покупка: к варианту маклера — тот же анализ цены, что к объявлениям Uybor."""
+    o = concierge.get_offer(store, oid)
+    if not o or not o.get("price_usd") or o["price_usd"] < 5000:
+        return False
+    own = sale_store is None
+    st = sale_store or Store(SALE_DB_PATH)
     try:
-        concierge.notify_offer(cfg, store, p["oid"])
+        l = {"key": f"offer:{oid}", "price_usd": o["price_usd"], "area": o.get("area"),
+             "rooms": o.get("rooms"), "district": o.get("district"), "text": o.get("text") or "",
+             "title": "", "created_at": o.get("created_at"), "floor": o.get("floor")}
+        text = market.format_analysis(st, l, cfg)
     except Exception as e:
-        log.warning("не показал вариант %s: %s", p.get("oid"), e)
+        log.info("анализ варианта #%s не удался: %s", oid, e)
+        return False
+    finally:
+        if own:
+            st.conn.close()
+    return bool(text) and send_telegram(cfg, text.replace("📊 <b>Анализ</b>", f"📊 <b>Анализ варианта #{oid}</b>", 1))
 
 
 RUN_DEADLINE = None      # до какого времени (epoch) живёт этот процесс — сообщаем воркеру
@@ -2171,6 +2332,11 @@ def process_commands(cfg: dict, store, long_poll: int = 0) -> dict:
         chat = msg.get("chat") or {}
         if str(chat.get("id") or "") != str(cfg["telegram_chat_id"]):
             handle_broker_message(cfg, store, msg)   # это маклер прислал вариант
+            continue
+
+        if msg.get("_owner_offer"):          # воркер: владелец переслал/вставил вариант
+            handle_owner_offer(cfg, store, msg)
+            changed = True
             continue
 
         wad = msg.get("web_app_data") or {}
@@ -2707,7 +2873,7 @@ def run():
     log.info("Rent Radar запущен%s. Источники: %s. Лимит: $%s",
              mode, ", ".join(enabled) or "нет", cfg["max_price_usd"])
 
-    sale_cfg = cfg.get("sale_search") or {}
+    sale_cfg = effective_sale_cfg(cfg, store).get("sale_search") or {}   # покупка из чата включает поиск
     sale_store, next_sale = None, 0.0
     next_sale_brokers = 0.0
     if sale_cfg.get("enabled") and (sale_cfg.get("uybor") or {}).get("enabled", True):
@@ -2721,7 +2887,7 @@ def run():
         now = time.time()
         # long-poll: команды и нажатия кнопок ловим за ~секунду, а не раз в проход
         settings = process_commands(cfg, store, long_poll=0 if once else 20)
-        flush_pending_offer(cfg, store)
+        flush_pending_offer(cfg, store, sale_store)
         eff = effective_cfg(cfg, settings)
         market = analyst.market_stats(store)
         for name, scfg in enabled.items():
@@ -2811,7 +2977,7 @@ def run():
         if sale_store is not None and (once or now >= next_sale):
             next_sale = now + (sale_cfg.get("uybor") or {}).get("interval_seconds", 600)
             try:
-                n = run_sale_search(cfg, sale_store, settings)
+                n = run_sale_search(effective_sale_cfg(cfg, store), sale_store, settings)
                 if n:
                     log.info("[продажа] новых: %d", n)
             except Exception as e:      # поиск покупки не должен ронять радар

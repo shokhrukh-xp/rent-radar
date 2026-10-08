@@ -335,6 +335,24 @@ const WAIT = {
   en: "⏳ Starting the main module — the reply will come in 1–2 minutes.",
 };
 const ivKey = chat => "iv:" + chat;
+
+// Маклеру — ответ сразу (раньше ждал, пока проснётся Python). Не на /start и не на «здравствуйте»:
+// там Python присылает знакомство с запросом клиента. Не чаще раза в 20 минут на маклера.
+export const BROKER_ACK = "Здравствуйте! Я Ra'no, ИИ-ассистент — веду поиск жилья для клиента и передаю ему варианты.\n" +
+  "Спасибо, получила! Если подойдёт, вернусь с уточнениями. Присылайте ещё, что есть по параметрам.\n\n" +
+  "Assalomu alaykum! Men Ra'no, AI-yordamchiman — mijoz uchun uy-joy qidiryapman. Rahmat, qabul qilindi! " +
+  "Mos kelsa, aniqlik kiritish uchun yozaman. Parametrlarga mos variantlar bo'lsa, yuboravering.";
+async function brokerAck(env, msg) {
+  const text = String(msg.text || msg.caption || "").trim();
+  const looksOffer = !!msg.photo || text.length >= 25 || /\d/.test(text);
+  if (text.startsWith("/") || !looksOffer) return false;
+  const k = "ack:" + msg.chat.id;
+  if (Date.now() - (await kvGet(env, k, 0)) < 20 * 60e3) { msg._acked = true; return false; }
+  await kvSet(env, k, Date.now());
+  const r = await tg(env, "sendMessage", { chat_id: msg.chat.id, text: BROKER_ACK });
+  if (r && r.ok !== false) msg._acked = true;
+  return true;
+}
 const emptyIv = () => ({ ans: {}, hist: [], sent: "", mode: "" });
 
 export function summary(a) {
@@ -439,6 +457,7 @@ export async function handleUpdate(env, upd) {
   if (!msg) { await enqueue(env, upd); return "queued"; }
   const chat = String(msg.chat?.id ?? "");
   if (chat !== owner) {                         // маклер прислал вариант
+    await brokerAck(env, msg);                  // ответ сразу, даже если Python спит
     await queueAndWake(env, upd);
     return "queued";
   }
@@ -446,10 +465,31 @@ export async function handleUpdate(env, upd) {
   const lang = (msg.from?.language_code || "").slice(0, 2);
   const L = lang === "uz" ? "uz" : "ru";     // язык интерфейса Telegram часто английский — это не язык клиента
 
+  // вариант, который владелец пересылает или вставляет (из WhatsApp и других чатов)
+  const forwarded = !!(msg.forward_origin || msg.forward_from || msg.forward_sender_name || msg.forward_from_chat);
+  const ivNow = await kvGet(env, ivKey(chat), null);
+  const adding = ivNow && ivNow.mode === "add" && Date.now() - (ivNow.addAt || 0) < 15 * 60e3;
+  if (!text.startsWith("/") && (forwarded || msg.photo || msg.document || adding)) {
+    if (adding) { ivNow.addAt = Date.now(); await kvSet(env, ivKey(chat), ivNow); }
+    upd.message = { ...msg, _owner_offer: true };
+    await queueAndWake(env, upd, chat, WAIT[L]);
+    return "owner_offer";
+  }
+
   if (text.startsWith("/")) {
     const [c0, ...rest] = text.split(/\s+/);
     const cmd = c0.toLowerCase().split("@")[0];
     const arg = rest.join(" ");
+    if (cmd === "/add" || cmd === "/done") {
+      const iv = ivNow || emptyIv();
+      iv.mode = cmd === "/add" ? "add" : ""; iv.addAt = Date.now();
+      await kvSet(env, ivKey(chat), iv);
+      await say(env, chat, cmd === "/add"
+        ? "📥 Перешлите или вставьте вариант от маклера — текст, фото, можно несколькими сообщениями. " +
+          "Когда закончите — /done (или просто подождите 15 минут)."
+        : "✅ Готово. Пишите, если что-то поменять в поиске.");
+      return "add_mode";
+    }
     if (START_CMDS.includes(cmd) && !(cmd === "/start" && /^p/.test(arg))) {
       await startInterview(env, chat, cmd !== "/start" && cmd !== "/params", L);
       return "interview";
