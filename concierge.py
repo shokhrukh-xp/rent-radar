@@ -1573,7 +1573,7 @@ def send_app_button(cfg, store, text=None):
 
 ALLOWED = {f["k"] for f in STEPS} | {
     "budget_max", "floor_min", "floor_max", "city_other", "lang",
-    "date_from", "date_to", "movein_date", "note"}
+    "date_from", "date_to", "movein_date", "note", "districts_any"}
 
 
 # ---- компактный код параметров для deep link /start p<код> ---------------

@@ -2,7 +2,7 @@
 // D1 эмулируется на node:sqlite, Telegram / Gemini / GitHub — подменой fetch.
 import { DatabaseSync } from "node:sqlite";
 import assert from "node:assert/strict";
-import worker, { parseNum, applyPatch, essentialsOk, finalAns, handleUpdate, summary, pairsToSet, OWNER_KB, BROKER_KB, BTN, parseWhen, PROFILE } from "../src/index.js";
+import worker, { parseNum, applyPatch, essentialsOk, finalAns, handleUpdate, summary, pairsToSet, OWNER_KB, BROKER_KB, BTN, parseWhen, PROFILE, interviewCore } from "../src/index.js";
 
 function d1() {
   const s = new DatabaseSync(":memory:");
@@ -404,6 +404,12 @@ await handleUpdate(env, { update_id: ++uid, callback_query: { id: "m6", data: "s
 assert.equal(sent.filter(x => x.m === "editMessageText").length, nEdits);
 assert.match(texts().at(-1), /Шортлист/);
 
+// «любой район» — отдельная пометка, чтобы поиск по сайтам шёл по всему городу, а не по центру
+{ const ivA = { ans: { deal: "buy", city: "tashkent" }, hist: [], sent: "", mode: "" };
+  geminiQueue.push({ reply: "Xo'p, весь город!", ready: false, set: [{ k: "districts", v: "any" }] });
+  await interviewCore(env, ivA, "любой район");
+  assert.equal(ivA.ans.districts_any, true); assert.deepEqual(ivA.ans.districts || [], []);
+  assert.equal(finalAns(ivA.ans).districts_any, true); }
 // ── разговор понимает, что у бота есть: подборка с номерами, шортлист — и делает, а не обещает
 { const row = await env.DB.prepare("SELECT v FROM kv WHERE k='ui'").first();
   const ui = JSON.parse(row.v);

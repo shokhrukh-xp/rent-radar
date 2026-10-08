@@ -123,6 +123,8 @@ def fetch_joymee(ss, cfg, store):
     if len(rooms) == 1:
         base["room_quantity"] = rooms[0]
     dists = [JOYMEE_DISTRICTS[d] for d in (ss.get("districts") or []) if d in JOYMEE_DISTRICTS] or [None]
+    if len(dists) >= 8:                        # почти весь город — одним запросом без фильтра района
+        dists = [None]
     items = {}
     for did in dists:
         for page in (1, 2):

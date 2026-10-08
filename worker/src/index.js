@@ -93,7 +93,7 @@ export function finalAns(a) {
   if (out.deal === "rent" && /^d/.test(out.term || "")) delete out.term;
   if (out.deal === "daily" && out.term && !/^d/.test(out.term)) delete out.term;
   if (out.deal === "buy") { delete out.term; delete out.who; delete out.pets; delete out.furniture; }
-  if (out.city !== "tashkent") out.districts = [];
+  if (out.city !== "tashkent") { out.districts = []; delete out.districts_any; }
   if (out.city !== "other") delete out.city_other;
   return out;
 }
@@ -813,6 +813,8 @@ export async function interviewCore(env, iv, text, ctx = null) {
   const roomsAny = Array.isArray(set.rooms) && set.rooms.includes("any");
   iv.ans = applyPatch(iv.ans, set, out.clear);
   if (roomsAny) iv.ans.rooms_any = true; else if (set.rooms) delete iv.ans.rooms_any;
+  const distAny = Array.isArray(set.districts) && set.districts.some(d => String(d).toLowerCase() === "any");
+  if (distAny) iv.ans.districts_any = true; else if (set.districts) delete iv.ans.districts_any;
   const reply = String(out.reply || "").trim().slice(0, 3500) || "Расскажите, что ищем? 🙂";
   iv.hist.push({ r: "u", t: String(text).slice(0, 1000) }, { r: "a", t: reply });
   iv.hist = iv.hist.slice(-20);

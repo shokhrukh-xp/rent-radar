@@ -2042,6 +2042,8 @@ assert not ys.get_kv("fresh_start")
 with mock.patch.object(rr, "SALE_DB_PATH", xdb):
     snap = rr.ui_snapshot(cfg, ys, rr.default_settings())
 assert set(snap["screens"]) == {"/rano", "/via"}
+ys.set_kv("anketa", {"ans": {"deal": "buy", "object": "flat", "rooms": ["2"], "budget": "50000", "districts_any": True}})
+assert len(rr.effective_sale_cfg(cfg, ys)["sale_search"]["districts"]) == len(rr.DISTRICT_LIST)   # «любой район» — весь город
 c = snap["ctx"]
 assert c["last_pick"][0]["n"] == 1 and c["last_pick"][0]["key"].startswith("sale:") and "<" not in c["last_pick"][0]["text"]
 assert "shortlist" in c and "today" in c and "pick_pending" in c

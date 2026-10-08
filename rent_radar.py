@@ -1591,6 +1591,8 @@ def effective_sale_cfg(cfg, store):
           if str(i).isdigit() and int(i) < len(DISTRICT_LIST)]
     if ds:
         ss["districts"] = ds
+    elif ans.get("districts_any"):              # клиент сказал «любой район» — весь Ташкент
+        ss["districts"] = list(DISTRICT_LIST)
     ss["mortgage"] = "ипотек" in str(ans.get("note") or "").lower() or ans.get("payment") == "mortgage"
     ss["enabled"] = True
     return {**cfg, "sale_search": ss}
