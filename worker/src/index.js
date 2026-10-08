@@ -726,7 +726,7 @@ const GREET = {
 // Профиль бота: «О боте» (до 120 символов) и экран до Start (до 512) — русский по умолчанию, узбекский отдельно
 export const AVATAR_URL = "https://raw.githubusercontent.com/shokhrukh-xp/rent-radar/main/docs/brand/rano_avatar_navy.jpg";
 export const PROFILE = {
-  name: { "": "Ra'no · поиск жилья", uz: "Ra'no · uy qidirish" },
+  name: { "": "Ra'no", uz: "Ra'no" },
   short: {
     "": "Ra'no 👋 сама ищет квартиры в Ташкенте на сайтах и в Telegram-каналах, а если пусто — подключит маклеров.",
     uz: "Ra'no 👋 Toshkentda kvartirani saytlar va Telegram-kanallardan o'zi qidiradi, topilmasa — maklerlarni ulaydi.",
