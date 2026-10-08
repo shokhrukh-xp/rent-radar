@@ -1,0 +1,27 @@
+# Разово передаёт токен бота из GitHub Secrets в воркер Ra'no (worker/),
+# чтобы его не нужно было копировать руками. Запуск: Actions → «Worker token» → Run.
+name: Worker token
+on:
+  workflow_dispatch: {}
+permissions:
+  contents: read
+jobs:
+  push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send bot token to worker
+        env:
+          TOK: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          KEY: ${{ secrets.RADAR_WORKER_KEY }}
+          URL: https://rano-bot.sh-pulatov.workers.dev/svc/bot-token
+        run: |
+          python3 - <<'PY'
+          import json, os, urllib.request
+          req = urllib.request.Request(os.environ["URL"], method="POST",
+              data=json.dumps({"token": os.environ["TOK"]}).encode(),
+              headers={"x-svc": os.environ["KEY"], "content-type": "application/json"})
+          try:
+              r = urllib.request.urlopen(req, timeout=30); print(r.status, r.read().decode())
+          except urllib.error.HTTPError as e:
+              print(e.code, e.read().decode()); raise SystemExit(1)
+          PY

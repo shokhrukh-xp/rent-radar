@@ -229,8 +229,16 @@ async function enqueue(env, upd) {
 }
 
 // ───────────────────────────── Telegram ─────────────────────────────
+// Токен бота: секрет BOT_TOKEN, а если его нет — переданный из GitHub Secrets
+// разовым workflow (.github/workflows/worker-token.yml → POST /svc/bot-token).
+let tokenCache = null;
+async function botToken(env) {
+  if (env.BOT_TOKEN) return env.BOT_TOKEN;
+  if (!tokenCache) tokenCache = await kvGet(env, "bot_token", null);
+  return tokenCache;
+}
 export async function tg(env, method, body) {
-  const r = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/${method}`, {
+  const r = await fetch(`https://api.telegram.org/bot${await botToken(env)}/${method}`, {
     method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
   return r.json().catch(() => ({ ok: false }));
 }
@@ -440,6 +448,14 @@ export default {
         const r = await d.prepare("SELECT id, upd FROM queue WHERE id>? ORDER BY id LIMIT 100").bind(after).all();
         const updates = (r.results || []).map(x => ({ ...JSON.parse(x.upd), update_id: x.id }));
         return json({ ok: true, result: updates });
+      }
+      if (p === "/svc/bot-token" && req.method === "POST") {
+        const b = await req.json().catch(() => ({}));
+        const t = String(b.token || "").trim();
+        const me = await (await fetch(`https://api.telegram.org/bot${t}/getMe`)).json().catch(() => ({}));
+        if (!me.ok) return json({ ok: false, error: "токен не принят Telegram" }, 400);
+        await kvSet(env, "bot_token", t); tokenCache = t;
+        return json({ ok: true, username: me.result.username });
       }
       if (p === "/svc/bye") { await kvSet(env, "py_alive", null); return json({ ok: true }); }
       if (p === "/svc/setup") {
