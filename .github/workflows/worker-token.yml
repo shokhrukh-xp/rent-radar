@@ -19,7 +19,8 @@ jobs:
           import json, os, urllib.request
           req = urllib.request.Request(os.environ["URL"], method="POST",
               data=json.dumps({"token": os.environ["TOK"]}).encode(),
-              headers={"x-svc": os.environ["KEY"], "content-type": "application/json"})
+              headers={"x-svc": os.environ["KEY"], "content-type": "application/json",
+                       "user-agent": "rano-radar/1.0"})  # Cloudflare режет UA urllib (1010)
           try:
               r = urllib.request.urlopen(req, timeout=30); print(r.status, r.read().decode())
           except urllib.error.HTTPError as e:

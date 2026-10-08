@@ -1804,7 +1804,8 @@ RUN_DEADLINE = None      # до какого времени (epoch) живёт �
 def worker_call(cfg, path, params=None, timeout=20):
     try:
         r = requests.get(cfg["worker_url"] + path, params=params or {}, timeout=timeout,
-                         headers={"x-svc": cfg.get("worker_key", "")})
+                         headers={"x-svc": cfg.get("worker_key", ""),
+                                  "user-agent": "rano-radar/1.0"})
         if r.status_code != 200:
             log.error("Воркер %s %s: %s", path, r.status_code, r.text[:200])
             return None
