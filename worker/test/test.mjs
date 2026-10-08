@@ -364,6 +364,25 @@ assert.deepEqual(OWNER_KB.keyboard.map(r => r.map(b => b.text)), [[BTN.rano, BTN
 await handleUpdate(env, { update_id: ++uid, callback_query: { id: "L1", data: "L:s:sale:joymee:77", message: { message_id: 60, chat: { id: +OWNER } } } });
 assert.match(sent.filter(x => x.m === "answerCallbackQuery").at(-1).text, /шортлист/);
 got = await drain(); assert.equal(got.at(-1).callback_query.data, "L:s:sale:joymee:77"); assert.equal(got.at(-1).callback_query._toast_done, true);
+// кнопки меняются сразу: 👍 → «✅ В шортлисте», «Мимо» → «Не подходит — убрала»
+const cardKb = { inline_keyboard: [[{ text: "👍 В шортлист", callback_data: "L:s:sale:joymee:78" }, { text: "👎 Мимо", callback_data: "L:n:sale:joymee:78" }]] };
+await handleUpdate(env, { update_id: ++uid, callback_query: { id: "L2", data: "L:n:sale:joymee:78", message: { message_id: 61, chat: { id: +OWNER }, reply_markup: cardKb } } });
+let mk = sent.filter(x => x.m === "editMessageReplyMarkup").at(-1);
+assert.equal(mk.message_id, 61); assert.match(JSON.stringify(mk.reply_markup), /Не подходит — убрала/);
+assert.match(sent.filter(x => x.m === "answerCallbackQuery").at(-1).text, /Убрала/);
+assert.equal((await drain()).at(-1).callback_query.data, "L:n:sale:joymee:78");
+await handleUpdate(env, { update_id: ++uid, callback_query: { id: "L3", data: "L:s:sale:joymee:78", message: { message_id: 62, chat: { id: +OWNER }, reply_markup: cardKb } } });
+mk = sent.filter(x => x.m === "editMessageReplyMarkup").at(-1);
+assert.match(JSON.stringify(mk.reply_markup), /✅ В шортлисте/); assert.doesNotMatch(JSON.stringify(mk.reply_markup), /Мимо/);
+assert.match(JSON.stringify(mk.reply_markup), /s:show/);
+const pickKb = { inline_keyboard: [[{ text: "👍 1", callback_data: "L:s:a" }, { text: "👍 2", callback_data: "L:s:b" }]] };
+await handleUpdate(env, { update_id: ++uid, callback_query: { id: "L4", data: "L:s:b", message: { message_id: 63, chat: { id: +OWNER }, reply_markup: pickKb } } });
+mk = sent.filter(x => x.m === "editMessageReplyMarkup").at(-1);
+assert.deepEqual(mk.reply_markup.inline_keyboard[0].map(b => b.text), ["👍 1", "✅ 2"]);         // в подборке — только нажатый номер
+await drain();
+const nq = (await drain()).length;
+await handleUpdate(env, { update_id: ++uid, callback_query: { id: "L5", data: "L:x", message: { message_id: 63, chat: { id: +OWNER } } } });
+assert.equal((await drain()).length, 0);
 // «Шортлист» из другого сообщения — новым сообщением, не правкой чужого
 const nEdits = sent.filter(x => x.m === "editMessageText").length;
 await handleUpdate(env, { update_id: ++uid, callback_query: { id: "m6", data: "s:show", message: { message_id: 50, chat: { id: +OWNER } } } });

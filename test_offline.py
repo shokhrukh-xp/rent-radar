@@ -1984,6 +1984,9 @@ with mock.patch.object(rr, "tg_call", xtg), mock.patch.object(rr, "SALE_DB_PATH"
     t1, _ = rr.handle_callback("L:s:sale:joymee:77", rr.default_settings(), ys, cfg, 1)
     t2, _ = rr.handle_callback("L:s:sale:joymee:77", rr.default_settings(), ys, cfg, 1)
 assert "В шортлисте" in t1 and t2 == "Уже в шортлисте"
+with mock.patch.object(rr, "SALE_DB_PATH", xdb):
+    t3, _ = rr.handle_callback("L:n:sale:realting:555", rr.default_settings(), ys, cfg, 1)
+assert "Убрала" in t3 and "sale:realting:555" in rr.Store(xdb).get_kv("sale_dismissed")
 so = cg.get_offer(ys, ys.conn.execute("SELECT oid FROM broker_offers WHERE broker_chat='site:sale:joymee:77'").fetchone()[0])
 assert so["status"] == "shortlist" and so["price_usd"] == 45000 and so["extra"]["url"].endswith("/77")
 card = cg.offer_card(ys, cfg, so)

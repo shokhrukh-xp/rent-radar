@@ -2218,8 +2218,16 @@ def handle_callback(data: str, settings: dict, store, cfg: dict, message_id=None
                 sst.conn.close()
         if not row:
             return "Объявление не найдено", None
-        if kind == "n":
-            return "Убрала", None
+        if kind == "n":                        # «мимо»: из подборки убрать, отметить — пригодится для оценки
+            sst = Store(SALE_DB_PATH)
+            try:
+                sst.set_kv("sale_pick", [x for x in (sst.get_kv("sale_pick") or []) if x["key"] != key])
+                gone = (sst.get_kv("sale_dismissed") or [])[-500:]
+                if key not in gone:
+                    sst.set_kv("sale_dismissed", gone + [key])
+            finally:
+                sst.conn.close()
+            return "👎 Убрала — больше не покажу", None
         oid, new = concierge.add_site_offer(cfg, store, json.loads(row[0] or "{}"))
         return ("👍 В шортлисте — там уточнение, просмотр, заметки" if new else "Уже в шортлисте"), None
     if d == "R:pick":
