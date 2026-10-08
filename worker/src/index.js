@@ -310,7 +310,7 @@ export const OWNER_KB = { keyboard: [[{ text: BTN.search }, { text: BTN.offers }
 export const BROKER_KB = { keyboard: [[{ text: BTN.what }]], resize_keyboard: true, is_persistent: true,
   input_field_placeholder: "Пришлите вариант: фото, адрес, этаж, цена" };
 const MORE_MENU = { inline_keyboard: [
-  [{ text: "📥 Добавить вариант из WhatsApp", callback_data: "cmd:/add" }],
+  [{ text: "💬 Маклер ответил мне в WhatsApp", callback_data: "cmd:/add" }],
   [{ text: "📋 Шортлист", callback_data: "cmd:/shortlist" }, { text: "📊 Цены рынка", callback_data: "cmd:/rynok" }],
   [{ text: "🏷 Поиск на Uybor", callback_data: "cmd:/sale" }, { text: "📝 Текст запроса", callback_data: "cmd:/request" }],
   [{ text: "🔄 Начать поиск заново", callback_data: "q:again" }],
@@ -341,8 +341,9 @@ async function startAddMode(env, chat) {
   const iv = (await kvGet(env, ivKey(chat), null)) || emptyIv();
   iv.mode = "add"; iv.addAt = Date.now();
   await kvSet(env, ivKey(chat), iv);
-  await say(env, chat, "📥 Перешлите или вставьте вариант от маклера — текст и фото, можно несколькими " +
-    "сообщениями. Пересланное я и так узнаю; этот режим — для скопированного текста. Выключится сам через 15 минут.",
+  await say(env, chat, "💬 Маклер прислал квартиру вам в WhatsApp, а не мне? Перешлите или вставьте сюда " +
+    "его сообщение — текст и фото, можно по частям. Я сделаю из него карточку, как для остальных вариантов: " +
+    "цена, район, анализ, кнопки «В шортлист / Мимо» — чтобы всё было в одном месте.",
     { reply_markup: { inline_keyboard: [[{ text: "✅ Готово", callback_data: "cmd:/done" }]] } });
 }
 

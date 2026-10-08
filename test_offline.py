@@ -1695,7 +1695,11 @@ with mock.patch.object(rr, "tg_call", lambda c, m, pl, **k: (W.append((m, pl)), 
     assert not W and ws.get_kv("welcomed:31")                     # воркер уже поздоровался
     cg.show_offers(cfg, ws)                                       # пусто — не тупик, а кнопки
     m, pl = W[-1]
-    assert "Новых вариантов пока нет" in pl["text"] and '"b"' in pl["reply_markup"] and "cmd:/add" in pl["reply_markup"]
+    assert "Новых вариантов пока нет" in pl["text"] and '"b"' in pl["reply_markup"]
+    assert "WhatsApp" not in pl["text"] and "cmd:/add" not in pl["reply_markup"]   # пока никому не писали — без лишнего
+    ws.upsert_broker("x1", "X", "", "901112233", 3, None, None); ws.broker_status("x1", "contacted")
+    cg.show_offers(cfg, ws)
+    assert "написали 1 маклерам" in W[-1][1]["text"] and "перешлите" in W[-1][1]["text"]
 for t in (rr.HELP_TEXT,):
     assert "Мой поиск" in t and "/new" not in t and "/brokers" not in t
 wdb.unlink(missing_ok=True)

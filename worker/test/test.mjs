@@ -194,7 +194,7 @@ lastId = qq.result.at(-1).update_id;
 await handleUpdate(env, msg("2-комн Яккасарай 41 000$", OWNER, { forward_origin: { type: "user", sender_user: { first_name: "Б" } } }));
 await handleUpdate(env, { update_id: ++uid, message: { message_id: uid, chat: { id: +OWNER }, from: { id: +OWNER }, photo: [{ file_id: "p" }] } });
 await handleUpdate(env, msg("/add"));
-assert.match(texts().at(-1), /Перешлите или вставьте вариант/);
+assert.match(texts().at(-1), /Перешлите или вставьте сюда/);
 await handleUpdate(env, msg("Вот ещё вариант от маклера: 3/9, 55 м², 47 000$"));
 await handleUpdate(env, msg("/done"));
 qq = await (await svc(`/svc/updates?after=${lastId}`)).json();
@@ -239,7 +239,7 @@ const ivR = JSON.parse((await env.DB.prepare("SELECT v FROM kv WHERE k=?").bind(
 assert.deepEqual(ivR.ans, { deal: "rent" });                       // старое забыто, новое сохранено
 geminiQueue.push({ reply: "Ок.", ready: false, set: [], intent: "add_offer" });
 await handleUpdate(env, msg("мне в ватсапе скинули квартиру, добавь"));
-assert.match(texts().at(-1), /Перешлите или вставьте вариант/);
+assert.match(texts().at(-1), /Перешлите или вставьте сюда/);
 await handleUpdate(env, msg("Скопированный текст: 2/5, 50 м², 43 000$"));
 got = await drain();
 assert.equal(got.at(-1).message._owner_offer, true);

@@ -846,14 +846,21 @@ def show_offers(cfg, store, batch=None):
     total = len(pool)
     if not total:
         sl = len(offers_by_status(store, "shortlist")) + len(offers_by_status(store, "asked"))
-        rows = [[{"text": "📇 Разослать маклерам", "callback_data": "b"}],
-                [{"text": "📥 Добавить вариант из WhatsApp", "callback_data": "cmd:/add"}]]
+        written = store.conn.execute("SELECT COUNT(*) FROM brokers WHERE status='contacted'").fetchone()[0]
+        rows = []
         if sl:
-            rows.insert(0, [{"text": f"📋 Шортлист ({sl})", "callback_data": "s:ref"}])
+            rows.append([{"text": f"📋 Шортлист ({sl})", "callback_data": "s:ref"}])
+        if not written:                      # ещё никому не писали — главное действие одно
+            rows.append([{"text": "📇 Разослать запрос маклерам", "callback_data": "b"}])
+            hint = "\nЧтобы они появились, разошлите запрос маклерам — это пара нажатий."
+        else:                                # писали — ждём; подсказка про WhatsApp только здесь
+            rows.append([{"text": "📇 Написать ещё маклерам", "callback_data": "b"}])
+            hint = (f"\nВы написали {written} маклерам — их ответы придут сюда карточками.\n"
+                    "Если кто-то ответил вам в WhatsApp, просто перешлите его сообщение сюда — "
+                    "сделаю такую же карточку с анализом цены.")
         rr.tg_call(cfg, "sendMessage", {
             "chat_id": cfg["telegram_chat_id"],
-            "text": ("Новых вариантов пока нет." + (f" В шортлисте — {sl}." if sl else "")
-                     + "\nМаклеры отвечают сюда сами; ответы из WhatsApp просто перешлите мне."),
+            "text": ("Новых вариантов пока нет." + (f" В шортлисте — {sl}." if sl else "") + hint),
             "reply_markup": json.dumps({"inline_keyboard": rows}, ensure_ascii=False)})
         return 0
     for i, o in enumerate(pool[:batch]):
