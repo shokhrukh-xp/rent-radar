@@ -71,6 +71,8 @@ export function applyPatch(ans, set, clear) {
     if (DATES.includes(k)) { if (isoOk(v)) out[k] = String(v); continue; }
     if (k === "city_other") { out.city_other = String(v).trim().slice(0, 40); continue; }
   }
+  const md = String((set || {}).movein_date || "").toLowerCase();
+  if (["now", "month", "flex"].includes(md)) out.movein = md;
   if (out.movein_date && !out.movein) out.movein = "date";
   return out;
 }
@@ -84,6 +86,14 @@ export function essentialsOk(a) {
 export function finalAns(a) {
   const out = { lang: "ru", deal: "rent", object: "flat", city: "tashkent", contact: "bot", ...a };
   delete out.rooms_any;
+  // поля, которые к этому типу сделки не относятся, не отдаём — иначе попадут в письмо
+  if (out.deal !== "daily") { delete out.date_from; delete out.date_to; }
+  if (out.deal !== "rent") { delete out.movein; delete out.movein_date; }
+  if (out.deal === "rent" && /^d/.test(out.term || "")) delete out.term;
+  if (out.deal === "daily" && out.term && !/^d/.test(out.term)) delete out.term;
+  if (out.deal === "buy") { delete out.term; delete out.who; delete out.pets; delete out.furniture; }
+  if (out.city !== "tashkent") out.districts = [];
+  if (out.city !== "other") delete out.city_other;
   return out;
 }
 
@@ -107,6 +117,10 @@ const SYSTEM = `Ты — Ra'no, ИИ-ассистент по подбору жи
 - «Трёшка» = 3 комнаты, «однушка» = 1. «Любой район» → districts ["any"].
   «Любое количество комнат» → rooms ["any"].
 - Даты — в формате YYYY-MM-DD, считай от сегодняшней даты (она дана ниже).
+- Длительная аренда: срок — ТОЛЬКО term («на год» → 12, «на полгода» → 6_12), дата заезда —
+  movein="date" + movein_date. date_from/date_to для длительной аренды НЕ заполняй.
+- Посуточно: date_from и date_to (заезд и выезд); если дат нет — term d1_3/d4_7/d7_30/dflex.
+- Покупка: term, movein, who, pets, furniture не нужны — не спрашивай о них.
 - Ничего не выдумывай, не обещай квартир и цен, не дави и не торопи.
 - ready=true, когда известны deal, city, budget и (кроме участка) rooms, И ты уже спросил
   про пожелания (или клиент сам сказал, что остальное неважно / «ищи» / «хватит»).
@@ -115,8 +129,13 @@ const SYSTEM = `Ты — Ra'no, ИИ-ассистент по подбору жи
   «парковка не нужна»). Обнови поля и снова верни ready=true, если главное известно.
 - Если сообщение не про жильё — ответь коротко и мягко верни к поиску.
 
-Ответ — JSON: reply (текст клиенту), ready, set (ТОЛЬКО изменившиеся поля),
-clear (имена полей, которые клиент попросил сбросить).
+Ответ — JSON: reply (текст клиенту), ready, set — СПИСОК пар {k, v} (поле и код значения)
+по КАЖДОМУ факту из нового сообщения, clear — имена полей, которые клиент попросил сбросить.
+ВАЖНО: сохраняется только set — reply лишь пересказывает. Ничего из сказанного не пропускай.
+Пример: «пара, без животных, заезжаем сразу, на год, ремонт неважен» → set
+[{k:"who",v:"couple"},{k:"pets",v:"no"},{k:"movein",v:"now"},{k:"term",v:"12"},{k:"class",v:"any"}].
+Районы и комнаты — через запятую: {k:"districts",v:"Мирабад, Юнусабад"}, {k:"rooms",v:"2,3"}.
+На любом языке клиента значения — коды из списка ниже (районы — по-русски).
 
 Поля set:
 lang: ru|uz|en
@@ -137,28 +156,46 @@ pets: no | cat | dog | pet_other
 parking: yes (нужна) | any
 contact: bot (маклеры пишут ассистенту — по умолчанию) | me (лично клиенту) | both`;
 
-const S = (en) => ({ type: "string", enum: en });
+// Перечисления в схеме Gemini воспринимает как «заполнять только если уверен» и молча
+// пропускает поля — поэтому в схеме просто строки, а допустимые значения проверяет applyPatch.
+// Схема: set — СПИСОК пар {k, v}. С объектом из ~25 необязательных полей Gemini
+// молча пропускает часть (проверено вживую: who/pets/term/movein терялись),
+// а список фактов перечисляет полно. Значения проверяет applyPatch.
+const KEYS = [...Object.keys(E), "districts", "rooms", "floor_pref", "budget", "floor_min", "floor_max",
+  "movein_date", "date_from", "date_to", "city_other"];
 export const SCHEMA = {
   type: "object",
   properties: {
     reply: { type: "string" },
     ready: { type: "boolean" },
     set: {
-      type: "object",
-      properties: {
-        ...Object.fromEntries(Object.entries(E).map(([k, v]) => [k, S(v)])),
-        city_other: { type: "string" },
-        districts: { type: "array", items: S([...DISTRICTS, "any"]) },
-        rooms: { type: "array", items: S(M.rooms) },
-        floor_pref: { type: "array", items: S(M.floor_pref) },
-        budget: { type: "integer" }, floor_min: { type: "integer" }, floor_max: { type: "integer" },
-        movein_date: { type: "string" }, date_from: { type: "string" }, date_to: { type: "string" },
+      type: "array",
+      description: "по одной паре на КАЖДЫЙ факт из нового сообщения клиента",
+      items: {
+        type: "object",
+        properties: {
+          k: { type: "string", description: KEYS.join(" | ") },
+          v: { type: "string", description: "код значения; для districts/rooms/floor_pref — через запятую" },
+        },
+        required: ["k", "v"],
       },
     },
     clear: { type: "array", items: { type: "string" } },
   },
   required: ["reply", "ready", "set"],
 };
+const MULTI = ["districts", "rooms", "floor_pref"];
+/** set модели (список пар или объект) → объект полей. */
+export function pairsToSet(set) {
+  if (!Array.isArray(set)) return set && typeof set === "object" ? set : {};
+  const o = {};
+  for (const p of set) {
+    if (!p || !p.k) continue;
+    const k = String(p.k).trim(), v = p.v;
+    o[k] = MULTI.includes(k) ? (Array.isArray(v) ? v : String(v ?? "").split(/\s*[,;]\s*/).filter(Boolean)) : v;
+  }
+  return o;
+}
 
 // ───────────────────────────── Gemini ─────────────────────────────
 export async function gemini(env, system, userText) {
@@ -189,7 +226,7 @@ export async function gemini(env, system, userText) {
       if (r.ok) {
         const raw = (d.candidates?.[0]?.content?.parts || []).filter(p => !p.thought).map(p => p.text || "").join("")
           .trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
-        try { return JSON.parse(raw); } catch (e) {
+        try { const o = JSON.parse(raw); if (o && typeof o === "object") Object.defineProperty(o, "_via", { value: model + "#" + i }); return o; } catch (e) {
           const a = raw.indexOf("{"), z = raw.lastIndexOf("}");
           if (a >= 0 && z > a) try { return JSON.parse(raw.slice(a, z + 1)); } catch (e2) {}
           lastErr = "не JSON"; continue;
@@ -307,7 +344,7 @@ function buildPrompt(iv, text, today) {
 /** Один ход интервью без отправки в Telegram: модель → проверка → новое состояние. */
 export async function interviewCore(env, iv, text) {
   const out = await gemini(env, SYSTEM, buildPrompt(iv, text, new Date().toISOString().slice(0, 10)));
-  const set = { ...(out.set || {}) };
+  const set = pairsToSet(out.set);
   const roomsAny = Array.isArray(set.rooms) && set.rooms.includes("any");
   iv.ans = applyPatch(iv.ans, set, out.clear);
   if (roomsAny) iv.ans.rooms_any = true; else if (set.rooms) delete iv.ans.rooms_any;
@@ -318,7 +355,7 @@ export async function interviewCore(env, iv, text) {
   const sig = JSON.stringify(fin);
   let ready = false;
   if (out.ready && essentialsOk(iv.ans) && sig !== iv.sent) { iv.sent = sig; ready = true; }
-  return { reply, ready, fin, raw: out };
+  return { reply, ready, fin, raw: out, via: out._via };
 }
 
 export async function interviewTurn(env, chat, text) {

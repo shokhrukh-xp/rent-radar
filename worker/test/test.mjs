@@ -2,7 +2,7 @@
 // D1 эмулируется на node:sqlite, Telegram / Gemini / GitHub — подменой fetch.
 import { DatabaseSync } from "node:sqlite";
 import assert from "node:assert/strict";
-import worker, { applyPatch, essentialsOk, finalAns, handleUpdate, summary } from "../src/index.js";
+import worker, { applyPatch, essentialsOk, finalAns, handleUpdate, summary, pairsToSet } from "../src/index.js";
 
 function d1() {
   const s = new DatabaseSync(":memory:");
@@ -56,7 +56,18 @@ assert.equal(essentialsOk({ deal: "rent", city: "tashkent", budget: "1" }), fals
 assert.equal(essentialsOk({ deal: "rent", city: "tashkent", budget: "1", rooms: ["2"] }), true);
 assert.equal(essentialsOk({ deal: "buy", object: "land", city: "region", budget: "9" }), true);
 assert.equal(finalAns({ rooms_any: true }).rooms_any, undefined);
+let f = finalAns({ deal: "rent", date_from: "2026-11-15", date_to: "2027-11-15", term: "12", movein: "date", movein_date: "2026-11-15" });
+assert.equal(f.date_from, undefined); assert.equal(f.term, "12"); assert.equal(f.movein_date, "2026-11-15");
+f = finalAns({ deal: "daily", term: "12", date_from: "2026-10-20", movein: "now" });
+assert.equal(f.term, undefined); assert.equal(f.movein, undefined); assert.equal(f.date_from, "2026-10-20");
+f = finalAns({ deal: "buy", who: "single", pets: "cat", city: "region", districts: ["2"] });
+assert.equal(f.who, undefined); assert.deepEqual(f.districts, []);
 assert.match(summary({ deal: "rent", object: "flat", rooms: ["3"], districts: ["2"], budget: "1400" }), /аренда · квартира · 3-комн\. · Мирабад · до \$1400\/мес/);
+
+// ── список пар от модели → поля
+assert.deepEqual(pairsToSet([{ k: "who", v: "couple" }, { k: "districts", v: "Мирабад, Юнусабад" }, { k: "rooms", v: "2,3" }, { v: "x" }]),
+  { who: "couple", districts: ["Мирабад", "Юнусабад"], rooms: ["2", "3"] });
+assert.deepEqual(applyPatch({}, pairsToSet([{ k: "districts", v: "Мирабад, Юнусабад" }])).districts, ["2", "8"]);
 
 // ── webhook: без секрета — 403
 let r = await worker.fetch(new Request("https://w.example/tg", { method: "POST", body: "{}" }), env, { waitUntil() {} });
