@@ -100,7 +100,7 @@ await env.DB.prepare("DELETE FROM kv WHERE k='py_alive'").run();
 geminiQueue.push({ reply: "Собрала: аренда, 3-комн., Мирабад, до $1400.", ready: true,
   set: { budget: 1400, class: "premium", pets: "cat" } });
 await handleUpdate(env, msg("до 1400, ремонт дизайнерский, есть кошка"));
-assert.match(texts().at(-1), /Собрала.*\n\n📝 Собираю запрос маклерам — пришлю через 1–2 минуты\./s);
+assert.match(texts().at(-1), /Собрала.*\n\n📝 Текст запроса пришлю на проверку через 1–2 минуты\./s);
 assert.equal(gh.length, 1);
 assert.match(gh[0], /actions\/workflows\/radar\.yml\/dispatches/);
 q = await (await svc("/svc/updates?after=0&until=" + Math.floor(Date.now() / 1000 + 600))).json();
@@ -122,7 +122,7 @@ assert.equal(texts().at(-1), "Всё так же.");
 // ── правка словами → новый набор; Python жив → не будим, текст без «1–2 минуты»
 geminiQueue.push({ reply: "Поменяла бюджет на $1200.", ready: true, set: { budget: 1200 } });
 await handleUpdate(env, msg("бюджет 1200"));
-assert.match(texts().at(-1), /Поменяла бюджет на \$1200\.\n\n📝 Собираю запрос маклерам…$/);
+assert.match(texts().at(-1), /Поменяла бюджет на \$1200\.\n\n📝 Сейчас пришлю текст запроса на проверку…$/);
 assert.equal(gh.length, 1);
 q = await (await svc(`/svc/updates?after=${id1}`)).json();
 assert.equal(JSON.parse(q.result[0].message.web_app_data.data).ans.budget, "1200");

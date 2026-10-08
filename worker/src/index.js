@@ -124,7 +124,9 @@ const SYSTEM = `Ты — Ra'no, ИИ-ассистент по подбору жи
 - Ничего не выдумывай, не обещай квартир и цен, не дави и не торопи.
 - ready=true, когда известны deal, city, budget и (кроме участка) rooms, И ты уже спросил
   про пожелания (или клиент сам сказал, что остальное неважно / «ищи» / «хватит»).
-  Тогда в reply одной-двумя строками перечисли собранное и скажи, что собираешь запрос маклерам.
+  Тогда в reply одной-двумя строками перечисли собранное и скажи, что сейчас пришлёшь текст
+  запроса на проверку. НЕ пиши, что запрос уже отправлен или передан маклерам: клиент сначала
+  утверждает текст, а маклерам его отправляет сам, одним нажатием из карточек.
 - Клиент может потом менять что угодно словами («бюджет 1200», «добавь Юнусабад»,
   «парковка не нужна»). Обнови поля и снова верни ready=true, если главное известно.
 - Если сообщение не про жильё — ответь коротко и мягко верни к поиску.
@@ -299,7 +301,9 @@ export async function wake(env) {
       "user-agent": "rano-worker", "x-github-api-version": "2022-11-28" },
     body: JSON.stringify({ ref: "main" }),
   });
-  if (r.status !== 204) console.log("wake failed", r.status, await r.text());
+  const st = { at: Date.now(), status: r.status, body: r.status === 204 ? "" : (await r.text()).slice(0, 300) };
+  await kvSet(env, "last_wake_status", st);
+  if (r.status !== 204) console.log("wake failed", st.status, st.body);
   return false;
 }
 async function queueAndWake(env, upd, chat, note) {
@@ -378,8 +382,8 @@ export async function interviewTurn(env, chat, text) {
     const alive = await wake(env);
     const lang = fin.lang || "ru";
     reply += "\n\n" + (alive
-      ? { ru: "📝 Собираю запрос маклерам…", uz: "📝 Maklerlarga so'rov tayyorlayapman…", en: "📝 Building the request to brokers…" }[lang]
-      : { ru: "📝 Собираю запрос маклерам — пришлю через 1–2 минуты.", uz: "📝 Maklerlarga so'rov tayyorlayapman — 1–2 daqiqada yuboraman.", en: "📝 Building the request to brokers — it'll arrive in 1–2 minutes." }[lang]);
+      ? { ru: "📝 Сейчас пришлю текст запроса на проверку…", uz: "📝 So'rov matnini tekshirish uchun hozir yuboraman…", en: "📝 Sending the request text for your review…" }[lang]
+      : { ru: "📝 Текст запроса пришлю на проверку через 1–2 минуты.", uz: "📝 So'rov matnini 1–2 daqiqada tekshirish uchun yuboraman.", en: "📝 The request text will come for your review in 1–2 minutes." }[lang]);
   }
   await say(env, chat, reply, { reply_markup: { remove_keyboard: true } });
 }
@@ -493,6 +497,11 @@ export default {
         if (!me.ok) return json({ ok: false, error: "токен не принят Telegram" }, 400);
         await kvSet(env, "bot_token", t); tokenCache = t;
         return json({ ok: true, username: me.result.username });
+      }
+      if (p === "/svc/wake") {           // проверка «будильника» вручную
+        await kvSet(env, "last_wake", 0);
+        const alive = await wake(env);
+        return json({ alive, last_wake: await kvGet(env, "last_wake", 0), last_wake_status: await kvGet(env, "last_wake_status", null) });
       }
       if (p === "/svc/bye") { await kvSet(env, "py_alive", null); return json({ ok: true }); }
       if (p === "/svc/setup") {

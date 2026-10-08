@@ -14,3 +14,7 @@ AI_MODEL = "gemini-3.8-flash"
 binding = "DB"
 database_name = "rano"
 database_id = "e31433a9-bb25-4225-ad09-ea6d7caef25c"
+
+# логи воркера в дашборде Cloudflare (Workers → rano-bot → Logs) — для разбора «ничего не пришло»
+[observability]
+enabled = true
