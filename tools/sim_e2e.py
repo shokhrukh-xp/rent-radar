@@ -10,7 +10,8 @@ from pathlib import Path
 from unittest import mock
 
 CODE, RADAR, SALE = sys.argv[1], sys.argv[2], sys.argv[3]
-WORK = Path(__file__).parent / "run"
+import tempfile
+WORK = Path(os.environ.get("SIM_DIR") or tempfile.mkdtemp(prefix="rano_sim_"))   # вне репозитория: там телефоны
 shutil.rmtree(WORK, ignore_errors=True); WORK.mkdir()
 shutil.copy(RADAR, WORK / "radar.db"); shutil.copy(SALE, WORK / "sale.db")
 os.environ.update(RADAR_BOT_TOKEN="TEST", RADAR_CHAT_ID="100", RADAR_STATE_DIR=str(WORK))

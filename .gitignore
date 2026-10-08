@@ -3,3 +3,8 @@
 *.db-journal
 state/
 __pycache__/
+
+# результаты симуляции — с телефонами из объявлений, в репозиторий не коммитить
+tools/run/
+*_result.json
+*_log.txt
