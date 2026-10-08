@@ -1014,6 +1014,15 @@ ans = cg.get_anketa(ms2)["ans"]
 assert "pets" not in ans and "who" not in ans and ans["rooms"] == ["3"]
 req = ms2.get_kv("request_text")
 assert "Мирабад" in req and "$1 400" in req and "собак" not in req
+# свободное пожелание из чата (ипотека) попадает в письмо; replace снимает «жду текст»
+ms2.set_kv("awaiting_text", True)
+with mock.patch.object(rr, "tg_call", fake2):
+    assert cg.apply_webapp_data(cfg, ms2, json.dumps({"v": 3, "replace": True, "ans": {
+        "lang": "ru", "deal": "buy", "object": "flat", "city": "tashkent", "contact": "bot",
+        "rooms": ["2"], "budget": "50000", "class": "reno", "note": "Нужна ипотека, ближе к центру"}}))
+req = ms2.get_kv("request_text")
+assert "нужна ипотека, ближе к центру" in req, req
+assert ms2.get_kv("awaiting_text") is False
 
 # очередь воркера вместо getUpdates: свой offset, подтверждение, until для «будильника»
 wcfg = dict(cfg, worker_url="https://w.example", worker_key="k")

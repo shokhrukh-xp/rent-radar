@@ -29,7 +29,7 @@ const E = {
 };
 const M = { rooms: ["1", "2", "3", "4", "any"], floor_pref: ["nf", "nl", "mid", "any"] };
 const DATES = ["movein_date", "date_from", "date_to"];
-const ALL_KEYS = [...Object.keys(E), ...Object.keys(M), "districts", "city_other",
+const ALL_KEYS = [...Object.keys(E), ...Object.keys(M), "districts", "city_other", "note",
   "budget", "floor_min", "floor_max", ...DATES];
 const START_CMDS = ["/start", "/new", "/app", "/mini", "/anketa", "/steps", "/search",
   "/start_search", "/profile", "/params"];
@@ -70,6 +70,7 @@ export function applyPatch(ans, set, clear) {
     if (k === "floor_min" || k === "floor_max") { const n = parseInt(v, 10); if (n >= 1 && n <= 60) out[k] = String(n); continue; }
     if (DATES.includes(k)) { if (isoOk(v)) out[k] = String(v); continue; }
     if (k === "city_other") { out.city_other = String(v).trim().slice(0, 40); continue; }
+    if (k === "note") { out.note = String(v).replace(/\s+/g, " ").trim().slice(0, 150); continue; }
   }
   const md = String((set || {}).movein_date || "").toLowerCase();
   if (["now", "month", "flex"].includes(md)) out.movein = md;
@@ -156,7 +157,13 @@ date_from, date_to (посуточно)
 who: single | couple | family_kids | family (без детей) | big (большая семья) | group (друзья/коллеги)
 pets: no | cat | dog | pet_other
 parking: yes (нужна) | any
-contact: bot (маклеры пишут ассистенту — по умолчанию) | me (лично клиенту) | both`;
+contact: bot (маклеры пишут ассистенту — по умолчанию) | me (лично клиенту) | both
+note: короткая фраза для маклеров о том, для чего нет своего поля: «нужна ипотека»,
+  «рассрочка», «ближе к центру», «рядом со школой». Пиши её целиком заново (с прежним содержимым),
+  на языке письма маклерам (русский, для lang=uz — узбекский).
+
+Честность: если ты ничего не записал в set — не пиши «учла», «обновила запрос».
+«Центр» без названий районов — не выдумывай districts, а положи «ближе к центру» в note.`;
 
 // Перечисления в схеме Gemini воспринимает как «заполнять только если уверен» и молча
 // пропускает поля — поэтому в схеме просто строки, а допустимые значения проверяет applyPatch.
@@ -164,7 +171,7 @@ contact: bot (маклеры пишут ассистенту — по умолч
 // молча пропускает часть (проверено вживую: who/pets/term/movein терялись),
 // а список фактов перечисляет полно. Значения проверяет applyPatch.
 const KEYS = [...Object.keys(E), "districts", "rooms", "floor_pref", "budget", "floor_min", "floor_max",
-  "movein_date", "date_from", "date_to", "city_other"];
+  "movein_date", "date_from", "date_to", "city_other", "note"];
 export const SCHEMA = {
   type: "object",
   properties: {
@@ -437,7 +444,7 @@ export async function handleUpdate(env, upd) {
   }
   const text = (msg.text || "").trim();
   const lang = (msg.from?.language_code || "").slice(0, 2);
-  const L = ["uz", "en"].includes(lang) ? lang : "ru";
+  const L = lang === "uz" ? "uz" : "ru";     // язык интерфейса Telegram часто английский — это не язык клиента
 
   if (text.startsWith("/")) {
     const [c0, ...rest] = text.split(/\s+/);

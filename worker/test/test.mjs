@@ -69,6 +69,8 @@ assert.deepEqual(pairsToSet([{ k: "who", v: "couple" }, { k: "districts", v: "М
   { who: "couple", districts: ["Мирабад", "Юнусабад"], rooms: ["2", "3"] });
 assert.deepEqual(applyPatch({}, pairsToSet([{ k: "districts", v: "Мирабад, Юнусабад" }])).districts, ["2", "8"]);
 
+assert.equal(applyPatch({}, { note: "  нужна   ипотека " }).note, "нужна ипотека");
+
 // ── webhook: без секрета — 403
 let r = await worker.fetch(new Request("https://w.example/tg", { method: "POST", body: "{}" }), env, { waitUntil() {} });
 assert.equal(r.status, 403);

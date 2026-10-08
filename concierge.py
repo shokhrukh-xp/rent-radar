@@ -461,6 +461,9 @@ def compose_request(cfg, store, username=None):
             extra.append(pt)
     if ans.get("parking") == "yes":
         extra.append("avtoturargoh kerak" if uz else "нужна парковка")
+    note = str(ans.get("note") or "").strip().rstrip(".")
+    if note:                                  # свободные пожелания из чата: ипотека, «ближе к центру»…
+        extra.append(note[0].lower() + note[1:] if len(note) > 1 and not note[:2].isupper() else note)
     if extra:
         parts.append(("Xohishlar: " if uz else "Пожелания: ")
                      + ", ".join(extra) + ".")
@@ -1038,7 +1041,7 @@ def send_app_button(cfg, store, text=None):
 
 ALLOWED = {f["k"] for f in STEPS} | {
     "budget_max", "floor_min", "floor_max", "city_other", "lang",
-    "date_from", "date_to", "movein_date"}
+    "date_from", "date_to", "movein_date", "note"}
 
 
 # ---- компактный код параметров для deep link /start p<код> ---------------
@@ -1142,6 +1145,8 @@ def apply_webapp_data(cfg, store, raw):
             ans[k] = v
     if "city_other" in ans:
         ans["city_other"] = str(ans["city_other"])[:40].strip()
+    if "note" in ans:
+        ans["note"] = " ".join(str(ans["note"]).split())[:150]
     for k in ("date_from", "date_to", "movein_date"):   # только валидные yyyy-mm-dd
         if k in ans and not _DATE_RE.match(str(ans.get(k) or "")):
             ans.pop(k, None)
@@ -1154,6 +1159,8 @@ def apply_webapp_data(cfg, store, raw):
     a = get_anketa(store)
     # replace: из чата-интервью приходит полный набор — старые ответы не смешиваем
     a["ans"] = ans if data.get("replace") else {**a.get("ans", {}), **ans}
+    if data.get("replace"):
+        store.set_kv("awaiting_text", False)   # «Изменить текст» отменён новым интервью
     a["i"] = len(STEPS)
     save_anketa(store, a)
     finish_anketa(cfg, store)
