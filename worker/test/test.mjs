@@ -500,6 +500,8 @@ geminiQueue.push({ state: "average", confidence: 1.7, signs: "старый ли�
 let rp = await repairFromPhotos(env, { urls: ["https://img.test/1.jpg", "https://img.test/404.jpg", "https://img.test/2.jpg"] });
 assert.deepEqual(rp, { state: "average", confidence: 1, signs: "старый линолеум, деревянные окна", photos: 2 });
 assert.equal((geminiCalls[0].match(/inlineData/g) || []).length, 2);
+geminiQueue.push({ state: "average", confidence: 0.9, signs: "советские обои, ковры на стенах, старая плитка" });
+assert.equal((await repairFromPhotos(env, { urls: ["https://img.test/1.jpg"] })).state, "none");      // признаки капитального
 geminiQueue.push({ state: "евро", confidence: 0.9, signs: "" });
 assert.equal((await repairFromPhotos(env, { urls: ["https://img.test/1.jpg"] })).state, "unknown");   // мусор → unknown
 geminiCalls.length = 0;

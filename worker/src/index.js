@@ -376,11 +376,11 @@ export const REPAIR_STATES = ["good", "average", "none", "box", "unknown"];
 const REPAIR_SCHEMA = {
   type: "object",
   properties: {
+    signs: { type: "string", description: "сначала — что видно на фото, 3–8 признаков через запятую, по-русски" },
     state: { type: "string", description: REPAIR_STATES.join(" | ") },
     confidence: { type: "number", description: "0…1 — насколько уверена по этим фото" },
-    signs: { type: "string", description: "что видно на фото, 3–8 слов через запятую, по-русски" },
   },
-  required: ["state", "confidence", "signs"],
+  required: ["signs", "state", "confidence"],
 };
 const REPAIR_SYSTEM = `Ты оцениваешь состояние ремонта квартиры в Ташкенте по фотографиям из объявления о продаже.
 Смотри только на то, что видно на фото, а не на слова продавца. Категории:
@@ -391,7 +391,10 @@ box — коробка или черновая: голый бетон, стяж�
 unknown — на фото нет интерьера квартиры (фасад, двор, план, схема, реклама, рендер) или по фото не понять.
 Если фото — рендеры или явно чужие картинки, ставь unknown. Мебель и вещи не путай с ремонтом.
 confidence ниже 0.5 — если комнат почти не видно или фото противоречат друг другу.
-signs — коротко, что именно видно: «старый линолеум, деревянные окна, советская плитка».`;
+signs — коротко, что именно видно: «старый линолеум, деревянные окна, советская плитка».
+Сначала выпиши признаки, потом выбери категорию по ним: два и больше признаков из описания none — это none, даже если в целом «жить можно».`;
+
+const SOVIET_SIGNS = /советск|ковр|деревянн\S* окн|дощат|протеч|облез|старая сантех|старые труб|старая ванн|пожелтевш/g;
 
 async function urlPhoto(url) {
   const r = await fetch(url, { headers: { "user-agent": "Mozilla/5.0 (Macintosh) AppleWebKit/537.36 Chrome/126 Safari/537.36",
@@ -415,7 +418,10 @@ export async function repairFromPhotos(env, { urls = [], file_ids = [] }) {
   if (!images.length) return { state: "unknown", confidence: 0, signs: "", photos: 0 };
   const o = await gemini(env, REPAIR_SYSTEM, `Фото квартиры: ${images.length} шт. Оцени состояние ремонта.`,
     { schema: REPAIR_SCHEMA, images, temperature: 0.1 });
-  const state = REPAIR_STATES.includes(o.state) ? o.state : "unknown";
+  let state = REPAIR_STATES.includes(o.state) ? o.state : "unknown";
+  // страховка: модель перечислила признаки капитального, а поставила «средний»
+  const hard = (String(o.signs || "").toLowerCase().match(SOVIET_SIGNS) || []).length;
+  if (state === "average" && hard >= 2) state = "none";
   const conf = Math.max(0, Math.min(1, Number(o.confidence) || 0));
   return { state, confidence: Math.round(conf * 100) / 100, signs: String(o.signs || "").slice(0, 120), photos: images.length };
 }
