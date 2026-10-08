@@ -684,16 +684,40 @@ async function queueAndWake(env, upd, chat, note) {
 
 // ───────────────────────────── интервью ─────────────────────────────
 const GREET = {
-  ru: "Привет! Я Ra'no, ИИ-ассистент по поиску жилья.\n\n" +
-    "Как это работает:\n1. Вы своими словами говорите, что ищете — я уточню детали.\n" +
-    "2. Я составлю запрос, а вы в пару нажатий отправите его маклерам.\n" +
-    "3. Варианты маклеров приходят сюда карточками — с анализом цены.\n\n" +
-    "Начнём? Напишите, например: «купить двушку в центре до $50 000, с ремонтом». " +
-    "Всё остальное — кнопками внизу, команды запоминать не нужно.",
-  uz: "Salom! Men Ra'no, uy-joy qidirish bo'yicha AI-yordamchiman. Nima qidirayotganingizni o'z so'zlaringiz bilan yozing — " +
-    "masalan: «markazda 2 xonali, $50 000 gacha, remont bilan». Qolgani — pastdagi tugmalar orqali.",
-  en: "Hi! I'm Ra'no, an AI assistant for finding a home. Tell me in your own words what you're looking for — " +
-    "e.g. \"buy a 2-room flat in the centre up to $50,000, renovated\". Everything else is in the buttons below.",
+  ru: "Привет! Я Ra'no, ИИ-ассистент по поиску жилья в Ташкенте — аренда и покупка.\n\n" +
+    "Ищу двумя способами:\n🔎 Сама — смотрю сайты и Telegram-каналы, выгодное присылаю сразу.\n" +
+    "📇 Через маклеров — составлю запрос, вы отправите его в пару нажатий.\n" +
+    "К каждому варианту — анализ цены: дешевле или дороже рынка.\n\n" +
+    "С чего начнём? Напишите своими словами, что ищете, — например: «купить двушку в центре до $50 000, нужна ипотека».",
+  uz: "Salom! Men Ra'no — Toshkentda uy-joy qidirish bo'yicha AI-yordamchiman: ijara va sotib olish.\n\n" +
+    "🔎 O'zim saytlar va Telegram-kanallarni ko'rib, foydali variantlarni darhol yuboraman.\n" +
+    "📇 Maklerlar orqali — so'rov tuzaman, siz uni bir-ikki bosishda yuborasiz.\n" +
+    "Har bir variantga — narx tahlili.\n\n" +
+    "Nima qidirayotganingizni yozing — masalan: «markazda 2 xonali, $50 000 gacha, ipoteka kerak».",
+  en: "Hi! I'm Ra'no, an AI assistant for finding a home in Tashkent. Tell me in your own words what you're looking for — " +
+    "e.g. \"buy a 2-room flat in the centre up to $50,000, mortgage needed\". Everything else is in the buttons below.",
+};
+// Профиль бота: «О боте» (до 120 символов) и экран до Start (до 512) — русский по умолчанию, узбекский отдельно
+export const PROFILE = {
+  name: { "": "Ra'no · поиск жилья", uz: "Ra'no · uy qidirish" },
+  short: {
+    "": "ИИ-ассистент: ищет квартиру в Ташкенте на сайтах и через маклеров. Аренда и покупка, анализ цен.",
+    uz: "AI-yordamchi: Toshkentda kvartirani saytlarda va maklerlar orqali qidiradi. Ijara va sotib olish.",
+  },
+  long: {
+    "": "Ra'no — ИИ-ассистент по поиску жилья в Ташкенте: аренда и покупка.\n\n" +
+      "🔎 Ищет сама — каждый день смотрит Uybor, Realt24, Joymee, Realting, Yangiuylar и Telegram-каналы. " +
+      "Выгодное присылает сразу, остальное — подборкой.\n" +
+      "📇 Через маклеров — готовит запрос, вы отправляете его в пару нажатий, варианты приходят карточками.\n" +
+      "📊 К каждому варианту — анализ цены: дешевле или дороже рынка.\n\n" +
+      "Маклерам: нажмите Start и присылайте варианты — передам клиенту.",
+    uz: "Ra'no — Toshkentda uy-joy qidirish bo'yicha AI-yordamchi: ijara va sotib olish.\n\n" +
+      "🔎 O'zi qidiradi — har kuni Uybor, Realt24, Joymee, Realting, Yangiuylar va Telegram-kanallarni ko'radi. " +
+      "Foydali variantlarni darhol, qolganini to'plam qilib yuboradi.\n" +
+      "📇 Maklerlar orqali — so'rov tayyorlaydi, siz uni bir-ikki bosishda yuborasiz.\n" +
+      "📊 Har bir variantga — narx tahlili: bozordan arzonmi yoki qimmatmi.\n\n" +
+      "Maklerlar uchun: Start ni bosing va variantlarni yuboring — mijozga yetkazaman.",
+  },
 };
 const WAIT = {
   ru: "⏳ Запускаю основной модуль — ответ придёт через 1–2 минуты.",
@@ -1190,11 +1214,20 @@ export default {
           { command: "shortlist", description: "📋 Шортлист" }, { command: "help", description: "❓ Как это работает" }];
         const cmds = await tg(env, "setMyCommands", { commands: ownerCmds, scope: { type: "chat", chat_id: +env.OWNER_CHAT } });
         const cmdsAll = await tg(env, "setMyCommands", { commands: [{ command: "start", description: "Как прислать вариант" }] });
-        await tg(env, "sendMessage", { chat_id: +env.OWNER_CHAT, reply_markup: OWNER_KB,
+        if (url.searchParams.get("kb")) await tg(env, "sendMessage", { chat_id: +env.OWNER_CHAT, reply_markup: OWNER_KB,
           text: "Кнопки — внизу: «🔎 Ищет Ra'no», «📇 Через маклеров», «⋯ Ещё». " +
                 "Команды запоминать не нужно — можно и просто написать, что хотите сделать." });
+        const profile = {};
+        for (const lang of ["", "uz"]) {
+          const lc = lang ? { language_code: lang } : {};
+          profile[lang || "ru"] = {
+            name: (await tg(env, "setMyName", { name: PROFILE.name[lang], ...lc })).ok,
+            short: (await tg(env, "setMyShortDescription", { short_description: PROFILE.short[lang], ...lc })).ok,
+            long: (await tg(env, "setMyDescription", { description: PROFILE.long[lang], ...lc })).ok,
+          };
+        }
         const info = await tg(env, "getWebhookInfo", {});
-        return json({ hook, menu, menuOwner, cmds, cmdsAll, info: info.result });
+        return json({ hook, menu, menuOwner, cmds, cmdsAll, profile, info: info.result });
       }
       if (p === "/svc/try") {            // проверка промпта вживую, без Telegram и очереди
         if (url.searchParams.get("reset")) await kvSet(env, "iv:test", emptyIv());

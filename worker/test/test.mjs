@@ -2,7 +2,7 @@
 // D1 эмулируется на node:sqlite, Telegram / Gemini / GitHub — подменой fetch.
 import { DatabaseSync } from "node:sqlite";
 import assert from "node:assert/strict";
-import worker, { parseNum, applyPatch, essentialsOk, finalAns, handleUpdate, summary, pairsToSet, OWNER_KB, BROKER_KB, BTN, parseWhen } from "../src/index.js";
+import worker, { parseNum, applyPatch, essentialsOk, finalAns, handleUpdate, summary, pairsToSet, OWNER_KB, BROKER_KB, BTN, parseWhen, PROFILE } from "../src/index.js";
 
 function d1() {
   const s = new DatabaseSync(":memory:");
@@ -151,7 +151,7 @@ assert.equal(q.result[1].message.text, "Мой собственный текст
 const id4 = q.result[1].update_id;
 await handleUpdate(env, { update_id: ++uid, callback_query: { id: "c2", data: "q:again",
   message: { message_id: 9, chat: { id: +OWNER } } } });
-assert.match(texts().at(-1), /Как это работает/);
+assert.match(texts().at(-1), /Ищу двумя способами/);
 q = await (await svc(`/svc/updates?after=${id4}`)).json();
 assert.equal(q.result.length, 0);
 
@@ -222,7 +222,7 @@ sent.length = 0;
 await handleUpdate(env, msg(BTN.more));
 assert.ok(JSON.stringify(sent.at(-1).reply_markup).includes("cmd:/add"));
 await handleUpdate(env, msg(BTN.search));
-assert.match(texts().at(-1), /Сейчас ищем|Как это работает/);
+assert.match(texts().at(-1), /Сейчас ищем|Ищу двумя способами/);
 // «⋯ Ещё» → шортлист: колбэк превращается в команду для Python
 await handleUpdate(env, { update_id: ++uid, callback_query: { id: "c9", data: "cmd:/shortlist", message: { message_id: 3, chat: { id: +OWNER } } } });
 got = await drain();
@@ -234,7 +234,7 @@ got = await drain();
 assert.equal(got.at(-1).message.text, "/offers");
 geminiQueue.push({ reply: "Хорошо.", ready: false, set: [], intent: "restart" });
 await handleUpdate(env, msg("давай начнём заново"));
-assert.match(texts().at(-1), /Как это работает/);                 // без деталей — приветствие
+assert.match(texts().at(-1), /Ищу двумя способами/);                 // без деталей — приветствие
 geminiQueue.push({ reply: "Ищем аренду. В каком районе?", ready: false, set: [{ k: "deal", v: "rent" }], intent: "restart" });
 await handleUpdate(env, msg("давай заново, теперь аренда"));
 assert.match(texts().at(-1), /Начинаем новый поиск\.\n\nИщем аренду/);
@@ -438,5 +438,11 @@ assert.equal(r.status, 401);
   assert.equal(W("чт 9").at, "2026-10-15T09:00:00+05:00");               // этот чт уже прошёл
   assert.equal(W("пн").notime, true);
   assert.equal(W("привет"), null); }
+
+for (const l of ["", "uz"]) {                                  // лимиты Telegram для профиля бота
+  assert.ok(PROFILE.short[l].length <= 120, "short " + l + " " + PROFILE.short[l].length);
+  assert.ok(PROFILE.long[l].length <= 512, "long " + l + " " + PROFILE.long[l].length);
+  assert.ok(PROFILE.name[l].length <= 64);
+}
 
 console.log("OK — воркер: интервью, нормализация, очередь, будильник, кнопки, дубли, ошибки");
