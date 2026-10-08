@@ -19,6 +19,4 @@ database_id = "e31433a9-bb25-4225-ad09-ea6d7caef25c"
 [observability]
 enabled = true
 
-# будильник Python: 08:30 и 20:00 по Ташкенту (UTC+5) — утренние просмотры и вечерняя сводка
-[triggers]
-crons = ["30 3 * * *", "0 15 * * *"]
+# будильник по cron не нужен: radar.yml и так стартует каждые 30 мин (а у аккаунта Cloudflare лимит 5 cron)
