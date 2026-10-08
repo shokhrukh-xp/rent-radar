@@ -1506,7 +1506,8 @@ assert abs(x["invest"][1]["base"] - (gain1 * 0.88 + x["rent"] * 11 * 0.88)) < 0.
 assert abs(x["invest"][3]["base"] - (27600 * (1.03 ** 3 - 1) + x["rent"] * 11 * 0.88 * 3)) < 0.01
 txt = mk.format_analysis(mst, dorm_l, ss_all)
 for part in ("📊 <b>Анализ</b>", "на 8% ниже похожих", "Цена через 1 / 3 / 5 лет", "Бывшее общежитие",
-             "Долго продаётся", "Вердикт", mk.REPORT_URL, "средняя по району: $1 441/м²"):
+             "висит 100 дн.", "🟠 <b>", mk.REPORT_URL, "средняя по району: $1 441/м²", "🏦 Ипотека: взнос $6 900 (25%)",
+             "🤝 Торг: начните с", "Ремонт не указан", "<blockquote expandable>", "📈 Как вложение"):
     assert part in txt, (part, txt)
 # аренда по объявлениям нереально высокая → в расчёте осторожная средняя, цифра из объявлений рядом
 RENT_HI = dict(dorm_l, text="Квартира", price_usd=12000, area=24)
@@ -2138,3 +2139,47 @@ ddb.unlink(missing_ok=True)
 print("OK — дубли от разных маклеров: одна карточка, «👥 ещё у N», «та же квартира дешевле»")
 assert SS.merge_alts([], [dict(own, key="sale:joymee:99", price_usd=43500)], own) == []          # перевыкладка того же продавца — не «ещё у 1»
 print("OK — перевыкладка тем же продавцом не считается другим продавцом")
+
+# ============ анализ: ремонт меняет экономику, ипотека, торг ============
+rdb = Path("/tmp/test_reno.db"); rdb.unlink(missing_ok=True); rs_ = rr.Store(rdb); mk.ensure_tables(rs_.conn)
+assert mk.repair_class({"repair": "без ремонта"}) == "none" and mk.repair_class({"repair": "evro"}) == "good"
+assert mk.repair_class({"text": "Ремонти ўртача, газ бор"}) == "average"
+assert mk.repair_class({"text": "Karobka holatda, 8 qavat"}) == "box"
+assert mk.repair_class({"text": "Требует ремонта, евроокна"}) == "none"            # «требует» важнее «евро»
+assert mk.repair_class({"text": "Квартира, 2 комнаты"}) is None
+for i in range(8):
+    rs_.conn.execute("INSERT INTO market(key, op, district, rooms, area, price_usd, new_building, dorm, repair, "
+                     "first_seen, last_seen) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                     (f"sale:uybor:{500 + i}", "sale", "Юнусабад", 2, 50, 1600 * 50, 0, 0, "evro", "x", "x"))
+    rs_.conn.execute("INSERT INTO market(key, op, district, rooms, area, price_usd, new_building, dorm, repair, "
+                     "first_seen, last_seen) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                     (f"sale:uybor:{600 + i}", "sale", "Юнусабад", 2, 50, 1300 * 50, 0, 0, "sredniy", "x", "x"))
+rs_.conn.commit()
+base_l = {"key": "sale:joymee:1", "district": "Юнусабад", "area": 50, "rooms": 2, "created_at": _iso(10)}
+cfg_r = dict(ss_all, uzs_per_usd=12000)
+# средний ремонт за $60 000 ($1 200/м²): против похожих со средним — −8%; с косметикой ($2 500) — против евро −25%
+xr = mk.analyze(rs_, dict(base_l, price_usd=60000, repair="средний ремонт"), cfg_r)
+assert xr["comp_same_repair"] and round(xr["comp"]["median_m2"]) == 1300 and abs(xr["gap"] - (1200 / 1300 - 1)) < 1e-9
+assert xr["reno"] == 2500 and xr["all_in"] == 62500 and abs(xr["gap_all_in"] - (1250 / 1600 - 1)) < 1e-9
+assert xr["verdict"][0] == "🟡" and "с таким же ремонтом" in xr["verdict"][2]            # честное сравнение — со средним
+xb = mk.analyze(rs_, dict(base_l, price_usd=58000, text="Коробка"), cfg_r)                    # коробок в срезе нет → цена + отделка
+assert xb["repair"] == "box" and not xb["comp_same_repair"] and xb["all_in"] == 64500
+assert xb["verdict"][0] == "🟢" and "даже с ремонтом" in xb["verdict"][2] and xb["gap_fair"] == xb["gap_all_in"]
+# без ремонта за $72 000: на вид «−10% к евро», но с капитальным ($4 750) — дороже похожих
+xn = mk.analyze(rs_, dict(base_l, price_usd=72000, text="Без ремонта"), cfg_r)
+assert xn["repair"] == "none" and xn["reno"] == 4750 and xn["gap_all_in"] > -0.05 and xn["verdict"][0] != "🟢"
+assert "нужен ремонт ~$4 750" in xn["bargain"]["args"]
+# ипотека: 25% взнос, аннуитет 10 лет под 25% в сумах
+mm = mk.mortgage(48000, mk.DEFAULT_ASSUMPTIONS["mortgage"], 12000)
+r_, n_ = 0.25 / 12, 120
+assert mm["down"] == 12000 and abs(mm["pay_uzs"] - 36000 * 12000 * r_ / (1 - (1 + r_) ** -n_)) < 1
+big = mk.mortgage(100000, mk.DEFAULT_ASSUMPTIONS["mortgage"], 12000)                   # упёрлись в лимит 800 млн
+assert abs(big["down"] - (100000 - 800_000_000 / 12000)) < 0.01 and big["down_share"] > 0.3
+# торг: цена уже сильно ниже рынка и ремонт не нужен — не давить
+xc = mk.analyze(rs_, dict(base_l, price_usd=60000, repair="evro"), cfg_r)
+assert xc["bargain"]["calm"] and xc["bargain"]["offer"] == 59000
+t_ = mk.format_analysis(rs_, dict(base_l, price_usd=60000, repair="средний ремонт"), cfg_r)
+assert t_.index("🟡 <b>Цена в рынке</b>") < t_.index("🛠") < t_.index("🏦") < t_.index("🤝") < t_.index("<blockquote expandable>")
+assert "С ним ≈ $62 500" in t_ and "млн сум/мес" in t_ and len(t_) < 4096
+rdb.unlink(missing_ok=True)
+print("OK — анализ: ремонт в цене и сравнении, ипотека в сумах, торг, сворачиваемые детали")

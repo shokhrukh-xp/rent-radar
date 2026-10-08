@@ -383,7 +383,7 @@ def score(store, l, cfg, ss):
     except Exception:
         x = {}
     s, why = 50.0, []
-    gap = x.get("gap")
+    gap = x.get("gap_fair", x.get("gap"))           # с учётом ремонта, если похожих с таким же нет
     if gap is not None:
         s += max(-30, min(30, -gap * 200))
         if gap <= -0.05:
