@@ -157,9 +157,6 @@ ru: {
   pv:"Запрос маклерам", pv_note:"обновляется сам",
   pv_hint:"Текст можно отредактировать в боте перед отправкой.",
   pv_hint_en:"", submit:"Готово — собрать запрос", multi:"можно несколько",
-  wrong_t:"Откройте через кнопку под полем ввода",
-  wrong:"Telegram передаёт параметры боту только из кнопки «🏠 Открыть приложение» под полем ввода (не из «Open» / меню).\n\nОтветы сохранены — откройте эту кнопку и нажмите «Готово». Нет кнопки — отправьте боту /app.",
-  restored:"Ответы восстановлены — нажмите «Готово»", ok:"Понятно",
   any:"Любое", all:"Все", mo:"/мес", day:"/сутки",
   nf_s:"не 1-й", nl_s:"не посл.",
   exact:"или точная сумма, $", from:"от этажа", to:"до этажа",
@@ -195,9 +192,6 @@ uz: {
   pv:"Maklerlarga so'rov", pv_note:"o'zi yangilanadi",
   pv_hint:"Matnni yuborishdan oldin botda tahrirlash mumkin.",
   pv_hint_en:"", submit:"Tayyor — so'rovni tuzish", multi:"bir nechtasini tanlang",
-  wrong_t:"Kiritish maydoni ostidagi tugmadan oching",
-  wrong:"Telegram parametrlarni botga faqat kiritish maydoni ostidagi «🏠 Открыть приложение» tugmasi orqali yuboradi («Open» / menyu orqali emas).\n\nJavoblar saqlandi — o'sha tugmani bosing va «Tayyor»ni bosing. Tugma yo'q bo'lsa — botga /app yuboring.",
-  restored:"Javoblar tiklandi — «Tayyor»ni bosing", ok:"Tushunarli",
   any:"Farqi yo'q", all:"Hammasi", mo:"/oy", day:"/kun",
   nf_s:"1-q. emas", nl_s:"oxirgisi emas",
   exact:"yoki aniq summa, $", from:"qavatdan", to:"qavatgacha",
@@ -234,9 +228,6 @@ en: {
   pv_hint:"You can edit the text in the bot before sending.",
   pv_hint_en:"Agents in Tashkent read Russian or Uzbek, so the request is composed in Russian. Ra'no talks to you in English.",
   submit:"Done — build the request", multi:"multiple allowed",
-  wrong_t:"Open it from the button below the input field",
-  wrong:"Telegram only passes the parameters to the bot from the «🏠 Открыть приложение» button below the input field (not from «Open» / the menu).\n\nYour answers are saved — tap that button and press «Done». No button? Send /app to the bot.",
-  restored:"Answers restored — press «Done»", ok:"Got it",
   any:"Any", all:"All", mo:"/mo", day:"/day",
   nf_s:"not 1st", nl_s:"not top",
   exact:"or exact amount, $", from:"floor from", to:"floor to",
@@ -320,7 +311,7 @@ try {                                   // предзаполнение из б�
 // Из «Open» / меню / профиля / ссылки Telegram молча игнорирует вызов — поэтому
 // там сохраняем ответы и ведём к правильной кнопке, где они подхватятся.
 const CAN_SEND = !!tg && !tg.initData;
-const DRAFT = "rano_draft", DRAFT_TTL = 24*3600*1000;
+const DRAFT = "rano_draft", DRAFT_TTL = 30*24*3600*1000;
 const CS = (tg && tg.isVersionAtLeast && tg.isVersionAtLeast("6.9")) ? tg.CloudStorage : null;
 function saveDraft(cb){
   const s = JSON.stringify({t: Date.now(), ans: A});
@@ -343,7 +334,48 @@ function applyDraft(raw){
   } catch(e){ return false; }
 }
 let restored = false;
-try { restored = applyDraft(localStorage.getItem(DRAFT)); } catch(e){}
+if (!location.hash) try { restored = applyDraft(localStorage.getItem(DRAFT)); } catch(e){}
+
+// ---- компактный код для /start p<код> (зеркало decode_start_code в concierge.py)
+const B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+const SC = [
+  ["lang","e",["ru","uz","en"]], ["deal","e",["rent","daily","buy"]],
+  ["object","e",["flat","house","dacha","land"]], ["city","e",["tashkent","charvak","region","other"]],
+  ["class","e",["any","new","premium","reno","biz"]], ["furniture","e",["yes","no","any"]],
+  ["term","e",["12","6_12","3_6","flex","d1_3","d4_7","d7_30","dflex"]],
+  ["movein","e",["now","month","flex","date"]],
+  ["who","e",["single","couple","family_kids","family","big","group"]],
+  ["pets","e",["no","cat","dog","pet_other"]], ["parking","e",["yes","any"]],
+  ["contact","e",["bot","me","both"]],
+  ["districts","m",["0","1","2","3","4","5","6","7","8","9","10","11","any"]],
+  ["rooms","m",["1","2","3","4","any"]], ["floor_pref","m",["nf","nl","mid","any"]],
+  ["budget","n",4], ["budget_max","n",4], ["floor_min","n",1], ["floor_max","n",1],
+  ["movein_date","d",2], ["date_from","d",2], ["date_to","d",2],
+];
+function scNum(n, w){ let s=""; for(let i=0;i<w;i++){ s=B64[n%64]+s; n=Math.floor(n/64); } return s; }
+function encodeStart(a){
+  let s = "1";
+  for (const [k, kind, spec] of SC){
+    const v = a[k];
+    if (kind==="e") s += B64[spec.indexOf(String(v ?? ""))+1];
+    else if (kind==="m"){
+      let bits=0; (Array.isArray(v)?v:[]).forEach(x=>{ const j=spec.indexOf(String(x)); if(j>=0) bits|=1<<j; });
+      s += scNum(bits, Math.ceil(spec.length/6));
+    } else if (kind==="n"){
+      const n = /^\d+$/.test(String(v ?? "").trim()) ? Math.min(+v, 64**spec-1) : 0;
+      s += scNum(n, spec);
+    } else {
+      const d = fromIso(v); const days = d ? Math.round((d - new Date(2024,0,1))/86400000) : 0;
+      s += scNum(days>0 && days<4096 ? days : 0, spec);
+    }
+  }
+  if (a.city==="other" && a.city_other){            // город — остаток лимита в 64 символа
+    let t = String(a.city_other).trim(), b;
+    while (t){ b = btoa(unescape(encodeURIComponent(t))).replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,"");
+               if (s.length + b.length <= 63) { s += b; break; } t = t.slice(0,-1); }
+  }
+  return s;                                         // + префикс "p" = ≤ 64
+}
 
 const nav = (navigator.language || "").slice(0,2);
 if (!location.hash && (nav === "uz" || nav === "en")) A.lang = nav;
@@ -761,15 +793,12 @@ function submit(){
         : "Откройте страницу через кнопку в боте");
     return;
   }
-  if (!CAN_SEND){                      // открыто из «Open»/меню — sendData не дойдёт
-    tg.HapticFeedback?.notificationOccurred("warning");
+  if (!CAN_SEND){        // кнопка меню / Open: sendData не работает — шлём через /start
+    tg.HapticFeedback?.notificationOccurred("success");
     saveDraft(()=>{
-      const t = L();
-      try {
-        tg.showPopup({title: t.wrong_t, message: t.wrong,
-                      buttons: [{id: "ok", type: "default", text: t.ok}]},
-                     ()=>tg.close());
-      } catch(e){ alert(t.wrong); tg.close(); }
+      const link = `https://t.me/${A._bot || "rano_smart_bot"}?start=p${encodeStart(A)}`;
+      try { tg.openTelegramLink(link); } catch(e){ location.href = link; }
+      setTimeout(()=>{ try{ tg.close(); }catch(e){} }, 300);
     });
     return;
   }
@@ -794,10 +823,8 @@ if (tg){
   try{ tg.MainButton.setParams({text:L().submit, color:"#C21F45", text_color:"#ffffff"}); }catch(e){}
   tg.MainButton.show(); tg.MainButton.onClick(submit);
   if (tg.onEvent) tg.onEvent("themeChanged", ()=>{ applyScheme(); render(); });
-  const noteRestored = ()=>{ if (CAN_SEND) try{ tg.showAlert(L().restored); }catch(e){} };
-  if (restored) setTimeout(noteRestored, 300);
-  else if (CS) try {
-    CS.getItem(DRAFT, (err, v)=>{ if (!err && v && applyDraft(v)){ render(); noteRestored(); } });
+  if (!restored && !location.hash && CS) try {   // черновик из облака Telegram
+    CS.getItem(DRAFT, (err, v)=>{ if (!err && v && applyDraft(v)) render(); });
   } catch(e){}
 } else {
   const fab=document.getElementById("fab"); fab.style.display="block"; fab.onclick=submit;

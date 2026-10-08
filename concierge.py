@@ -9,6 +9,7 @@
 """
 
 import base64
+import datetime as _dt
 import json
 import re
 import statistics
@@ -1042,6 +1043,78 @@ def send_app_button(cfg, store, text=None):
 ALLOWED = {f["k"] for f in STEPS} | {
     "budget_max", "floor_min", "floor_max", "city_other", "lang",
     "date_from", "date_to", "movein_date"}
+
+
+# ---- компактный код параметров для deep link /start p<код> ---------------
+# Из мини-аппа, открытого кнопкой меню («Параметры»), Telegram НЕ даёт sendData().
+# Поэтому мини-апп упаковывает ответы в ≤64 символов [A-Za-z0-9_-] и открывает
+# t.me/<бот>?start=p<код>; клиент сам шлёт боту «/start p<код>».
+# Порядок и словари ДОЛЖНЫ совпадать с encodeStart() в docs/index.html.
+_B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+_SC_VER = "1"
+_SC_EPOCH = _dt.date(2024, 1, 1)
+_SC = [  # (ключ, вид, словарь|ширина)
+    ("lang", "e", ["ru", "uz", "en"]),
+    ("deal", "e", ["rent", "daily", "buy"]),
+    ("object", "e", ["flat", "house", "dacha", "land"]),
+    ("city", "e", ["tashkent", "charvak", "region", "other"]),
+    ("class", "e", ["any", "new", "premium", "reno", "biz"]),
+    ("furniture", "e", ["yes", "no", "any"]),
+    ("term", "e", ["12", "6_12", "3_6", "flex", "d1_3", "d4_7", "d7_30", "dflex"]),
+    ("movein", "e", ["now", "month", "flex", "date"]),
+    ("who", "e", ["single", "couple", "family_kids", "family", "big", "group"]),
+    ("pets", "e", ["no", "cat", "dog", "pet_other"]),
+    ("parking", "e", ["yes", "any"]),
+    ("contact", "e", ["bot", "me", "both"]),
+    ("districts", "m", [str(i) for i in range(12)] + ["any"]),
+    ("rooms", "m", ["1", "2", "3", "4", "any"]),
+    ("floor_pref", "m", ["nf", "nl", "mid", "any"]),
+    ("budget", "n", 4), ("budget_max", "n", 4),
+    ("floor_min", "n", 1), ("floor_max", "n", 1),
+    ("movein_date", "d", 2), ("date_from", "d", 2), ("date_to", "d", 2),
+]
+
+
+def _sc_num(chunk):
+    n = 0
+    for ch in chunk:
+        i = _B64.find(ch)
+        if i < 0:
+            raise ValueError(ch)
+        n = n * 64 + i
+    return n
+
+
+def decode_start_code(code):
+    """'1....' → dict ответов (как ans из мини-аппа) или None при мусоре."""
+    if not code or code[0] != _SC_VER:
+        return None
+    pos, ans = 1, {}
+    try:
+        for k, kind, spec in _SC:
+            if kind == "e":
+                i = _sc_num(code[pos]); pos += 1
+                if 1 <= i <= len(spec):
+                    ans[k] = spec[i - 1]
+            elif kind == "m":
+                w = (len(spec) + 5) // 6
+                bits = _sc_num(code[pos:pos + w]); pos += w
+                ans[k] = [v for j, v in enumerate(spec) if bits >> j & 1]
+            elif kind == "n":
+                v = _sc_num(code[pos:pos + spec]); pos += spec
+                if v:
+                    ans[k] = str(v)
+            else:  # дата: дни от эпохи, 0 = нет
+                v = _sc_num(code[pos:pos + spec]); pos += spec
+                if v:
+                    ans[k] = (_SC_EPOCH + _dt.timedelta(days=v)).isoformat()
+        tail = code[pos:]
+        if tail:
+            ans["city_other"] = base64.urlsafe_b64decode(
+                tail + "=" * (-len(tail) % 4)).decode("utf-8", "ignore").strip("\x00 ")
+    except (ValueError, IndexError, TypeError):
+        return None
+    return ans
 
 
 def apply_webapp_data(cfg, store, raw):

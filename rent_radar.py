@@ -1331,6 +1331,14 @@ def handle_command(text: str, settings: dict, store, cfg: dict):
     arg = arg.strip()
     raw_arg = t.partition(" ")[2].strip()
 
+    if cmd == "/start" and raw_arg.startswith("p"):
+        # параметры из мини-аппа, открытого кнопкой меню (там нет sendData)
+        ans = concierge.decode_start_code(raw_arg[1:])
+        if not ans or not concierge.apply_webapp_data(
+                cfg, store, json.dumps({"v": 2, "ans": ans}, ensure_ascii=False)):
+            concierge.send_app_button(
+                cfg, store, "Не получилось прочитать параметры — откройте приложение ещё раз.")
+        return "", None
     if cmd == "/start":
         # Первое касание: тёплое знакомство, одно понятное действие, честное
         # ожидание. Стена команд отпугивает — её показываем только по /help.

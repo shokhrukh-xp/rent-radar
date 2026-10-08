@@ -985,8 +985,28 @@ with mock.patch.object(rr, "tg_call", fake2):
     SENT2.clear()
     rr.handle_command("/steps", rr.default_settings(), ms2, cfg)
     assert any("Анкета" in str(pl.get("text", "")) for _, pl in SENT2)
+# кнопка меню «Параметры»: sendData нет → параметры приходят как /start p<код>
+# (код ниже собран encodeStart() из docs/index.html — держать словари синхронными)
+CODE = "p1CBBBDBCEDCBDAkEGDAAcIAAWqDQQZAAAA"
+d = cg.decode_start_code(CODE[1:])
+assert d["lang"] == "uz" and d["districts"] == ["2", "8", "11"] and d["rooms"] == ["2", "3"]
+assert d["budget_max"] == "1450" and d["floor_min"] == "3" and d["floor_max"] == "16"
+assert d["movein_date"] == "2026-11-15" and d["contact"] == "both" and d["term"] == "6_12"
+assert cg.decode_start_code("p1DCBEBDBDBBCBBAAQAAABQAAAAAAAAP_QG0KHQsNC80LDRgNC60LDQvdC0"[1:])["city_other"] == "Самарканд"
+assert cg.decode_start_code("") is None and cg.decode_start_code("9xx") is None
+assert cg.decode_start_code("1D!") is None and cg.decode_start_code("1DB") is None
+assert len(CODE) <= 64
+with mock.patch.object(rr, "tg_call", fake2):
+    SENT2.clear()
+    rr.handle_command("/start " + CODE, rr.default_settings(), ms2, cfg)
+assert cg.get_anketa(ms2)["ans"]["budget"] == "1450"
+assert ms2.get_kv("request_text")
+with mock.patch.object(rr, "tg_call", fake2):
+    SENT2.clear()
+    rr.handle_command("/start pМУСОР", rr.default_settings(), ms2, cfg)
+    assert any("Не получилось" in str(pl.get("text", "")) for _, pl in SENT2)
 mdb.unlink(missing_ok=True)
-print("OK — мини-апп: ссылка, кнопка, приём данных формы")
+print("OK — мини-апп: ссылка, кнопка, приём данных формы, /start p<код> из кнопки меню")
 
 # ================= ПЕРЕИМЕНОВАНИЕ: голос Амины =================
 
