@@ -2007,6 +2007,11 @@ SRC_LABEL = {"realt24": "Realt24", "joymee": "Joymee", "realting": "Realting",
 
 def rano_screen(cfg, store) -> dict:
     """«🔎 Ищет Ra'no»: что ищу сама, где, что нашла сегодня, что ждёт в подборке."""
+    if store.get_kv("fresh_start"):
+        return {"text": "🔎 <b>Ищет Ra'no</b> — сама смотрю сайты и каналы, без маклеров\n\n"
+                        "Сначала расскажите, что ищете, — например: «купить двушку в центре до $50 000, "
+                        "нужна ипотека». Как только соберу параметры, начну искать по всем сайтам.",
+                "kb": {"inline_keyboard": [[{"text": "✏️ Рассказать, что ищу", "callback_data": "cmd:/mysearch"}]]}}
     eff = effective_sale_cfg(cfg, store)
     ss = eff.get("sale_search") or {}
     if not ss.get("enabled"):
@@ -3349,7 +3354,8 @@ def run():
                 log.warning("[маклеры продажи] сбор не удался: %s", e)
 
         force_sale = bool(store.get_kv("sale_force"))          # «Проверить сайты сейчас»
-        if sale_store is not None and (once or now >= next_sale or force_sale):
+        fresh = bool(store.get_kv("fresh_start"))              # после сброса — ждём новых параметров из чата
+        if sale_store is not None and not fresh and (once or now >= next_sale or force_sale):
             next_sale = now + (sale_cfg.get("uybor") or {}).get("interval_seconds", 600)
             if force_sale:
                 store.set_kv("sale_force", False)
@@ -3364,7 +3370,7 @@ def run():
                     log.info("[продажа] новых: %d", n)
             except Exception as e:      # поиск покупки не должен ронять радар
                 log.warning("[продажа] проход не удался: %s", e)
-        if sale_store is not None and not once:
+        if sale_store is not None and not once and not fresh:
             try:
                 sale_sources.maybe_daily_pick(cfg, sale_store)   # 19:30 — подборка дня
             except Exception as e:

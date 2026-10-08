@@ -1678,5 +1678,6 @@ def apply_webapp_data(cfg, store, raw):
         store.set_kv("awaiting_text", False)   # «Изменить текст» отменён новым интервью
     a["i"] = len(STEPS)
     save_anketa(store, a)
+    store.set_kv("fresh_start", False)          # после сброса поиск по сайтам ждал этих параметров
     finish_anketa(cfg, store)
     return True

@@ -2022,6 +2022,12 @@ assert "Ищет Ra'no" in scr["text"] and "Realt24" in scr["text"] and "нов�
 assert "нужна ипотека" in scr["text"] and "R:check" in json.dumps(scr["kb"])
 v = rr.via_screen(cfg, ys)
 assert "Через маклеров" in v["text"] and '"b"' in json.dumps(v["kb"]) and "10–15 в день" in v["text"]
+ys.set_kv("fresh_start", True)                                                # после сброса — сначала параметры
+assert "Сначала расскажите" in rr.rano_screen(cfg, ys)["text"]
+with mock.patch.object(rr, "tg_call", xtg):
+    cg.apply_webapp_data(cfg, ys, json.dumps({"v": 3, "replace": True, "ans": {"deal": "buy", "object": "flat", "rooms": ["2"],
+                                                                             "budget": "50000", "contact": "bot"}}))
+assert not ys.get_kv("fresh_start")
 with mock.patch.object(rr, "SALE_DB_PATH", xdb):
     snap = rr.ui_snapshot(cfg, ys, rr.default_settings())
 assert set(snap["screens"]) == {"/rano", "/via"}
