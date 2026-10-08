@@ -16,12 +16,15 @@ function d1() {
 }
 
 const sent = [], gh = [];
+const tgFail = {};                                // метод → ответить ok:false (как Telegram при ошибке)
 let geminiQueue = [];
 globalThis.fetch = async (url, opt = {}) => {
   url = String(url);
   const body = opt.body ? JSON.parse(opt.body) : {};
   if (url.includes("api.telegram.org")) {
-    sent.push({ m: url.split("/").pop(), ...body });
+    const m = url.split("/").pop();
+    sent.push({ m, ...body });
+    if (tgFail[m]) return new Response(JSON.stringify({ ok: false, description: "message can't be deleted" }), { status: 400 });
     return new Response(JSON.stringify({ ok: true, result: {} }));
   }
   if (url.includes("generativelanguage")) {
@@ -366,11 +369,18 @@ assert.match(sent.filter(x => x.m === "answerCallbackQuery").at(-1).text, /шо�
 got = await drain(); assert.equal(got.at(-1).callback_query.data, "L:s:sale:joymee:77"); assert.equal(got.at(-1).callback_query._toast_done, true);
 // кнопки меняются сразу: 👍 → «✅ В шортлисте», «Мимо» → «Не подходит — убрала»
 const cardKb = { inline_keyboard: [[{ text: "👍 В шортлист", callback_data: "L:s:sale:joymee:78" }, { text: "👎 Мимо", callback_data: "L:n:sale:joymee:78" }]] };
-await handleUpdate(env, { update_id: ++uid, callback_query: { id: "L2", data: "L:n:sale:joymee:78", message: { message_id: 61, chat: { id: +OWNER }, reply_markup: cardKb } } });
+await handleUpdate(env, { update_id: ++uid, callback_query: { id: "L2", data: "L:n:sale:joymee:78|57.3", message: { message_id: 61, chat: { id: +OWNER }, reply_markup: cardKb } } });
+let dl = sent.filter(x => x.m === "deleteMessages").at(-1);
+assert.deepEqual(dl.message_ids, [61, 57, 58, 59]);                              // анализ + альбом карточки
+await handleUpdate(env, { update_id: ++uid, callback_query: { id: "L2b", data: "L:n:sale:joymee:79", message: { message_id: 70, chat: { id: +OWNER }, reply_markup: cardKb } } });
+assert.deepEqual(sent.filter(x => x.m === "deleteMessages").at(-1).message_ids, [70, 69]);   // старое: карточка над анализом
+tgFail.deleteMessages = true;                                                     // старше 48 ч — удалить нельзя
+await handleUpdate(env, { update_id: ++uid, callback_query: { id: "L2c", data: "L:n:sale:joymee:80", message: { message_id: 71, chat: { id: +OWNER }, reply_markup: cardKb } } });
+tgFail.deleteMessages = false;
 let mk = sent.filter(x => x.m === "editMessageReplyMarkup").at(-1);
-assert.equal(mk.message_id, 61); assert.match(JSON.stringify(mk.reply_markup), /Не подходит — убрала/);
+assert.equal(mk.message_id, 71); assert.match(JSON.stringify(mk.reply_markup), /Не подходит — убрала/);
 assert.match(sent.filter(x => x.m === "answerCallbackQuery").at(-1).text, /Убрала/);
-assert.equal((await drain()).at(-1).callback_query.data, "L:n:sale:joymee:78");
+assert.equal((await drain()).at(-1).callback_query.data, "L:n:sale:joymee:80");
 await handleUpdate(env, { update_id: ++uid, callback_query: { id: "L3", data: "L:s:sale:joymee:78", message: { message_id: 62, chat: { id: +OWNER }, reply_markup: cardKb } } });
 mk = sent.filter(x => x.m === "editMessageReplyMarkup").at(-1);
 assert.match(JSON.stringify(mk.reply_markup), /✅ В шортлисте/); assert.doesNotMatch(JSON.stringify(mk.reply_markup), /Мимо/);

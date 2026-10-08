@@ -917,15 +917,25 @@ export async function handleUpdate(env, upd) {
     if (/^L:[sn]:/.test(data) || data === "R:check") {     // объявление с сайта / «проверить сайты»
       await tg(env, "answerCallbackQuery", { callback_query_id: cb.id,
         text: data === "R:check" ? "🔄 Проверяю все сайты — 1–2 минуты" : data[2] === "s" ? "👍 Добавила в шортлист" : "👎 Убрала — больше не покажу" });
-      if (data !== "R:check") {                  // видимый след нажатия — меняем кнопки под сообщением
-        const key = data.slice(4);
+      let removed = false;
+      if (data[2] === "n") {                     // «Мимо» — убрать из чата и анализ, и карточку над ним
+        const [, ref] = data.slice(4).split("|");
+        const mid = cb.message.message_id;
+        let ids = [mid];
+        if (ref) { const [first, n] = ref.split(".").map(Number); for (let i = 0; i < n; i++) ids.push(first + i); }
+        else ids.push(mid - 1);                  // старые сообщения: карточка — сразу над анализом
+        const r = await tg(env, "deleteMessages", { chat_id: chat, message_ids: ids });
+        removed = !!(r && r.ok);
+      }
+      if (data !== "R:check" && !removed) {      // удалить нельзя (старше 48 ч) — хотя бы видимый след
+        const key = data.slice(4).split("|")[0];
         const old = cb.message?.reply_markup?.inline_keyboard || [];
         let rows;
         if (data[2] === "n") rows = [[{ text: "👎 Не подходит — убрала", callback_data: "L:x" }]];
         else {
           rows = old.map(r => r.flatMap(b => {
             if (b.callback_data === data) return [{ text: /шортлист/i.test(b.text) ? "✅ В шортлисте" : b.text.replace("👍", "✅"), callback_data: "L:x" }];
-            if (b.callback_data === `L:n:${key}`) return [];
+            if ((b.callback_data || "").split("|")[0] === `L:n:${key}`) return [];
             return [b];
           })).filter(r => r.length);
           if (!rows.some(r => r.some(b => b.callback_data === "s:show"))) rows.push([{ text: "📋 Открыть шортлист", callback_data: "s:show" }]);

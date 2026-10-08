@@ -1125,29 +1125,45 @@ def send_photo_upload(cfg, photo_url: str, caption: str) -> bool:
                   "caption": caption[:1000], "parse_mode": "HTML"},
             files={"photo": ("photo.jpg", img.content)},
             timeout=30)
-        return r.status_code == 200
+        if r.status_code != 200:
+            return False
+        try:
+            return _msg_ids(r.json()) or True
+        except ValueError:
+            return True
     except requests.RequestException as e:
         log.warning("Загрузка фото не удалась: %s", e)
         return False
 
 
-def send_listing(cfg, settings: dict, l: dict, likely_makler: bool, text: str = None) -> bool:
-    """Уведомление об объявлении: альбом с фото, если они есть и включены."""
+def _msg_ids(resp) -> list:
+    """id отправленных сообщений из ответа Telegram (одно сообщение или альбом)."""
+    res = (resp or {}).get("result") if isinstance(resp, dict) else None
+    items = res if isinstance(res, list) else [res] if isinstance(res, dict) else []
+    return [m["message_id"] for m in items if isinstance(m, dict) and m.get("message_id")]
+
+
+def send_listing(cfg, settings: dict, l: dict, likely_makler: bool, text: str = None):
+    """Уведомление об объявлении: альбом с фото, если они есть и включены.
+    Возвращает id отправленных сообщений (или True, если id неизвестны); False — не ушло."""
     text = text or format_message(l, cfg, likely_makler)
     photos = (l.get("photo_urls") or []) if settings.get("photos", True) else []
     if photos:
         media = [{"type": "photo", "media": u} for u in photos[:4]]
         media[0]["caption"] = text[:1000]
         media[0]["parse_mode"] = "HTML"
-        if tg_call(cfg, "sendMediaGroup", {
+        r = tg_call(cfg, "sendMediaGroup", {
             "chat_id": cfg["telegram_chat_id"],
             "media": json.dumps(media),
-        }) is not None:
-            return True
-        if send_photo_upload(cfg, photos[0], text):
-            return True
+        })
+        if r is not None:
+            return _msg_ids(r) or True
+        up = send_photo_upload(cfg, photos[0], text)
+        if up:
+            return up
         log.info("Фото не отправились, шлю текстом: %s", l["title"][:50])
-    return send_telegram(cfg, text)
+    r = tg_call(cfg, "sendMessage", {"chat_id": cfg["telegram_chat_id"], "text": text, "parse_mode": "HTML"})
+    return False if r is None else (_msg_ids(r) or True)
 
 
 # ------------------------------------------------- настройки через бота ----
@@ -2207,7 +2223,7 @@ def handle_callback(data: str, settings: dict, store, cfg: dict, message_id=None
         toast, _ = concierge.handle_offer_cb(d, cfg, store, message_id)
         return toast, None
     if d.startswith("L:"):                     # объявление с сайта: в шортлист / мимо
-        kind, key = d[2:3], d[4:]
+        kind, key = d[2:3], d[4:].split("|")[0]
         row = None
         if SALE_DB_PATH.exists():
             sst = Store(SALE_DB_PATH)
@@ -3066,13 +3082,14 @@ def run_sale_search(cfg: dict, store, settings: dict, force: bool = False) -> in
         sc, why, strong, _ = sale_sources.score(store, l, cfg, ss)
         l["score"], l["why"] = sc, why
         if strong and day.get("instant", 0) + sent < cap:
-            if not send_listing(cfg, settings, l, False, text=format_sale_message(l, cfg)):
+            ids = send_listing(cfg, settings, l, False, text=format_sale_message(l, cfg))
+            if not ids:
                 log.info("[продажа] не отправилось, повторю позже: %s", l["title"][:45])
                 break     # не сохраняем — объявление придёт в следующий проход
             store.save(l, notified=True)
             sent += 1
             log.info("[продажа] сразу (%s): %s", sc, l["title"][:60])
-            send_sale_analysis(cfg, store, l, kb=sale_kb(l["key"]))
+            send_sale_analysis(cfg, store, l, kb=sale_kb(l["key"], ids))
             time.sleep(1)
         else:
             store.save(l, notified=False)
@@ -3088,9 +3105,15 @@ def sale_district_ids(ss: dict) -> list:
     return [i for i, name in UYBOR_DISTRICT_IDS.items() if name in (ss.get("districts") or [])]
 
 
-def sale_kb(key):
+def sale_kb(key, card_ids=None):
+    """«Мимо» несёт id карточки над анализом — воркер удалит из чата и её, и анализ."""
+    no = f"L:n:{key}"
+    ids = sorted(card_ids) if isinstance(card_ids, list) else []
+    if ids and ids == list(range(ids[0], ids[0] + len(ids))):
+        ref = f"{no}|{ids[0]}.{len(ids)}"
+        no = ref if len(ref) <= 64 else no
     return {"inline_keyboard": [[{"text": "👍 В шортлист", "callback_data": f"L:s:{key}"[:64]},
-                                 {"text": "👎 Мимо", "callback_data": f"L:n:{key}"[:64]}]]}
+                                 {"text": "👎 Мимо", "callback_data": no[:64]}]]}
 
 
 def send_sale_analysis(cfg: dict, store, l: dict, kb=None) -> bool:

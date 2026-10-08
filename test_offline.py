@@ -1987,6 +1987,17 @@ assert "В шортлисте" in t1 and t2 == "Уже в шортлисте"
 with mock.patch.object(rr, "SALE_DB_PATH", xdb):
     t3, _ = rr.handle_callback("L:n:sale:realting:555", rr.default_settings(), ys, cfg, 1)
 assert "Убрала" in t3 and "sale:realting:555" in rr.Store(xdb).get_kv("sale_dismissed")
+# «Мимо» несёт id карточки: альбом из 3 фото → удалить 57–59 вместе с анализом
+kb = rr.sale_kb("sale:joymee:77", [57, 58, 59])
+assert kb["inline_keyboard"][0][1]["callback_data"] == "L:n:sale:joymee:77|57.3"
+assert rr.sale_kb("sale:joymee:77", True)["inline_keyboard"][0][1]["callback_data"] == "L:n:sale:joymee:77"
+with mock.patch.object(rr, "tg_call", lambda c, m, pl, **k: {"ok": True, "result": [{"message_id": 10}, {"message_id": 11}]}):
+    assert rr.send_listing(cfg, {"photos": True}, {"photo_urls": ["a", "b"], "title": "x"}, False, text="t") == [10, 11]
+with mock.patch.object(rr, "tg_call", lambda c, m, pl, **k: {"ok": True, "result": {"message_id": 12}}):
+    assert rr.send_listing(cfg, {"photos": False}, {"title": "x"}, False, text="t") == [12]
+with mock.patch.object(rr, "SALE_DB_PATH", xdb):
+    t4, _ = rr.handle_callback("L:n:sale:realting:555|57.3", rr.default_settings(), ys, cfg, 1)
+assert "Убрала" in t4
 so = cg.get_offer(ys, ys.conn.execute("SELECT oid FROM broker_offers WHERE broker_chat='site:sale:joymee:77'").fetchone()[0])
 assert so["status"] == "shortlist" and so["price_usd"] == 45000 and so["extra"]["url"].endswith("/77")
 card = cg.offer_card(ys, cfg, so)
