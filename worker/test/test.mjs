@@ -2,7 +2,7 @@
 // D1 эмулируется на node:sqlite, Telegram / Gemini / GitHub — подменой fetch.
 import { DatabaseSync } from "node:sqlite";
 import assert from "node:assert/strict";
-import worker, { applyPatch, essentialsOk, finalAns, handleUpdate, summary, pairsToSet } from "../src/index.js";
+import worker, { applyPatch, essentialsOk, finalAns, handleUpdate, summary, pairsToSet, OWNER_KB, BROKER_KB, BTN } from "../src/index.js";
 
 function d1() {
   const s = new DatabaseSync(":memory:");
@@ -78,7 +78,8 @@ assert.equal(r.status, 403);
 // ── /start → приветствие и снятие старой клавиатуры
 await handleUpdate(env, msg("/start"));
 assert.match(texts().at(-1), /Ra'no, ИИ-ассистент/);
-assert.deepEqual(sent.at(-1).reply_markup, { remove_keyboard: true });
+assert.deepEqual(sent.at(-1).reply_markup, OWNER_KB);              // постоянные кнопки внизу
+assert.doesNotMatch(texts().at(-1), /\/new/);                       // команды учить не нужно
 
 // ── ход 1: модель разобрала часть, спрашивает дальше — в очередь ничего
 geminiQueue.push({ reply: "Отлично! Какой бюджет в месяц?", ready: false,
@@ -147,7 +148,7 @@ assert.equal(q.result[1].message.text, "Мой собственный текст
 const id4 = q.result[1].update_id;
 await handleUpdate(env, { update_id: ++uid, callback_query: { id: "c2", data: "q:again",
   message: { message_id: 9, chat: { id: +OWNER } } } });
-assert.match(texts().at(-1), /Расскажите своими словами/);
+assert.match(texts().at(-1), /Как это работает/);
 q = await (await svc(`/svc/updates?after=${id4}`)).json();
 assert.equal(q.result.length, 0);
 
@@ -173,14 +174,18 @@ let qq = await (await svc("/svc/updates?after=0")).json();
 let lastId = qq.result.length ? qq.result.at(-1).update_id : 0;
 sent.length = 0;
 await handleUpdate(env, msg("/start", "4242"));
-assert.equal(sent.filter(x => x.m === "sendMessage" && String(x.chat_id) === "4242").length, 0);
+let to4242 = sent.filter(x => x.m === "sendMessage" && String(x.chat_id) === "4242");
+assert.equal(to4242.length, 1); assert.match(to4242[0].text, /Пришлите подходящие варианты/);
+assert.deepEqual(to4242[0].reply_markup, BROKER_KB);              // одна кнопка «Что ищет клиент»
+await handleUpdate(env, msg(BTN.what, "4242"));                   // кнопка — ответ сразу, в очередь не идёт
 await handleUpdate(env, msg("Продаю 2 комн Мирабад 44 000$", "4242"));
 await handleUpdate(env, { update_id: ++uid, message: { message_id: uid, chat: { id: 4242 }, photo: [{ file_id: "x" }] } });
-const acks = sent.filter(x => x.m === "sendMessage" && String(x.chat_id) === "4242");
-assert.equal(acks.length, 1); assert.match(acks[0].text, /получила/);
+to4242 = sent.filter(x => x.m === "sendMessage" && String(x.chat_id) === "4242");
+const acks = to4242.filter(x => /получила/.test(x.text));
+assert.equal(to4242.length, 3); assert.equal(acks.length, 1);
 qq = await (await svc(`/svc/updates?after=${lastId}`)).json();
 assert.equal(qq.result.length, 3);
-assert.equal(qq.result[0].message._acked, undefined);            // /start — без ответа воркера
+assert.equal(qq.result[0].message._welcomed, true);              // /start — Python не здоровается второй раз
 assert.equal(qq.result[1].message._acked, true);
 assert.equal(qq.result[2].message._acked, true);                 // второе — в окне 20 минут
 lastId = qq.result.at(-1).update_id;
@@ -201,6 +206,45 @@ await handleUpdate(env, msg("а бюджет можно до 50"));            /
 assert.equal(texts().at(-1), "Поняла.");
 qq = await (await svc(`/svc/updates?after=${lastId}`)).json();
 assert.equal(qq.result.length, 0);
+
+// ── кнопки внизу и обычные фразы вместо команд
+lastId = (await (await svc(`/svc/updates?after=${lastId}`)).json()).result.at(-1)?.update_id || lastId;
+const drain = async () => { const r = await (await svc(`/svc/updates?after=${lastId}`)).json(); if (r.result.length) lastId = r.result.at(-1).update_id; return r.result; };
+await drain();
+await handleUpdate(env, msg(BTN.offers));
+await handleUpdate(env, msg(BTN.brokers));
+let got = await drain();
+assert.deepEqual(got.map(u => u.message.text), ["/offers", "/brokers"]);
+sent.length = 0;
+await handleUpdate(env, msg(BTN.more));
+assert.ok(JSON.stringify(sent.at(-1).reply_markup).includes("cmd:/add"));
+await handleUpdate(env, msg(BTN.search));
+assert.match(texts().at(-1), /Сейчас ищем|Как это работает/);
+// «⋯ Ещё» → шортлист: колбэк превращается в команду для Python
+await handleUpdate(env, { update_id: ++uid, callback_query: { id: "c9", data: "cmd:/shortlist", message: { message_id: 3, chat: { id: +OWNER } } } });
+got = await drain();
+assert.equal(got.at(-1).message.text, "/shortlist");
+// обычной фразой: «что прислали маклеры?» → /offers; «давай заново» → новый поиск; «мне скинули квартиру» → режим добавления
+geminiQueue.push({ reply: "Сейчас покажу.", ready: false, set: [], intent: "show_offers" });
+await handleUpdate(env, msg("что там прислали маклеры?"));
+got = await drain();
+assert.equal(got.at(-1).message.text, "/offers");
+geminiQueue.push({ reply: "Хорошо.", ready: false, set: [], intent: "restart" });
+await handleUpdate(env, msg("давай начнём заново"));
+assert.match(texts().at(-1), /Как это работает/);                 // без деталей — приветствие
+geminiQueue.push({ reply: "Ищем аренду. В каком районе?", ready: false, set: [{ k: "deal", v: "rent" }], intent: "restart" });
+await handleUpdate(env, msg("давай заново, теперь аренда"));
+assert.match(texts().at(-1), /Начинаем новый поиск\.\n\nИщем аренду/);
+const ivR = JSON.parse((await env.DB.prepare("SELECT v FROM kv WHERE k=?").bind("iv:" + OWNER).first()).v);
+assert.deepEqual(ivR.ans, { deal: "rent" });                       // старое забыто, новое сохранено
+geminiQueue.push({ reply: "Ок.", ready: false, set: [], intent: "add_offer" });
+await handleUpdate(env, msg("мне в ватсапе скинули квартиру, добавь"));
+assert.match(texts().at(-1), /Перешлите или вставьте вариант/);
+await handleUpdate(env, msg("Скопированный текст: 2/5, 50 м², 43 000$"));
+got = await drain();
+assert.equal(got.at(-1).message._owner_offer, true);
+await handleUpdate(env, { update_id: ++uid, callback_query: { id: "c10", data: "cmd:/done", message: { message_id: 4, chat: { id: +OWNER } } } });
+assert.match(texts().at(-1), /Готово/);
 
 // ── /svc без ключа — 401
 r = await worker.fetch(new Request("https://w.example/svc/updates"), env, { waitUntil() {} });

@@ -1152,34 +1152,18 @@ WELCOME_TEXT = (
     "🎁 Первые проверенные варианты — бесплатно.\n\n"
     "Начнём? Напишите, что ищете, — например: «снять трёшку в Мирабаде до $1400» 👇")
 
-HELP_TEXT = """🏠 <b>Ra'no</b> — ваш ассистент по поиску жилья
+HELP_TEXT = """🏠 <b>Ra'no</b> — ассистент по поиску жилья
 
-<b>/find</b> — подобрать лучшее прямо сейчас: агент оценит всё накопленное,
-сравнит с рынком, посчитает метро и отдаст топ-5 с разбором.
+<b>Команды запоминать не нужно.</b> Внизу четыре кнопки:
+🔎 <b>Мой поиск</b> — что сейчас ищем; поменять — просто напишите («бюджет 60 тысяч», «добавь Юнусабад»)
+🏠 <b>Варианты</b> — что прислали маклеры: новые карточки и шортлист
+📇 <b>Маклерам</b> — разослать запрос: маклеры по одному, текст уже набран
+⋯ <b>Ещё</b> — добавить вариант из WhatsApp, шортлист, цены рынка, поиск на Uybor, начать заново
 
-Проще всего — <b>/menu</b>: там всё выбирается кнопками.
+Можно и словами: «что прислали?», «давай заново», «мне скинули квартиру — добавь».
+Варианты из WhatsApp — просто перешлите сюда, фото и текст я соберу в карточку.
 
-Команды (можно и без аргумента — покажу кнопки):
-/menu — меню
-/status — текущие фильтры и статистика
-/max — максимальная цена
-/min — минимальная цена
-/rooms — комнатность
-/district — районы
-/new — описать поиск заново: просто напишите, что ищете, своими словами
-/add — добавить вариант, который маклер прислал в WhatsApp (перешлите или вставьте текст и фото)
-/anketa — то же; /steps — старый пошаговый режим
-/shortlist — шортлист и запрос деталей у маклеров
-/offers — показать новые варианты от маклеров
-/prices — реальные цены по данным маклеров
-/brokers — база маклеров и рассылка запроса в один тап
-/owner — только хозяева (без маклеров)
-/sale — поиск квартиры для покупки
-/rynok — сводка рынка: цены за м², аренда, сценарии
-/segment — класс жилья: любой ↔ новый ЖК с ремонтом
-/work — адрес работы (считать расстояние)
-/photos — фото вкл/выкл
-/pause — пауза, /resume — продолжить"""
+Для тонкой настройки радара остались команды: /menu, /status, /owner, /segment, /work, /photos, /pause, /resume"""
 
 DISTRICT_LIST = sorted(DISTRICTS)
 PRICE_PRESETS = [300, 400, 500, 700, 1000, 1500]
@@ -1904,7 +1888,7 @@ def send_broker_cards(cfg, store, settings, limit=10, text=None, deal=None) -> s
         send_telegram(cfg, f"📇 Новых маклеров {kind} с контактом пока нет.\n"
                            f"Всего в базе {kind}: {total} (с контактом {withph}).\n"
                            + ("Собираю их с Realt24, Joymee, Realting, Uybor и из Telegram-каналов — "
-                              "загляните через час: /brokers" if deal == "sale" else
+                              "загляните через час — кнопка «📇 Маклерам»" if deal == "sale" else
                               "База пополняется по мере работы радара — попробуйте позже."))
         return ""
     store.set_kv("outreach", {"deal": deal, "text": text, "sent": 0, "skipped": 0})
@@ -1917,7 +1901,7 @@ def send_broker_cards(cfg, store, settings, limit=10, text=None, deal=None) -> s
         f"<code>{escape_html(text)}</code>\n\n"
         "Покажу маклеров по одному: жмите «WhatsApp» или «Telegram» — откроется чат с "
         "набранным текстом, отправьте и нажмите «✅ Отправил → следующий». "
-        "Ответы маклеров из WhatsApp можно переслать сюда: /add"))
+        "Ответы маклеров из WhatsApp просто перешлите сюда — соберу в карточку."))
     send_next_broker(cfg, store)
     return ""
 
@@ -1931,7 +1915,7 @@ def send_next_broker(cfg, store) -> bool:
     if not pool:
         send_telegram(cfg, f"✅ Рассылка закончена: написано {st.get('sent', 0)}, "
                            f"пропущено {st.get('skipped', 0)}. Новые маклеры добавляются сами — "
-                           "/brokers через пару часов.")
+                           "загляните через пару часов — кнопка «📇 Маклерам».")
         return False
     b = pool[0]
     d = ", ".join(b["districts"][:3]) or "—"
@@ -2168,6 +2152,9 @@ def handle_broker_message(cfg, store, msg):
     if not text and not photos:
         return
 
+    if msg.get("_welcomed"):                 # воркер уже познакомил маклера с запросом
+        store.set_kv(f"welcomed:{chat_id}", time.time())
+        return
     # /start, «здравствуйте» — это не вариант: знакомим и показываем, что ищем
     if not photos and (text.startswith("/") or (len(text) < 25 and not re.search(r"\d", text))):
         last = store.get_kv(f"welcomed:{chat_id}") or 0
@@ -2350,7 +2337,10 @@ def process_commands(cfg: dict, store, long_poll: int = 0) -> dict:
         if store.get_kv("awaiting_text") and text and not text.startswith("/"):
             store.set_kv("request_text", text)
             store.set_kv("awaiting_text", False)
-            send_telegram(cfg, "✅ Текст запроса сохранён. Показать маклеров — /brokers")
+            tg_call(cfg, "sendMessage", {"chat_id": cfg["telegram_chat_id"],
+                                         "text": "✅ Текст запроса сохранён.",
+                                         "reply_markup": json.dumps({"inline_keyboard": [[
+                                             {"text": "📇 Разослать маклерам", "callback_data": "b"}]]}, ensure_ascii=False)})
             changed = True
             continue
         if not text:
@@ -2730,7 +2720,7 @@ def run_sale_search(cfg: dict, store, settings: dict) -> int:
                  f"За последние {days} дней подходящих нет — пришлю, как только появятся.")
         title = "Условия поиска обновлены" if intro_sent else "Поиск квартиры для покупки включён"
         intro = (f"🏷 <b>{title}</b>\n" + sale_criteria_text(ss) + "\n\n" + found
-                 + "\n/sale — статус поиска")
+                 + "\nСтатус поиска — «⋯ Ещё» → «Поиск на Uybor»")
         if not send_telegram(cfg, intro):
             return 0      # Telegram недоступен — всё повторим в следующий проход
         store.set_kv("sale_intro_sent", True)
@@ -2791,7 +2781,7 @@ def backfill_sale_analysis(cfg: dict, store, settings: dict) -> int:
             todo.append(l)
     if todo and not send_telegram(cfg, f"📊 <b>Добавила анализ цены</b> к вариантам, которые уже "
                                        f"присылала и которые ещё в продаже ({len(todo)}). "
-                                       f"Сводка рынка — /rynok"):
+                                       f"Сводка рынка — «⋯ Ещё» → «Цены рынка»"):
         return 0
     n = 0
     for l in todo[:20]:
@@ -2839,7 +2829,7 @@ def sale_status_text(cfg: dict) -> str:
                 f'${_money(d["price_usd"])}' if d.get("price_usd") else ""]
         label = ", ".join(b for b in bits if b) or "вариант"
         lines.append(f'• <a href="{url}">{label}</a> — {escape_html(d.get("district") or "")}')
-    lines.append("\n📊 /rynok — цены за м², аренда и сценарии по районам")
+    lines.append("\n📊 Цены за м², аренда и сценарии по районам — «⋯ Ещё» → «Цены рынка»")
     return "\n".join(lines)
 
 

@@ -845,8 +845,16 @@ def show_offers(cfg, store, batch=None):
     pool = offers_by_status(store, "new") + offers_by_status(store, "later")
     total = len(pool)
     if not total:
-        rr.send_telegram(cfg, "Пока маклеры ничего не прислали по вашим параметрам. "
-                              "Разослать запрос — кнопка «Написать маклерам».")
+        sl = len(offers_by_status(store, "shortlist")) + len(offers_by_status(store, "asked"))
+        rows = [[{"text": "📇 Разослать маклерам", "callback_data": "b"}],
+                [{"text": "📥 Добавить вариант из WhatsApp", "callback_data": "cmd:/add"}]]
+        if sl:
+            rows.insert(0, [{"text": f"📋 Шортлист ({sl})", "callback_data": "s:ref"}])
+        rr.tg_call(cfg, "sendMessage", {
+            "chat_id": cfg["telegram_chat_id"],
+            "text": ("Новых вариантов пока нет." + (f" В шортлисте — {sl}." if sl else "")
+                     + "\nМаклеры отвечают сюда сами; ответы из WhatsApp просто перешлите мне."),
+            "reply_markup": json.dumps({"inline_keyboard": rows}, ensure_ascii=False)})
         return 0
     for i, o in enumerate(pool[:batch]):
         notify_offer(cfg, store, o["oid"], pos=i + 1, total=total)
@@ -1146,6 +1154,13 @@ def webapp_url(store, cfg=None):
     return WEBAPP_URL
 
 
+# те же кнопки, что ставит воркер (worker/src/index.js · OWNER_KB)
+OWNER_KB = {"keyboard": [[{"text": "🔎 Мой поиск"}, {"text": "🏠 Варианты"}],
+                         [{"text": "📇 Маклерам"}, {"text": "⋯ Ещё"}]],
+            "resize_keyboard": True, "is_persistent": True,
+            "input_field_placeholder": "Напишите, что ищете, или перешлите вариант"}
+
+
 def send_app_button(cfg, store, text=None):
     """Раньше — кнопка мини-аппа. Теперь параметры собираются в чате:
     просим описать поиск словами и убираем старую клавиатуру с кнопкой."""
@@ -1156,7 +1171,7 @@ def send_app_button(cfg, store, text=None):
                          "в Мирабаде до $1400, с ремонтом, заезд в ноябре». "
                          "Остальное я уточню сама."),
         "parse_mode": "HTML",
-        "reply_markup": json.dumps({"remove_keyboard": True})})
+        "reply_markup": json.dumps(OWNER_KB, ensure_ascii=False)})
 
 
 ALLOWED = {f["k"] for f in STEPS} | {

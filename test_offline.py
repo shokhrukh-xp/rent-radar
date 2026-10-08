@@ -1020,7 +1020,7 @@ with mock.patch.object(rr, "tg_call", fake2):
     cg.send_app_button(cfg, ms2)
 m, pl = SENT2[-1]
 kb = json.loads(pl["reply_markup"])
-assert kb == {"remove_keyboard": True}
+assert kb == cg.OWNER_KB and kb["is_persistent"]                 # постоянные кнопки вместо команд
 assert "своими словами" in pl["text"]
 
 # данные из формы применяются и сразу дают готовый текст
@@ -1053,7 +1053,7 @@ with mock.patch.object(rr, "tg_call", fake2):
 with mock.patch.object(rr, "tg_call", fake2):
     SENT2.clear()
     rr.handle_command("/app", rr.default_settings(), ms2, cfg)
-    assert any("remove_keyboard" in pl.get("reply_markup", "") for _, pl in SENT2)
+    assert any("Мой поиск" in pl.get("reply_markup", "") for _, pl in SENT2)
     SENT2.clear()
     rr.handle_command("/steps", rr.default_settings(), ms2, cfg)
     assert any("Анкета" in str(pl.get("text", "")) for _, pl in SENT2)
@@ -1685,3 +1685,18 @@ es.upsert_broker("b", "X", "Центр", "901000002", 5, "Мирабад", None,
 assert [b["bid"] for b in rr.ranked_brokers(es, "sale")] == ["b", "a"]
 edb.unlink(missing_ok=True)
 print("OK — путь клиента: параметры чата → поиск покупки, маклеры нужных районов первыми")
+
+# ============ без команд: кнопки вместо подсказок «/xxx», маклера не приветствуем дважды ============
+wdb = Path("/tmp/test_nocmd.db"); wdb.unlink(missing_ok=True)
+ws = rr.Store(wdb)
+W = []
+with mock.patch.object(rr, "tg_call", lambda c, m, pl, **k: (W.append((m, pl)), {"ok": True})[1]):
+    rr.handle_broker_message(cfg, ws, {"chat": {"id": 31}, "text": "/start", "_welcomed": True})
+    assert not W and ws.get_kv("welcomed:31")                     # воркер уже поздоровался
+    cg.show_offers(cfg, ws)                                       # пусто — не тупик, а кнопки
+    m, pl = W[-1]
+    assert "Новых вариантов пока нет" in pl["text"] and '"b"' in pl["reply_markup"] and "cmd:/add" in pl["reply_markup"]
+for t in (rr.HELP_TEXT,):
+    assert "Мой поиск" in t and "/new" not in t and "/brokers" not in t
+wdb.unlink(missing_ok=True)
+print("OK — без команд: кнопки внизу, понятные подсказки, маклер не получает приветствие дважды")

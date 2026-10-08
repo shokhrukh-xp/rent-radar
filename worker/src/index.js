@@ -162,6 +162,16 @@ note: короткая фраза для маклеров о том, для че
   «рассрочка», «ближе к центру», «рядом со школой». Пиши её целиком заново (с прежним содержимым),
   на языке письма маклерам (русский, для lang=uz — узбекский).
 
+intent — что клиент хочет сделать этим сообщением:
+  search — описывает или меняет поиск (по умолчанию);
+  restart — начать новый поиск с нуля («давай заново», «теперь ищу аренду, забудь прошлое»);
+  show_offers — посмотреть, что прислали маклеры («что прислали?», «покажи варианты»);
+  shortlist — отобранные варианты; brokers — разослать запрос / написать маклерам;
+  add_offer — добавить вариант, который ему прислали в WhatsApp («мне скинули квартиру, добавь»);
+  market — цены рынка; request_text — показать текст запроса; sale_search — что нашлось на Uybor;
+  help — что ты умеешь / как пользоваться.
+  Для всего, кроме search и restart, set оставь пустым, а reply — одной короткой фразой.
+
 Честность: если ты ничего не записал в set — не пиши «учла», «обновила запрос».
 «Центр» без названий районов — не выдумывай districts, а положи «ближе к центру» в note.`;
 
@@ -190,6 +200,7 @@ export const SCHEMA = {
       },
     },
     clear: { type: "array", items: { type: "string" } },
+    intent: { type: "string", description: "search | restart | show_offers | shortlist | brokers | add_offer | market | help | request_text | sale_search" },
   },
   required: ["reply", "ready", "set"],
 };
@@ -290,6 +301,51 @@ export async function tg(env, method, body) {
 }
 const say = (env, chat, text, extra = {}) => tg(env, "sendMessage", { chat_id: chat, text, ...extra });
 
+// ── Управление без команд: постоянные кнопки внизу + обычные фразы ──
+export const BTN = { search: "🔎 Мой поиск", offers: "🏠 Варианты", brokers: "📇 Маклерам", more: "⋯ Ещё",
+  what: "🏠 Что ищет клиент" };
+export const OWNER_KB = { keyboard: [[{ text: BTN.search }, { text: BTN.offers }], [{ text: BTN.brokers }, { text: BTN.more }]],
+  resize_keyboard: true, is_persistent: true,
+  input_field_placeholder: "Напишите, что ищете, или перешлите вариант" };
+export const BROKER_KB = { keyboard: [[{ text: BTN.what }]], resize_keyboard: true, is_persistent: true,
+  input_field_placeholder: "Пришлите вариант: фото, адрес, этаж, цена" };
+const MORE_MENU = { inline_keyboard: [
+  [{ text: "📥 Добавить вариант из WhatsApp", callback_data: "cmd:/add" }],
+  [{ text: "📋 Шортлист", callback_data: "cmd:/shortlist" }, { text: "📊 Цены рынка", callback_data: "cmd:/rynok" }],
+  [{ text: "🏷 Поиск на Uybor", callback_data: "cmd:/sale" }, { text: "📝 Текст запроса", callback_data: "cmd:/request" }],
+  [{ text: "🔄 Начать поиск заново", callback_data: "q:again" }],
+  [{ text: "❓ Как это работает", callback_data: "cmd:/help" }],
+] };
+// намерения из обычных фраз → что делает Python
+const INTENT_CMD = { show_offers: "/offers", shortlist: "/shortlist", brokers: "/brokers",
+  market: "/rynok", help: "/help", request_text: "/request", sale_search: "/sale" };
+
+async function asCommand(env, chat, cmd, L = "ru") {
+  // синтетическое сообщение-команда от владельца — Python обработает как набранную
+  await queueAndWake(env, { message: { message_id: 0, chat: { id: +chat || chat, type: "private" },
+    from: { id: +chat || chat }, date: Math.floor(Date.now() / 1000), text: cmd } }, chat, WAIT[L]);
+}
+
+async function showMySearch(env, chat, L) {
+  const iv = await kvGet(env, ivKey(chat), null);
+  if (!iv || !essentialsOk(iv.ans || {})) return startInterview(env, chat, false, L);
+  const note = iv.ans.note ? `\nПожелания: ${iv.ans.note}` : "";
+  await say(env, chat, `🔎 Сейчас ищем: ${summary(iv.ans)}.${note}\n\n` +
+    "Чтобы что-то поменять — просто напишите, например: «бюджет 60 тысяч» или «добавь Юнусабад».", {
+    reply_markup: { inline_keyboard: [
+      [{ text: "📇 Разослать маклерам", callback_data: "cmd:/brokers" }, { text: "📝 Текст запроса", callback_data: "cmd:/request" }],
+      [{ text: "🔄 Начать поиск заново", callback_data: "q:again" }]] } });
+}
+
+async function startAddMode(env, chat) {
+  const iv = (await kvGet(env, ivKey(chat), null)) || emptyIv();
+  iv.mode = "add"; iv.addAt = Date.now();
+  await kvSet(env, ivKey(chat), iv);
+  await say(env, chat, "📥 Перешлите или вставьте вариант от маклера — текст и фото, можно несколькими " +
+    "сообщениями. Пересланное я и так узнаю; этот режим — для скопированного текста. Выключится сам через 15 минут.",
+    { reply_markup: { inline_keyboard: [[{ text: "✅ Готово", callback_data: "cmd:/done" }]] } });
+}
+
 // ───────────────────────────── «будильник» для Python ─────────────────────────────
 async function pythonAlive(env) {
   const hb = await kvGet(env, "py_alive", null);
@@ -325,9 +381,16 @@ async function queueAndWake(env, upd, chat, note) {
 
 // ───────────────────────────── интервью ─────────────────────────────
 const GREET = {
-  ru: "Привет! Я Ra'no, ИИ-ассистент по поиску жилья. Расскажите своими словами, что ищете — например: «снять трёшку в Мирабаде до $1400, с ремонтом, заезд в ноябре». Остальное уточню сама.",
-  uz: "Salom! Men Ra'no, uy-joy qidirish bo'yicha AI-yordamchiman. Nima qidirayotganingizni o'z so'zlaringiz bilan yozing — masalan: «Mirobodda 3 xonali, oyiga $1400 gacha, remont bilan». Qolganini o'zim so'rayman.",
-  en: "Hi! I'm Ra'no, an AI assistant for finding a home. Tell me in your own words what you're looking for — e.g. \"rent a 3-room flat in Mirabad up to $1400, renovated, moving in November\". I'll ask about the rest.",
+  ru: "Привет! Я Ra'no, ИИ-ассистент по поиску жилья.\n\n" +
+    "Как это работает:\n1. Вы своими словами говорите, что ищете — я уточню детали.\n" +
+    "2. Я составлю запрос, а вы в пару нажатий отправите его маклерам.\n" +
+    "3. Варианты маклеров приходят сюда карточками — с анализом цены.\n\n" +
+    "Начнём? Напишите, например: «купить двушку в центре до $50 000, с ремонтом». " +
+    "Всё остальное — кнопками внизу, команды запоминать не нужно.",
+  uz: "Salom! Men Ra'no, uy-joy qidirish bo'yicha AI-yordamchiman. Nima qidirayotganingizni o'z so'zlaringiz bilan yozing — " +
+    "masalan: «markazda 2 xonali, $50 000 gacha, remont bilan». Qolgani — pastdagi tugmalar orqali.",
+  en: "Hi! I'm Ra'no, an AI assistant for finding a home. Tell me in your own words what you're looking for — " +
+    "e.g. \"buy a 2-room flat in the centre up to $50,000, renovated\". Everything else is in the buttons below.",
 };
 const WAIT = {
   ru: "⏳ Запускаю основной модуль — ответ придёт через 1–2 минуты.",
@@ -342,6 +405,26 @@ export const BROKER_ACK = "Здравствуйте! Я Ra'no, ИИ-ассист
   "Спасибо, получила! Если подойдёт, вернусь с уточнениями. Присылайте ещё, что есть по параметрам.\n\n" +
   "Assalomu alaykum! Men Ra'no, AI-yordamchiman — mijoz uchun uy-joy qidiryapman. Rahmat, qabul qilindi! " +
   "Mos kelsa, aniqlik kiritish uchun yozaman. Parametrlarga mos variantlar bo'lsa, yuboravering.";
+/** Маклеру, который пришёл по ссылке / поздоровался / нажал «Что ищет клиент» — знакомство и суть запроса. */
+async function brokerWelcome(env, msg, owner) {
+  const text = String(msg.text || msg.caption || "").trim();
+  const asks = text === BTN.what;
+  const greeting = !msg.photo && (text.startsWith("/") || (text.length < 25 && !/\d/.test(text)));
+  if (!asks && !greeting) return false;
+  const k = "welcome:" + msg.chat.id;
+  if (!asks && !text.startsWith("/") && Date.now() - (await kvGet(env, k, 0)) < 6 * 3600e3) return true;
+  await kvSet(env, k, Date.now());
+  const iv = await kvGet(env, ivKey(owner), null);
+  const want = iv && essentialsOk(iv.ans || {}) ? summary(iv.ans) + (iv.ans.note ? `; ${iv.ans.note}` : "") : "";
+  await tg(env, "sendMessage", { chat_id: msg.chat.id, reply_markup: BROKER_KB, text:
+    "Здравствуйте! Я Ra'no, ИИ-ассистент — веду поиск жилья для клиента.\n" +
+    (want ? `\nКлиент ищет: ${want}.\n` : "") +
+    "\nПришлите подходящие варианты: фото, точный адрес, этаж, площадь, цену и комиссию — " +
+    "одним сообщением или по частям. Я сразу передам клиенту.\n\n" +
+    "Assalomu alaykum! Men Ra'no, AI-yordamchiman. Mos variantlarni yuboring: foto, manzil, qavat, maydon, narx va vositachilik haqi." });
+  return true;
+}
+
 async function brokerAck(env, msg) {
   const text = String(msg.text || msg.caption || "").trim();
   const looksOffer = !!msg.photo || text.length >= 25 || /\d/.test(text);
@@ -399,6 +482,23 @@ export async function interviewTurn(env, chat, text) {
     return;
   }
   let { reply, ready, fin } = res;
+  const intent = String(res.raw?.intent || "search");
+  if (intent === "restart") {
+    // «давай заново, теперь аренда» — начинаем с чистого листа, но сказанное сейчас не теряем
+    const fresh = emptyIv();
+    fresh.ans = applyPatch({}, pairsToSet(res.raw?.set));
+    if (!Object.keys(fresh.ans).length) { await kvSet(env, ivKey(chat), fresh); return startInterview(env, chat, true, fin.lang || "ru"); }
+    fresh.hist = [{ r: "u", t: String(text).slice(0, 1000) }, { r: "a", t: reply }];
+    await kvSet(env, ivKey(chat), fresh);
+    await say(env, chat, "🔄 Начинаем новый поиск.\n\n" + reply, { reply_markup: OWNER_KB });
+    return;
+  }
+  if (intent === "add_offer") return startAddMode(env, chat);
+  if (INTENT_CMD[intent]) {
+    await kvSet(env, ivKey(chat), iv);
+    await asCommand(env, chat, INTENT_CMD[intent], fin.lang === "uz" ? "uz" : "ru");
+    return;
+  }
   await kvSet(env, ivKey(chat), iv);
   if (ready) {
     await enqueue(env, { message: { chat: { id: +chat || chat, type: "private" }, from: { id: +chat || chat },
@@ -410,7 +510,7 @@ export async function interviewTurn(env, chat, text) {
       ? { ru: "📝 Сейчас пришлю текст запроса на проверку…", uz: "📝 So'rov matnini tekshirish uchun hozir yuboraman…", en: "📝 Sending the request text for your review…" }[lang]
       : { ru: "📝 Текст запроса пришлю на проверку через 1–2 минуты.", uz: "📝 So'rov matnini 1–2 daqiqada tekshirish uchun yuboraman.", en: "📝 The request text will come for your review in 1–2 minutes." }[lang]);
   }
-  await say(env, chat, reply, { reply_markup: { remove_keyboard: true } });
+  await say(env, chat, reply, { reply_markup: OWNER_KB });
 }
 
 async function startInterview(env, chat, fresh, lang = "ru") {
@@ -418,11 +518,11 @@ async function startInterview(env, chat, fresh, lang = "ru") {
   if (fresh || !iv || !essentialsOk(iv.ans || {})) {
     iv = emptyIv();
     await kvSet(env, ivKey(chat), iv);
-    await say(env, chat, GREET[lang] || GREET.ru, { reply_markup: { remove_keyboard: true } });
+    await say(env, chat, GREET[lang] || GREET.ru, { reply_markup: OWNER_KB });
     return;
   }
   await say(env, chat, `С возвращением! Сейчас ищем: ${summary(iv.ans)}.\n` +
-    "Напишите, что поменять, — или /new, чтобы начать заново.", { reply_markup: { remove_keyboard: true } });
+    "Напишите, что поменять, — или нажмите «🔎 Мой поиск» → «Начать заново».", { reply_markup: OWNER_KB });
 }
 
 // ───────────────────────────── разбор обновления ─────────────────────────────
@@ -437,6 +537,19 @@ export async function handleUpdate(env, upd) {
     const chat = String(cb.message?.chat?.id ?? "");
     if (chat !== owner) return "skip";
     const data = cb.data || "";
+    if (data.startsWith("cmd:")) {               // кнопки меню «⋯ Ещё» и «Мой поиск»
+      const cmd = data.slice(4);
+      await tg(env, "answerCallbackQuery", { callback_query_id: cb.id });
+      if (cmd === "/add") return (await startAddMode(env, chat), "add_mode");
+      if (cmd === "/done") {
+        const iv = (await kvGet(env, ivKey(chat), null)) || emptyIv();
+        iv.mode = ""; await kvSet(env, ivKey(chat), iv);
+        await say(env, chat, "✅ Готово. Варианты появятся карточками.", { reply_markup: OWNER_KB });
+        return "add_done";
+      }
+      await asCommand(env, chat, cmd);
+      return "queued";
+    }
     if (data === "q:again") {
       await tg(env, "answerCallbackQuery", { callback_query_id: cb.id, text: "Начинаем заново" });
       await startInterview(env, chat, true, (await kvGet(env, ivKey(chat), {}))?.ans?.lang);
@@ -456,14 +569,28 @@ export async function handleUpdate(env, upd) {
   const msg = upd.message || upd.edited_message;
   if (!msg) { await enqueue(env, upd); return "queued"; }
   const chat = String(msg.chat?.id ?? "");
-  if (chat !== owner) {                         // маклер прислал вариант
-    await brokerAck(env, msg);                  // ответ сразу, даже если Python спит
+  if (chat !== owner) {                         // маклер
+    if (await brokerWelcome(env, msg, owner)) {
+      if (String(msg.text || "").trim() === BTN.what) return "broker_info";   // кнопка — Python не нужен
+      msg._welcomed = true;
+    } else {
+      await brokerAck(env, msg);                // ответ на вариант — сразу, даже если Python спит
+    }
     await queueAndWake(env, upd);
     return "queued";
   }
   const text = (msg.text || "").trim();
   const lang = (msg.from?.language_code || "").slice(0, 2);
   const L = lang === "uz" ? "uz" : "ru";     // язык интерфейса Telegram часто английский — это не язык клиента
+
+  // кнопки внизу — обычный текст с подписью кнопки
+  if (text === BTN.search) return (await showMySearch(env, chat, L), "my_search");
+  if (text === BTN.offers) return (await asCommand(env, chat, "/offers", L), "queued");
+  if (text === BTN.brokers) return (await asCommand(env, chat, "/brokers", L), "queued");
+  if (text === BTN.more) {
+    await say(env, chat, "Что ещё могу:", { reply_markup: MORE_MENU });
+    return "more";
+  }
 
   // вариант, который владелец пересылает или вставляет (из WhatsApp и других чатов)
   const forwarded = !!(msg.forward_origin || msg.forward_from || msg.forward_sender_name || msg.forward_from_chat);
@@ -480,14 +607,11 @@ export async function handleUpdate(env, upd) {
     const [c0, ...rest] = text.split(/\s+/);
     const cmd = c0.toLowerCase().split("@")[0];
     const arg = rest.join(" ");
-    if (cmd === "/add" || cmd === "/done") {
+    if (cmd === "/add") return (await startAddMode(env, chat), "add_mode");
+    if (cmd === "/done") {
       const iv = ivNow || emptyIv();
-      iv.mode = cmd === "/add" ? "add" : ""; iv.addAt = Date.now();
-      await kvSet(env, ivKey(chat), iv);
-      await say(env, chat, cmd === "/add"
-        ? "📥 Перешлите или вставьте вариант от маклера — текст, фото, можно несколькими сообщениями. " +
-          "Когда закончите — /done (или просто подождите 15 минут)."
-        : "✅ Готово. Пишите, если что-то поменять в поиске.");
+      iv.mode = ""; await kvSet(env, ivKey(chat), iv);
+      await say(env, chat, "✅ Готово. Пишите, если что-то поменять в поиске.", { reply_markup: OWNER_KB });
       return "add_mode";
     }
     if (START_CMDS.includes(cmd) && !(cmd === "/start" && /^p/.test(arg))) {
@@ -557,8 +681,17 @@ export default {
         // кнопка меню «Параметры» (мини-апп) больше не нужна — возвращаем список команд
         const menu = await tg(env, "setChatMenuButton", { menu_button: { type: "commands" } });
         const menuOwner = await tg(env, "setChatMenuButton", { chat_id: +env.OWNER_CHAT, menu_button: { type: "commands" } });
+        const ownerCmds = [
+          { command: "new", description: "🔎 Новый поиск" }, { command: "offers", description: "🏠 Варианты от маклеров" },
+          { command: "brokers", description: "📇 Разослать маклерам" }, { command: "add", description: "📥 Добавить вариант из WhatsApp" },
+          { command: "shortlist", description: "📋 Шортлист" }, { command: "help", description: "❓ Как это работает" }];
+        const cmds = await tg(env, "setMyCommands", { commands: ownerCmds, scope: { type: "chat", chat_id: +env.OWNER_CHAT } });
+        const cmdsAll = await tg(env, "setMyCommands", { commands: [{ command: "start", description: "Как прислать вариант" }] });
+        await tg(env, "sendMessage", { chat_id: +env.OWNER_CHAT, reply_markup: OWNER_KB,
+          text: "Кнопки — внизу: «🔎 Мой поиск», «🏠 Варианты», «📇 Маклерам», «⋯ Ещё». " +
+                "Команды запоминать не нужно — можно и просто написать, что хотите сделать." });
         const info = await tg(env, "getWebhookInfo", {});
-        return json({ hook, menu, menuOwner, info: info.result });
+        return json({ hook, menu, menuOwner, cmds, cmdsAll, info: info.result });
       }
       if (p === "/svc/try") {            // проверка промпта вживую, без Telegram и очереди
         if (url.searchParams.get("reset")) await kvSet(env, "iv:test", emptyIv());
