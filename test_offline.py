@@ -1512,3 +1512,40 @@ with _mk.patch.object(rr, "tg_call", lambda c, m, pl, **k: (CARDS.append(pl), {"
 assert "по аренде" in CARDS[0]["text"] and len(CARDS) == 2       # заголовок + 1 арендный маклер
 bdb.unlink(missing_ok=True)
 print("OK — маклеры по продаже: Telegram + Uybor, пометка сделки, рассылка под покупку/аренду")
+
+# ============ маклеры с Realt24 и Joymee (контакт открыт в API) ============
+mdb2 = Path("/tmp/test_market_brokers.db"); mdb2.unlink(missing_ok=True)
+ms3 = rr.Store(mdb2)
+R24 = {"data": [
+    {"phone": "+998901112233", "isCommissioned": True, "propertyUser": {"firstName": "Ольга", "lastName": "Б"},
+     "address": {"fullAddress": {"ru": "Ташкент, Мирабадский район, ул. X"}}},
+    {"phone": "+998935554433", "isCommissioned": False, "address": {"fullAddress": {"ru": "Ташкент, Юнусабадский район"}}},
+    {"phone": "+998935554433", "isCommissioned": False, "address": {"fullAddress": {"ru": "Ташкент, Юнусабадский район"}}},
+    {"phone": "+998977001122", "isCommissioned": False, "address": {"fullAddress": {"ru": "Ташкент, Чиланзарский район"}}},
+    {"phone": "+998909998877", "isCommissioned": True, "address": {"fullAddress": {"ru": "Самарканд, центр"}}},
+], "meta": {"hasNext": False}}
+JM_LIST = {"results": [{"id": 11, "created_by": {"id": 501}}, {"id": 12, "created_by": {"id": 501}},
+                       {"id": 13, "created_by": {"id": 502}}], "next": None}
+JM_DET = {11: {"phone_number": "+998951234567", "advertiser_type": 2, "seller": {"first_name": "Umid"},
+               "district": {"name": "Yunusobod tumani"}},
+          13: {"phone_number": "+998881234567", "advertiser_type": 1, "seller": {}}}   # собственник — мимо
+class _J:
+    def __init__(s, d): s._d = d; s.status_code = 200
+    def raise_for_status(s): pass
+    def json(s): return s._d
+def fake_market(url, params=None, headers=None, timeout=None):
+    if "realt24" in url: return _J(R24)
+    if url.rstrip("/").endswith("announcement"): return _J(JM_LIST)
+    return _J(JM_DET[int(url.rstrip("/").split("/")[-1])])
+with _mk.patch.object(rr.requests, "get", fake_market), _mk.patch.object(rr.time, "sleep"):
+    assert rr.harvest_realt24(ms3, "sale", pages=1) == 3          # комиссия, 2 объявления; не Самарканд, не хозяин
+    assert rr.harvest_joymee(ms3, "sale", pages=1) == 1
+    rr.harvest_joymee(ms3, "sale", pages=1)                       # повтор: карточки заново не запрашиваем
+sale = {b["bid"]: b for b in ms3.brokers(deal="sale", limit=50)}
+assert set(sale) == {"tel:901112233", "tel:935554433", "joymee:501"}, set(sale)
+assert sale["tel:901112233"]["name"] == "Ольга Б" and sale["tel:935554433"]["ads"] == 2
+assert sale["joymee:501"]["phone"] == "951234567" and sale["joymee:501"]["ads"] == 2
+assert ms3.get_kv("joymee_agents") == {"501": "951234567", "502": ""}
+assert not ms3.brokers(deal="rent")                               # сделка не перепутана
+mdb2.unlink(missing_ok=True)
+print("OK — маклеры с Realt24 и Joymee: телефон, посредник/хозяин, Ташкент, без повторных запросов")

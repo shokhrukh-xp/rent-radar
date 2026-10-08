@@ -1611,6 +1611,113 @@ def harvest_sale_brokers(cfg, store) -> int:
     return n
 
 
+# ------------------------------- маклеры с площадок, где контакт открыт ----
+# Realt24: API отдаёт телефон и флаг isCommissioned (с комиссией = посредник).
+# Joymee: фильтр advertiser_type=2 («агентство/посредник»), телефон — в карточке.
+# OLX и Birbir закрыты защитой от ботов (403 даже с домашнего IP) — не обходим.
+# Yangiuylar — каталог застройщиков, маклеров там нет.
+REALT24_API = "https://api.realt24.uz/api/properties"
+REALT24_Q = {"sale": "categoryIds=1&categoryType=sale&subCategoryIds=4%2C6",
+             "rent": "categoryIds=21&categoryType=rent&subCategoryIds=24"}
+JOYMEE_API = "https://api.joymee.uz/api/v1/announcement/"
+JOYMEE_Q = {"sale": {"deal_type": 3, "category": 8}, "rent": {"deal_type": 2, "category": 4}}
+JOYMEE_TASHKENT = 59          # region id «Toshkent shahri»
+JOYMEE_AGENT = 2              # advertiser_type: 1 — собственник, 2 — агентство/посредник
+
+
+def harvest_realt24(store, deal, pages=2) -> int:
+    items = []
+    for page in range(1, pages + 1):
+        r = requests.get(f"{REALT24_API}?{REALT24_Q[deal]}&currency=usd&sortBy=dateDesc"
+                         f"&page={page}&perPage=100", headers=HEADERS, timeout=25)
+        r.raise_for_status()
+        d = r.json()
+        items += d.get("data") or []
+        if not (d.get("meta") or {}).get("hasNext"):
+            break
+        time.sleep(0.5)
+    rows = []
+    for it in items:
+        addr = (((it.get("address") or {}).get("fullAddress") or {}).get("ru") or "")
+        ph = extract_phones(str(it.get("phone") or ""))
+        if ph and addr.startswith("Ташкент"):
+            rows.append((it, ph[0], addr))
+    per_phone = {}
+    for _, ph, _ in rows:
+        per_phone[ph] = per_phone.get(ph, 0) + 1
+    n = 0
+    for it, ph, addr in rows:
+        if not (it.get("isCommissioned") or per_phone[ph] >= 2):
+            continue
+        u = it.get("propertyUser") or {}
+        name = " ".join(x.strip() for x in (u.get("firstName") or "", u.get("lastName") or "") if x).strip()
+        store.upsert_broker(f"tel:{ph}", "Realt24", name[:60], ph, per_phone[ph],
+                            canon_district(addr), None, deal=deal)
+        n += 1
+    return n
+
+
+def harvest_joymee(store, deal, pages=3) -> int:
+    known = store.get_kv("joymee_agents") or {}          # id продавца → телефон
+    counts, fresh = {}, []
+    for page in range(1, pages + 1):
+        params = dict(JOYMEE_Q[deal], region=JOYMEE_TASHKENT, advertiser_type=JOYMEE_AGENT, page=page)
+        r = requests.get(JOYMEE_API, params=params, headers=HEADERS, timeout=25)
+        r.raise_for_status()
+        d = r.json()
+        for x in d.get("results") or []:
+            sid = str((x.get("created_by") or {}).get("id") or "")
+            if not sid:
+                continue
+            counts[sid] = counts.get(sid, 0) + 1
+            if sid not in known and all(sid != f[0] for f in fresh):
+                fresh.append((sid, x))
+        if not d.get("next"):
+            break
+        time.sleep(0.5)
+    n = 0
+    for sid, x in fresh[:30]:                             # телефон — отдельным запросом карточки
+        try:
+            r = requests.get(f"{JOYMEE_API}{x['id']}/", headers=HEADERS, timeout=20)
+            r.raise_for_status()
+            det = r.json()
+        except (requests.RequestException, ValueError) as e:
+            log.info("[маклеры] Joymee %s: %s", x.get("id"), e)
+            continue
+        ph = extract_phones(str(det.get("phone_number") or ""))
+        agent = bool(ph) and det.get("advertiser_type") == JOYMEE_AGENT
+        known[sid] = ph[0] if agent else ""             # хозяина запоминаем пустым — не маклер
+        if not agent:
+            continue
+        seller = det.get("seller") or {}
+        name = " ".join(v for v in (seller.get("first_name"), seller.get("last_name")) if v)
+        dist = (det.get("district") or {}).get("name") if isinstance(det.get("district"), dict) else ""
+        store.upsert_broker(f"joymee:{sid}", "Joymee", name[:60], ph[0], counts.get(sid, 1),
+                            canon_district(dist or ""), None, deal=deal)
+        n += 1
+        time.sleep(0.4)
+    for sid, ph in known.items():                         # знакомым — только обновить счётчик
+        if ph and sid in counts:
+            store.upsert_broker(f"joymee:{sid}", "Joymee", "", ph, counts[sid], None, None, deal=deal)
+    store.set_kv("joymee_agents", known)
+    return n
+
+
+def harvest_market_brokers(cfg, store) -> int:
+    """Маклеры по аренде и продаже с Realt24 и Joymee."""
+    n = 0
+    for deal in ("sale", "rent"):
+        for name, fn in (("Realt24", harvest_realt24), ("Joymee", harvest_joymee)):
+            try:
+                k = fn(store, deal)
+                n += k
+                if k:
+                    log.info("[маклеры] %s · %s: %d", name, "продажа" if deal == "sale" else "аренда", k)
+            except Exception as e:                        # одна площадка не роняет остальные
+                log.warning("[маклеры] %s · %s: %s", name, deal, e)
+    return n
+
+
 def backfill_sale_brokers(store, sale_store) -> int:
     """Разово: маклеры из уже собранных объявлений о продаже (sale.db)."""
     if sale_store is None or store.get_kv("sale_brokers_backfilled"):
@@ -1687,7 +1794,7 @@ def send_broker_cards(cfg, store, settings, limit=10, text=None, deal=None) -> s
     if not pool:
         send_telegram(cfg, f"📇 Новых маклеров {kind} с телефоном пока нет.\n"
                            f"Всего в базе {kind}: {total} (с телефоном {withph}).\n"
-                           + ("Собираю их из объявлений о продаже на Uybor и в Telegram-каналах — "
+                           + ("Собираю их с Realt24, Joymee, Uybor и из Telegram-каналов — "
                               "загляните через час: /brokers" if deal == "sale" else
                               "База пополняется по мере работы радара — попробуйте позже."))
         return ""
@@ -2628,6 +2735,7 @@ def run():
             try:
                 backfill_sale_brokers(store, sale_store)
                 harvest_sale_brokers(cfg, store)
+                harvest_market_brokers(cfg, store)
             except Exception as e:
                 log.warning("[маклеры продажи] сбор не удался: %s", e)
 
