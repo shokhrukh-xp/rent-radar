@@ -294,6 +294,48 @@ assert.deepEqual(got.map(u => [u.callback_query.data, u.callback_query._worker_d
 await handleUpdate(env, msg(BTN.brokers));
 assert.equal((await drain()).at(-1).message.text, "/brokers");
 
+// ── шортлист, цены рынка, Uybor, текст запроса, справка — тоже сразу из снимка
+{ const row = await env.DB.prepare("SELECT v FROM kv WHERE k=?").bind("iv:" + OWNER).first();
+  const ivx = JSON.parse(row.v); ivx.sentAt = Date.now() - 60e3;
+  await env.DB.prepare("UPDATE kv SET v=? WHERE k=?").bind(JSON.stringify(ivx), "iv:" + OWNER).run(); }
+const SLV = items => ({ title: "📋 <b>Шортлист</b> — 2 вариантов\n", items, sort_label: "по свежести" });
+await post("/svc/snapshot", { offers: [], offers_total: 0, shortlist: 2, written: 3, free: 2, deal: "sale",
+  brokers: [], brokers_total: 0, header: "", brokers_empty: "нет",
+  sl: { n: SLV([{ oid: 21, line: "<b>$44000</b> · 2к", note: "" }, { oid: 22, line: "<b>$41000</b> · 2к", note: "дешевле" }]),
+        p: { ...SLV([{ oid: 22, line: "<b>$41000</b> · 2к", note: "" }, { oid: 21, line: "<b>$44000</b> · 2к", note: "" }]), sort_label: "по цене" },
+        m: SLV([]) },
+  sl_empty: "📋 Шортлист пуст", texts: { "/rynok": "📊 <b>Рынок</b> Мирабад $1450/м²", "/sale": "🏷 <b>Поиск</b>",
+  "/request": "📝 <b>Текущий запрос</b>", "/help": "🏠 Ra'no — кнопки" } });
+await drain();
+sent.length = 0;
+await handleUpdate(env, { update_id: ++uid, callback_query: { id: "m1", data: "cmd:/rynok", message: { message_id: 30, chat: { id: +OWNER } } } });
+await handleUpdate(env, msg("/sale"));
+geminiQueue.push({ reply: "Вот.", ready: false, set: [], intent: "help" });
+await handleUpdate(env, msg("как ты работаешь?"));
+assert.deepEqual(texts().slice(-3), ["📊 <b>Рынок</b> Мирабад $1450/м²", "🏷 <b>Поиск</b>", "🏠 Ra'no — кнопки"]);
+assert.equal((await drain()).length, 0);                                     // Python не понадобился
+sent.length = 0;
+await handleUpdate(env, { update_id: ++uid, callback_query: { id: "m2", data: "cmd:/shortlist", message: { message_id: 31, chat: { id: +OWNER } } } });
+assert.match(texts().at(-1), /1\. <b>\$44000<\/b>[\s\S]*2\. <b>\$41000<\/b>[\s\S]*дешевле/);
+// выделение и сортировка — правкой того же сообщения
+await handleUpdate(env, { update_id: ++uid, callback_query: { id: "m3", data: "s:t:22", message: { message_id: 40, chat: { id: +OWNER } } } });
+let ed = sent.filter(x => x.m === "editMessageText").at(-1);
+assert.equal(ed.message_id, 40); assert.match(ed.text, /✅ <b>\$41000/);
+assert.ok(JSON.stringify(ed.reply_markup).includes("s:go"));
+await handleUpdate(env, { update_id: ++uid, callback_query: { id: "m4", data: "s:sort", message: { message_id: 40, chat: { id: +OWNER } } } });
+ed = sent.filter(x => x.m === "editMessageText").at(-1);
+assert.match(ed.text, /^📋[\s\S]*✅ <b>\$41000[\s\S]*2\. <b>\$44000/);           // по цене, выделение сохранилось
+await handleUpdate(env, { update_id: ++uid, callback_query: { id: "m5", data: "s:go", message: { message_id: 40, chat: { id: +OWNER } } } });
+got = await drain();
+assert.equal(got.at(-1).callback_query.data, "s:go"); assert.deepEqual(got.at(-1).callback_query._sel, [22]);
+ed = sent.filter(x => x.m === "editMessageText").at(-1);
+assert.doesNotMatch(ed.text, /✅/);                                           // после запроса выделение снято
+// «Шортлист» из другого сообщения — новым сообщением, не правкой чужого
+const nEdits = sent.filter(x => x.m === "editMessageText").length;
+await handleUpdate(env, { update_id: ++uid, callback_query: { id: "m6", data: "s:show", message: { message_id: 50, chat: { id: +OWNER } } } });
+assert.equal(sent.filter(x => x.m === "editMessageText").length, nEdits);
+assert.match(texts().at(-1), /Шортлист/);
+
 // ── /svc без ключа — 401
 r = await worker.fetch(new Request("https://w.example/svc/updates"), env, { waitUntil() {} });
 assert.equal(r.status, 401);

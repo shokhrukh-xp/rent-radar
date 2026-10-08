@@ -320,7 +320,70 @@ const MORE_MENU = { inline_keyboard: [
 const INTENT_CMD = { show_offers: "/offers", shortlist: "/shortlist", brokers: "/brokers",
   market: "/rynok", help: "/help", request_text: "/request", sale_search: "/sale" };
 
+// Готовые тексты из снимка (цены рынка, поиск на Uybor, текст запроса, справка) — сразу.
+async function instantText(env, chat, cmd) {
+  const ui = await kvGet(env, "ui", null);
+  const t = ui && ui.texts && ui.texts[cmd];
+  if (!t) return false;
+  if (cmd === "/request") {                       // запрос поменялся после снимка — пусть ответит Python
+    const iv = await kvGet(env, ivKey(chat), null);
+    if (iv && iv.sentAt && iv.sentAt > (ui.at || 0)) return false;
+  }
+  await say(env, chat, t, { parse_mode: "HTML", disable_web_page_preview: true });
+  return true;
+}
+
+// ── Шортлист из снимка: выделение и сортировку ведёт воркер, «Запросить детали» — Python ──
+const SL_ORDER = ["n", "p", "m"];
+function renderShortlist(ui, st) {
+  const v = (ui.sl || {})[st.sort] || (ui.sl || {}).n;
+  if (!v || !v.items || !v.items.length) return { text: ui.sl_empty || "📋 Шортлист пуст", kb: null };
+  const lines = [v.title];
+  v.items.forEach((r, i) => {
+    lines.push(`${st.sel.includes(r.oid) ? "✅" : (i + 1) + "."} ${r.line}`);
+    if (r.note) lines.push(`      <i>${r.note}</i>`);
+  });
+  const rows = []; let row = [];
+  v.items.forEach((r, i) => {
+    row.push({ text: (st.sel.includes(r.oid) ? "✅" : "") + (i + 1), callback_data: `s:t:${r.oid}` });
+    if (row.length === 5) { rows.push(row); row = []; }
+  });
+  if (row.length) rows.push(row);
+  if (st.sel.length) {
+    rows.push([{ text: `📨 Запросить детали по выбранным (${st.sel.length})`, callback_data: "s:go" }]);
+    rows.push([{ text: "🗑 Снять выделение", callback_data: "s:clr" }]);
+  }
+  rows.push([{ text: `↕️ Сортировка: ${v.sort_label}`, callback_data: "s:sort" }, { text: "🔄 Обновить", callback_data: "s:ref" }]);
+  return { text: lines.join("\n"), kb: { inline_keyboard: rows } };
+}
+
+async function pendingChanges(env) {
+  const r = await (await db(env)).prepare("SELECT upd FROM queue").all();
+  return (r.results || []).filter(x => { try { return /^t:[slr]:/.test(JSON.parse(x.upd).callback_query?.data || ""); } catch (e) { return false; } }).length;
+}
+
+export async function showShortlist(env, chat, messageId = null) {
+  const ui = await kvGet(env, "ui", null);
+  if (!ui || !ui.sl) return asCommand(env, chat, "/shortlist");
+  const st = await kvGet(env, "sl", null) || { sel: [], sort: "n" };
+  const live = new Set(((ui.sl[st.sort] || ui.sl.n).items || []).map(r => r.oid));
+  st.sel = st.sel.filter(o => live.has(o));
+  await kvSet(env, "sl", st);
+  const { text, kb } = renderShortlist(ui, st);
+  const pend = await pendingChanges(env);
+  const full = text + (pend ? `\n\n<i>⏳ Ещё ${pend} отметок сохраняю — обновится через минуту.</i>` : "");
+  if (pend) await wake(env);
+  const extra = { parse_mode: "HTML", ...(kb ? { reply_markup: kb } : {}) };
+  if (messageId) {
+    const r = await tg(env, "editMessageText", { chat_id: chat, message_id: messageId, text: full, ...extra });
+    if (r && r.ok !== false) return;
+  }
+  await say(env, chat, full, extra);
+}
+
 async function asCommand(env, chat, cmd, L = "ru") {
+  if (await instantText(env, chat, cmd)) return;
+  if (cmd === "/shortlist") { const ui = await kvGet(env, "ui", null); if (ui && ui.sl) return showShortlist(env, chat); }
   // синтетическое сообщение-команда от владельца — Python обработает как набранную
   await queueAndWake(env, { message: { message_id: 0, chat: { id: +chat || chat, type: "private" },
     from: { id: +chat || chat }, date: Math.floor(Date.now() / 1000), text: cmd } }, chat, WAIT[L]);
@@ -360,7 +423,7 @@ export async function showOffers(env, chat, all = false) {
   if (waiting) await wake(env);
   if (!ui.offers_total) {
     const rows = [];
-    if (ui.shortlist) rows.push([{ text: `📋 Шортлист (${ui.shortlist})`, callback_data: "s:ref" }]);
+    if (ui.shortlist) rows.push([{ text: `📋 Шортлист (${ui.shortlist})`, callback_data: "s:show" }]);
     rows.push([{ text: ui.written ? "📇 Написать ещё маклерам" : "📇 Разослать запрос маклерам", callback_data: "b" }]);
     const hint = ui.written
       ? `\nВы написали ${ui.written} маклерам — их ответы придут сюда карточками.\n` +
@@ -639,6 +702,30 @@ export async function handleUpdate(env, upd) {
       await queueAndWake(env, upd);
       return "outreach";
     }
+    if (/^s:(t|clr|sort|ref|go|show)/.test(data) && (await kvGet(env, "ui", null))?.sl) {
+      const st = await kvGet(env, "sl", null) || { sel: [], sort: "n" };
+      const act = data.split(":")[1];
+      let toast = "";
+      if (act === "t") {
+        const oid = +data.split(":")[2];
+        st.sel = st.sel.includes(oid) ? st.sel.filter(x => x !== oid) : [...st.sel, oid];
+        toast = `Выбрано: ${st.sel.length}`;
+      } else if (act === "clr") { st.sel = []; toast = "Выделение снято"; }
+      else if (act === "sort") { st.sort = SL_ORDER[(SL_ORDER.indexOf(st.sort) + 1) % 3]; toast = "Сортировка изменена"; }
+      else if (act === "go") {
+        if (!st.sel.length) { toast = "Ничего не выбрано"; }
+        else {
+          upd.callback_query = { ...cb, _sel: st.sel };
+          await queueAndWake(env, upd);
+          toast = `📨 Запрошу детали по ${st.sel.length} — ответы придут сюда`;
+          st.sel = [];
+        }
+      } else toast = act === "show" ? "" : "Обновлено";
+      await kvSet(env, "sl", st);
+      await tg(env, "answerCallbackQuery", { callback_query_id: cb.id, text: toast });
+      await showShortlist(env, chat, act === "show" ? null : cb.message.message_id);
+      return "shortlist";
+    }
     if (/^t:n:\d+$/.test(data)) {               // «Мимо» — сразу спросить причину
       const oid = data.split(":")[2];
       await tg(env, "answerCallbackQuery", { callback_query_id: cb.id, text: "Выберите причину" });
@@ -737,6 +824,8 @@ export async function handleUpdate(env, upd) {
       await startInterview(env, chat, cmd !== "/start" && cmd !== "/params", L);
       return "interview";
     }
+    if (await instantText(env, chat, cmd)) return "instant";
+    if (/^\/(shortlist|short)$/.test(cmd) && (await kvGet(env, "ui", null))?.sl) return (await showShortlist(env, chat), "shortlist");
     await queueAndWake(env, upd, chat, WAIT[L]);
     return "queued";
   }

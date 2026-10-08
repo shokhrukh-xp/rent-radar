@@ -678,7 +678,7 @@ def attach_answer(cfg, store, oid, text):
                 f"{rr.escape_html((text or '').strip()[:800])}\n\n"
                 + offer_card(store, cfg, o)[:1500],
         "reply_markup": json.dumps({"inline_keyboard": [[
-            {"text": "📋 Шортлист", "callback_data": "s:ref"}]]}, ensure_ascii=False)})
+            {"text": "📋 Шортлист", "callback_data": "s:show"}]]}, ensure_ascii=False)})
 
 
 def request_summary(store) -> str:
@@ -849,7 +849,7 @@ def show_offers(cfg, store, batch=None):
         written = store.conn.execute("SELECT COUNT(*) FROM brokers WHERE status='contacted'").fetchone()[0]
         rows = []
         if sl:
-            rows.append([{"text": f"📋 Шортлист ({sl})", "callback_data": "s:ref"}])
+            rows.append([{"text": f"📋 Шортлист ({sl})", "callback_data": "s:show"}])
         if not written:                      # ещё никому не писали — главное действие одно
             rows.append([{"text": "📇 Разослать запрос маклерам", "callback_data": "b"}])
             hint = "\nЧтобы они появились, разошлите запрос маклерам — это пара нажатий."
@@ -952,21 +952,14 @@ SORTS = {"p": ("по цене", lambda o: o["price_usd"] or 9e9),
          "n": ("по свежести", lambda o: -o["oid"])}
 
 
-def shortlist_view(store, cfg):
-    sel = set(store.get_kv("sl_sel", []) or [])
-    sort = store.get_kv("sl_sort", "n")
+def shortlist_items(store, cfg, sort="n"):
+    """Пункты шортлиста: (заголовок, [{oid, line, note}]) — общие для Python и снимка воркера."""
     items = offers_by_status(store, "shortlist") + offers_by_status(store, "asked")
     items = [o for o in items if o]
     items.sort(key=SORTS.get(sort, SORTS["n"])[1])
     idx = price_index(store)
-
-    if not items:
-        return ("📋 <b>Шортлист пуст</b>\n\nВарианты попадают сюда по кнопке "
-                "«👍 В шортлист» под карточкой от маклера."), None, []
-
-    lines = [f"📋 <b>Шортлист</b> — {len(items)} вариантов "
-             f"({SORTS.get(sort, SORTS['n'])[0]})\n"]
-    for i, o in enumerate(items, 1):
+    rows = []
+    for o in items:
         bits = []
         if o["rooms"]:
             bits.append(f"{o['rooms']}к")
@@ -977,29 +970,46 @@ def shortlist_view(store, cfg):
         price = f"${o['price_usd']:.0f}" if o["price_usd"] else "цена?"
         if o["price_usd"] and o["area"]:
             price += f" ({o['price_usd'] / o['area']:.1f}/м²)"
-        mark = "✅" if o["oid"] in sel else f"{i}."
         status = " ⏳ запрошено" if o["status"] == "asked" else ""
-        lines.append(f"{mark} <b>{price}</b> · {' · '.join(bits) or '—'}{status}")
-        note = price_note(o, idx)
-        if note:
-            lines.append(f"      <i>{note}</i>")
+        rows.append({"oid": o["oid"], "line": f"<b>{price}</b> · {' · '.join(bits) or '—'}{status}",
+                     "note": price_note(o, idx)})
+    title = (f"📋 <b>Шортлист</b> — {len(rows)} вариантов ({SORTS.get(sort, SORTS['n'])[0]})\n"
+             if rows else "")
+    return title, rows
 
-    rows, row = [], []
-    for i, o in enumerate(items, 1):
-        row.append({"text": ("✅" if o["oid"] in sel else "") + str(i),
-                    "callback_data": f"s:t:{o['oid']}"})
+
+SL_EMPTY = ("📋 <b>Шортлист пуст</b>\n\nВарианты попадают сюда по кнопке "
+            "«👍 В шортлист» под карточкой от маклера.")
+
+
+def shortlist_view(store, cfg):
+    sel = set(store.get_kv("sl_sel", []) or [])
+    sort = store.get_kv("sl_sort", "n")
+    title, rows = shortlist_items(store, cfg, sort)
+    if not rows:
+        return SL_EMPTY, None, []
+    lines = [title]
+    for i, r in enumerate(rows, 1):
+        lines.append(f"{'✅' if r['oid'] in sel else f'{i}.'} {r['line']}")
+        if r["note"]:
+            lines.append(f"      <i>{r['note']}</i>")
+    kb_rows, row = [], []
+    for i, r in enumerate(rows, 1):
+        row.append({"text": ("✅" if r["oid"] in sel else "") + str(i),
+                    "callback_data": f"s:t:{r['oid']}"})
         if len(row) == 5:
-            rows.append(row); row = []
+            kb_rows.append(row); row = []
     if row:
-        rows.append(row)
+        kb_rows.append(row)
     if sel:
-        rows.append([{"text": f"📨 Запросить детали по выбранным ({len(sel)})",
-                      "callback_data": "s:go"}])
-        rows.append([{"text": "🗑 Снять выделение", "callback_data": "s:clr"}])
-    rows.append([{"text": f"↕️ Сортировка: {SORTS.get(sort, SORTS['n'])[0]}",
-                  "callback_data": "s:sort"},
-                 {"text": "🔄 Обновить", "callback_data": "s:ref"}])
-    return "\n".join(lines), {"inline_keyboard": rows}, items
+        kb_rows.append([{"text": f"📨 Запросить детали по выбранным ({len(sel)})",
+                         "callback_data": "s:go"}])
+        kb_rows.append([{"text": "🗑 Снять выделение", "callback_data": "s:clr"}])
+    kb_rows.append([{"text": f"↕️ Сортировка: {SORTS.get(sort, SORTS['n'])[0]}",
+                     "callback_data": "s:sort"},
+                    {"text": "🔄 Обновить", "callback_data": "s:ref"}])
+    items = [get_offer(store, r["oid"]) for r in rows]
+    return "\n".join(lines), {"inline_keyboard": kb_rows}, items
 
 
 def show_shortlist(cfg, store, message_id=None):
@@ -1106,6 +1116,9 @@ def handle_shortlist_cb(data, cfg, store, message_id=None):
     if act == "ref":
         show_shortlist(cfg, store, message_id)
         return "Обновлено", True
+    if act == "show":                         # кнопка «Шортлист» из другого сообщения — новым сообщением
+        show_shortlist(cfg, store)
+        return "", True
     if act == "go":
         toast = request_details(cfg, store)
         show_shortlist(cfg, store, message_id)

@@ -1721,6 +1721,8 @@ assert snap["offers"][0]["photos"] == ["p0"] and "Вариант 1 из 2" in sn
 assert [b["bid"] for b in snap["brokers"]] == ["tel:901112233", "tel:909998877"]      # сначала Мирабад
 assert snap["brokers"][0]["row"][0]["url"].startswith("https://wa.me/998901112233?text=")
 assert "Хочу купить" in snap["header"]
+assert [r["oid"] for r in snap["sl"]["n"]["items"]] == [3] and "Шортлист" in snap["sl"]["n"]["title"]
+assert set(snap["texts"]) >= {"/help", "/sale", "/request"} and "Хочу купить" in snap["texts"]["/request"]
 POSTED = []
 class _P:
     status_code = 200

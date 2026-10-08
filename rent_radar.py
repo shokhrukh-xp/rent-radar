@@ -1987,7 +1987,28 @@ def ui_snapshot(cfg, store, settings) -> dict:
     for b in ranked[:40]:
         body, row = broker_card(b, deal, text)
         brokers.append({"bid": b["bid"], "body": body, "row": row})
+    # шортлист — во всех трёх сортировках; выделение и сортировку ведёт воркер
+    sl = {}
+    for srt in ("n", "p", "m"):
+        title, rows = concierge.shortlist_items(store, cfg, srt)
+        sl[srt] = {"title": title, "items": rows,
+                   "sort_label": concierge.SORTS[srt][0]}
+    eff = effective_sale_cfg(cfg, store)
+    texts = {"/help": HELP_TEXT, "/sale": sale_status_text(eff)}
+    rq = store.get_kv("request_text")
+    texts["/request"] = (f"📝 <b>Текущий запрос маклерам</b>\n\n<code>{escape_html(rq)}</code>" if rq else
+                         "Текст запроса ещё не готов — расскажите, что ищете, и я его соберу.")
+    mk = store.get_kv("rynok_cache") or {}
+    if time.time() - mk.get("at", 0) > 600:              # сводка рынка тяжелее — раз в 10 минут
+        try:
+            mk = {"at": time.time(), "text": sale_market_text(eff)}
+            store.set_kv("rynok_cache", mk)
+        except Exception as e:
+            log.info("сводка рынка для снимка: %s", e)
+    if mk.get("text"):
+        texts["/rynok"] = mk["text"]
     return {"offers": offers, "offers_total": len(pool), "shortlist": shortlist, "written": written,
+            "sl": sl, "sl_empty": concierge.SL_EMPTY, "texts": texts,
             "free": cfg.get("free_offers", 2), "deal": deal,
             "brokers": brokers, "brokers_total": len(ranked),
             "header": outreach_header(store, deal, text, len(ranked)) if ranked else "",
@@ -2391,6 +2412,8 @@ def process_commands(cfg: dict, store, long_poll: int = 0) -> dict:
             msg = cb.get("message") or {}
             if str((msg.get("chat") or {}).get("id") or "") != str(cfg["telegram_chat_id"]):
                 continue
+            if cb.get("_sel") is not None:      # шортлист вёл воркер — его выделение
+                store.set_kv("sl_sel", [int(x) for x in cb["_sel"]])
             if cb.get("_worker_done"):          # воркер уже ответил и показал следующее — сохраняем
                 apply_worker_done(cb.get("data") or "", cfg, store)
                 changed = True
