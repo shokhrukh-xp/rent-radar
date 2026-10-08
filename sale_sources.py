@@ -375,6 +375,21 @@ def fetch_due(ss, cfg, store, force=False):
 
 # ============================================================ оценка и подача ==
 
+def photo_repair(cfg, l) -> bool:
+    """Ремонт по фото объявления (модель через воркер). True — сделали новую оценку.
+    Оценку храним в объявлении, повторно не зовём; воркер недоступен — попробуем в другой раз."""
+    rr = _rr()
+    if "repair_photo" in l or not l.get("photo_urls") or not cfg.get("worker_url"):
+        return False
+    r = rr.worker_post(cfg, "/svc/repair", {"urls": l["photo_urls"][:4]}, timeout=90)
+    if not (r or {}).get("ok"):
+        return False
+    l["repair_photo"] = r["repair"]
+    rr.log.info("[продажа] ремонт по фото: %s (%.2f) %s — %s", r["repair"].get("state"),
+                r["repair"].get("confidence") or 0, r["repair"].get("signs", ""), l.get("title", "")[:40])
+    return True
+
+
 def score(store, l, cfg, ss):
     """Насколько вариант стоит внимания: 0…100, причины, анализ рынка."""
     import market
@@ -586,6 +601,7 @@ def attach_dup(cfg, store, l, dup, ss=None):
         store.save(l, notified=False, dup_of=dup)
         return "alt"
     l["alts"] = merge_alts(o.get("alts"), [o], l)
+    photo_repair(cfg, l)
     sc, why, _, _ = score(store, l, cfg, ss or cfg.get("sale_search") or {})
     l["score"], l["why"] = sc, why
     if not row[1]:                               # прежняя ещё ждёт в подборке — заменяем дешёвой

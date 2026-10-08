@@ -371,6 +371,55 @@ export async function parseOffer(env, { text = "", photos = [], deal = "" }) {
   return normOfferFacts(out.facts);
 }
 
+// ───────────────────────────── ремонт по фото ─────────────────────────────
+export const REPAIR_STATES = ["good", "average", "none", "box", "unknown"];
+const REPAIR_SCHEMA = {
+  type: "object",
+  properties: {
+    state: { type: "string", description: REPAIR_STATES.join(" | ") },
+    confidence: { type: "number", description: "0…1 — насколько уверена по этим фото" },
+    signs: { type: "string", description: "что видно на фото, 3–8 слов через запятую, по-русски" },
+  },
+  required: ["state", "confidence", "signs"],
+};
+const REPAIR_SYSTEM = `Ты оцениваешь состояние ремонта квартиры в Ташкенте по фотографиям из объявления о продаже.
+Смотри только на то, что видно на фото, а не на слова продавца. Категории:
+good — свежий современный ремонт: ровные стены, современные пол и плитка, новая сантехника и двери, пластиковые окна; можно заезжать без вложений.
+average — жилое, но устаревшее или потёртое: старые обои, линолеум, советская плитка или кухня, потёртости; заехать можно, нужна косметика.
+none — нужен капитальный: облезлые стены и потолки, старые деревянные окна и трубы, убитый санузел, следы протечек, разруха.
+box — коробка или черновая: голый бетон, стяжка, штукатурка без отделки.
+unknown — на фото нет интерьера квартиры (фасад, двор, план, схема, реклама, рендер) или по фото не понять.
+Если фото — рендеры или явно чужие картинки, ставь unknown. Мебель и вещи не путай с ремонтом.
+confidence ниже 0.5 — если комнат почти не видно или фото противоречат друг другу.
+signs — коротко, что именно видно: «старый линолеум, деревянные окна, советская плитка».`;
+
+async function urlPhoto(url) {
+  const r = await fetch(url, { headers: { "user-agent": "Mozilla/5.0 (Macintosh) AppleWebKit/537.36 Chrome/126 Safari/537.36",
+    accept: "image/*" } });
+  if (!r.ok) return null;
+  const mime = (r.headers.get("content-type") || "image/jpeg").split(";")[0].trim();
+  if (!/^image\/(jpeg|png|webp)$/.test(mime)) return null;
+  const buf = new Uint8Array(await r.arrayBuffer());
+  if (!buf.length || buf.length > 4e6) return null;
+  let bin = "";
+  for (let i = 0; i < buf.length; i += 0x8000) bin += String.fromCharCode(...buf.subarray(i, i + 0x8000));
+  return { mime, data: btoa(bin) };
+}
+
+export async function repairFromPhotos(env, { urls = [], file_ids = [] }) {
+  const images = [];
+  for (const u of urls.slice(0, 4)) { try { const im = await urlPhoto(u); if (im) images.push(im); } catch (e) {} }
+  for (const id of file_ids.slice(0, Math.max(0, 4 - images.length))) {
+    try { const im = await tgPhoto(env, id); if (im) images.push(im); } catch (e) {}
+  }
+  if (!images.length) return { state: "unknown", confidence: 0, signs: "", photos: 0 };
+  const o = await gemini(env, REPAIR_SYSTEM, `Фото квартиры: ${images.length} шт. Оцени состояние ремонта.`,
+    { schema: REPAIR_SCHEMA, images, temperature: 0.1 });
+  const state = REPAIR_STATES.includes(o.state) ? o.state : "unknown";
+  const conf = Math.max(0, Math.min(1, Number(o.confidence) || 0));
+  return { state, confidence: Math.round(conf * 100) / 100, signs: String(o.signs || "").slice(0, 120), photos: images.length };
+}
+
 // ───────────────────────────── хранилище (D1) ─────────────────────────────
 let schemaReady = false;
 async function db(env) {
@@ -1279,6 +1328,11 @@ export default {
       if (p === "/svc/parse" && req.method === "POST") {   // Python: разобрать вариант маклера
         const body = await req.json().catch(() => ({}));
         try { return json({ ok: true, offer: await parseOffer(env, body) }); }
+        catch (e) { return json({ ok: false, error: String(e.message || e) }, 502); }
+      }
+      if (p === "/svc/repair" && req.method === "POST") {  // Python: ремонт по фото объявления
+        const body = await req.json().catch(() => ({}));
+        try { return json({ ok: true, repair: await repairFromPhotos(env, body) }); }
         catch (e) { return json({ ok: false, error: String(e.message || e) }, 502); }
       }
       if (p === "/svc/snapshot" && req.method === "POST") {

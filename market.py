@@ -113,16 +113,33 @@ REPAIR_RU = {"good": "хороший — можно заезжать", "average"
 MARKET_REPAIR = {"good": ("evro", "custom"), "average": ("sredniy",), "box": ("chernovaya",)}
 
 
-def repair_class(l: dict):
-    """Состояние квартиры по полю сайта, иначе по тексту объявления; None — не понять."""
+REPAIR_RANK = {"good": 3, "average": 2, "none": 1, "box": 0}
+
+
+def repair_claimed(l: dict):
+    """Что заявлено: поле сайта, иначе текст объявления."""
     f = (l.get("repair") or "").strip().lower()
     if f in REPAIR_FIELD:
-        return REPAIR_FIELD[f]
+        return REPAIR_FIELD[f], "пометка сайта"
     text = f"{l.get('title') or ''} {l.get('text') or ''}".lower()
     for cls, words in REPAIR_WORDS:
         if any(w in text for w in words):
-            return cls
-    return None
+            return cls, "описание"
+    return None, None
+
+
+def repair_info(l: dict):
+    """(состояние, откуда, заявлено). Фото — главнее слов продавца, если модель уверена."""
+    claimed, src = repair_claimed(l)
+    ph = l.get("repair_photo") or {}
+    if ph.get("state") in REPAIR_RANK and (ph.get("confidence") or 0) >= 0.6:
+        return ph["state"], "фото", claimed
+    return claimed, src, claimed
+
+
+def repair_class(l: dict):
+    """Состояние квартиры: по фото, иначе по полю сайта, иначе по тексту; None — не понять."""
+    return repair_info(l)[0]
 
 
 def mortgage(price_usd: float, m: dict, uzs_per_usd: float):
@@ -429,8 +446,9 @@ def analyze(store, l: dict, cfg: dict) -> dict:
     out = {"price": price, "area": area, "flags": [], "assumptions": a}
     if not price:
         return out
-    cls = repair_class(l)
-    out["repair"] = cls
+    cls, rsrc, claimed = repair_info(l)
+    out["repair"], out["repair_src"], out["repair_claimed"] = cls, rsrc, claimed
+    out["repair_signs"] = (l.get("repair_photo") or {}).get("signs") if rsrc == "фото" else ""
     if area:
         out["m2"] = price / area
         comp = comparables(store, l, repair=cls) if cls else None    # сначала — с таким же ремонтом
@@ -541,6 +559,9 @@ def analyze(store, l: dict, cfg: dict) -> dict:
     if cls in ("none", "box"):
         k += 0.02
         args.append(f"нужен ремонт ~${_money(out.get('reno') or 0)}")
+    if rsrc == "фото" and claimed and REPAIR_RANK[cls] < REPAIR_RANK.get(claimed, 0):
+        k += 0.02
+        args.append("по фото ремонт хуже заявленного")
     if gap0 is not None and gap0 >= 0.03:
         args.insert(0, f"дороже похожих на {gap0 * 100:.0f}%")
     if l.get("seller_kind") == "agency":
@@ -605,21 +626,29 @@ def format_analysis(store, l: dict, cfg: dict) -> str:
         lines.append(f'💵 ${_money(x["m2"])}/м² — похожих пока мало для сравнения')
 
     # ремонт
-    cls = x.get("repair")
+    cls, rsrc, claimed = x.get("repair"), x.get("repair_src"), x.get("repair_claimed")
+    by = {"фото": "по фото", "описание": "по описанию", "пометка сайта": "по пометке сайта"}.get(rsrc, "")
+    seen = f' (видно: {x["repair_signs"]})' if x.get("repair_signs") else ""
+    short = {"good": "хороший", "average": "средний", "none": "без ремонта", "box": "коробка"}
+    differ = ""
+    if rsrc == "фото" and claimed and claimed != cls:
+        differ = f'. В объявлении — «{short[claimed]}»' + (", на фото хуже" if REPAIR_RANK[cls] < REPAIR_RANK[claimed]
+                                                           else ", на фото лучше")
     if cls == "good":
-        lines.append("🛠 Ремонт хороший — можно заезжать")
+        lines.append(f"🛠 Ремонт {by}: хороший — можно заезжать{seen}{differ}")
     elif cls and x.get("reno"):
         what = {"average": "освежить", "none": "капитальный", "box": "отделка с нуля"}[cls]
-        line = f'🛠 Ремонт: {REPAIR_RU[cls].split(" — ")[0]} — {what} ~${_money(x["reno"])}. С ним ≈ ${_money(x["all_in"])}'
+        line = f'🛠 Ремонт {by}: {short[cls]}{seen} — {what} ~${_money(x["reno"])}{differ}. С ним ≈ ${_money(x["all_in"])}'
         g = x.get("gap_all_in")
         if g is not None:
             line += (f', на {abs(g) * 100:.0f}% {"дешевле" if g < 0 else "дороже"} похожих с хорошим ремонтом'
                      if abs(g) >= 0.02 else ", как похожие с хорошим ремонтом")
         lines.append(line)
+    elif area:
+        lines.append(f'🛠 Ремонт не понять ни по фото, ни по описанию — уточните. Если нужен капитальный, добавьте ~$'
+                     f'{_money((a.get("renovation_m2") or {}).get("none", 95) * area)}')
     else:
-        lines.append(f'🛠 Ремонт не указан — уточните. Если нужен капитальный, добавьте ~$'
-                     f'{_money((a.get("renovation_m2") or {}).get("none", 95) * (area or 0))}' if area else
-                     "🛠 Ремонт не указан — уточните у продавца")
+        lines.append("🛠 Ремонт не указан — уточните у продавца")
 
     # ипотека
     m = x.get("mortgage")

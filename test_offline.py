@@ -1507,7 +1507,7 @@ assert abs(x["invest"][3]["base"] - (27600 * (1.03 ** 3 - 1) + x["rent"] * 11 * 
 txt = mk.format_analysis(mst, dorm_l, ss_all)
 for part in ("📊 <b>Анализ</b>", "на 8% ниже похожих", "Цена через 1 / 3 / 5 лет", "Бывшее общежитие",
              "висит 100 дн.", "🟠 <b>", mk.REPORT_URL, "средняя по району: $1 441/м²", "🏦 Ипотека: взнос $6 900 (25%)",
-             "🤝 Торг: начните с", "Ремонт не указан", "<blockquote expandable>", "📈 Как вложение"):
+             "🤝 Торг: начните с", "Ремонт не понять", "<blockquote expandable>", "📈 Как вложение"):
     assert part in txt, (part, txt)
 # аренда по объявлениям нереально высокая → в расчёте осторожная средняя, цифра из объявлений рядом
 RENT_HI = dict(dorm_l, text="Квартира", price_usd=12000, area=24)
@@ -2181,5 +2181,24 @@ assert xc["bargain"]["calm"] and xc["bargain"]["offer"] == 59000
 t_ = mk.format_analysis(rs_, dict(base_l, price_usd=60000, repair="средний ремонт"), cfg_r)
 assert t_.index("🟡 <b>Цена в рынке</b>") < t_.index("🛠") < t_.index("🏦") < t_.index("🤝") < t_.index("<blockquote expandable>")
 assert "С ним ≈ $62 500" in t_ and "млн сум/мес" in t_ and len(t_) < 4096
+# ремонт по фото главнее слов продавца; неуверенная оценка — не в счёт
+lp = dict(base_l, price_usd=60000, repair="evro", repair_photo={"state": "none", "confidence": 0.8, "signs": "облезлые стены, старые окна"})
+assert mk.repair_info(lp) == ("none", "фото", "good")
+assert mk.repair_info(dict(lp, repair_photo={"state": "none", "confidence": 0.4})) == ("good", "пометка сайта", "good")
+xp = mk.analyze(rs_, lp, cfg_r)
+assert xp["reno"] == 4750 and "по фото ремонт хуже заявленного" in xp["bargain"]["args"]
+tp = mk.format_analysis(rs_, lp, cfg_r)
+assert "🛠 Ремонт по фото: без ремонта (видно: облезлые стены, старые окна)" in tp and "В объявлении — «хороший», на фото хуже" in tp
+# оценка через воркер: один раз на объявление, без воркера — ничего
+calls = []
+def fake_wp(c, path, payload, timeout=60):
+    calls.append((path, payload)); return {"ok": True, "repair": {"state": "average", "confidence": 0.9, "signs": "линолеум"}}
+lw = {"key": "sale:x:1", "photo_urls": ["https://a/1.jpg", "https://a/2.jpg"]}
+with mock.patch.object(rr, "worker_post", fake_wp):
+    assert not SS.photo_repair(cfg, dict(lw))                                     # нет worker_url
+    assert SS.photo_repair(dict(cfg, worker_url="https://w"), lw) and lw["repair_photo"]["state"] == "average"
+    assert not SS.photo_repair(dict(cfg, worker_url="https://w"), lw)            # уже оценено — не зовём
+assert calls == [("/svc/repair", {"urls": ["https://a/1.jpg", "https://a/2.jpg"]})]
+assert "repair_photo" in rr.Store.KEEP
 rdb.unlink(missing_ok=True)
 print("OK — анализ: ремонт в цене и сравнении, ипотека в сумах, торг, сворачиваемые детали")

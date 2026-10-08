@@ -2,7 +2,7 @@
 // D1 эмулируется на node:sqlite, Telegram / Gemini / GitHub — подменой fetch.
 import { DatabaseSync } from "node:sqlite";
 import assert from "node:assert/strict";
-import worker, { parseNum, applyPatch, essentialsOk, finalAns, handleUpdate, summary, pairsToSet, OWNER_KB, BROKER_KB, BTN, parseWhen, PROFILE, interviewCore } from "../src/index.js";
+import worker, { repairFromPhotos, parseNum, applyPatch, essentialsOk, finalAns, handleUpdate, summary, pairsToSet, OWNER_KB, BROKER_KB, BTN, parseWhen, PROFILE, interviewCore } from "../src/index.js";
 
 function d1() {
   const s = new DatabaseSync(":memory:");
@@ -35,6 +35,10 @@ globalThis.fetch = async (url, opt = {}) => {
     return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: JSON.stringify(next) }] } }] }));
   }
   if (url.includes("api.github.com")) { gh.push(url); return new Response(null, { status: 204 }); }
+  if (url.startsWith("https://img.test/")) {
+    if (url.endsWith("404.jpg")) return new Response("no", { status: 404 });
+    return new Response(new Uint8Array([255, 216, 255, 1, 2, 3]), { headers: { "content-type": "image/jpeg" } });
+  }
   throw new Error("unexpected fetch " + url);
 };
 
@@ -489,3 +493,16 @@ for (const l of ["", "uz"]) {                                  // лимиты T
 }
 
 console.log("OK — воркер: интервью, нормализация, очередь, будильник, кнопки, дубли, ошибки");
+
+// ── ремонт по фото: картинки уходят в модель, ответ нормализуется
+geminiCalls.length = 0;
+geminiQueue.push({ state: "average", confidence: 1.7, signs: "старый линолеум, деревянные окна" });
+let rp = await repairFromPhotos(env, { urls: ["https://img.test/1.jpg", "https://img.test/404.jpg", "https://img.test/2.jpg"] });
+assert.deepEqual(rp, { state: "average", confidence: 1, signs: "старый линолеум, деревянные окна", photos: 2 });
+assert.equal((geminiCalls[0].match(/inlineData/g) || []).length, 2);
+geminiQueue.push({ state: "евро", confidence: 0.9, signs: "" });
+assert.equal((await repairFromPhotos(env, { urls: ["https://img.test/1.jpg"] })).state, "unknown");   // мусор → unknown
+geminiCalls.length = 0;
+assert.equal((await repairFromPhotos(env, { urls: ["https://img.test/404.jpg"] })).photos, 0);     // нет фото — модель не зовём
+assert.equal(geminiCalls.length, 0);
+console.log("OK — ремонт по фото: картинки в модель, нормализация, без фото — без вызова");

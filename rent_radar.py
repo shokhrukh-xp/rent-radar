@@ -892,7 +892,7 @@ class Store:
             "seller", "seller_id", "is_business", "photo_urls", "lat", "lon", "area",
             "floor", "floors_total", "furnished", "house_type", "commission",
             "seller_ads", "premium", "seller_kind", "listed_since", "new_building", "repair",
-            "site", "seller_hint", "mortgage", "price_note", "score", "why", "alts")
+            "site", "seller_hint", "mortgage", "price_note", "score", "why", "alts", "repair_photo")
 
     def pack(self, listing: dict) -> str:
         d = {k: listing.get(k) for k in self.KEEP}
@@ -2013,6 +2013,9 @@ def show_site_listing(cfg, key) -> str:
         if not row:
             return "Объявление не найдено"
         l = json.loads(row[0] or "{}")
+        if sale_sources.photo_repair(cfg, l):
+            sst.conn.execute("UPDATE listings SET data=? WHERE key=?", (sst.pack(l), l["key"]))
+            sst.conn.commit()
         ids = send_listing(cfg, {"photos": True}, l, False, text=format_sale_message(l, cfg))
         if not ids:
             return "Не получилось отправить 🙈"
@@ -2609,7 +2612,12 @@ def send_offer_analysis(cfg, store, oid, sale_store=None) -> bool:
     try:
         l = {"key": f"offer:{oid}", "price_usd": o["price_usd"], "area": o.get("area"),
              "rooms": o.get("rooms"), "district": o.get("district"), "text": o.get("text") or "",
-             "title": "", "created_at": o.get("created_at"), "floor": o.get("floor")}
+             "title": "", "created_at": o.get("created_at"), "floor": o.get("floor"),
+             "repair": o.get("repair") or ""}
+        if o.get("photos") and cfg.get("worker_url"):
+            r = worker_post(cfg, "/svc/repair", {"file_ids": o["photos"][:4]}, timeout=90)
+            if (r or {}).get("ok"):
+                l["repair_photo"] = r["repair"]
         text = market.format_analysis(st, l, cfg)
     except Exception as e:
         log.info("анализ варианта #%s не удался: %s", oid, e)
@@ -3175,6 +3183,7 @@ def run_sale_search(cfg: dict, store, settings: dict, force: bool = False) -> in
 
     day = sale_sources.day_stats(store)
     cap = ss.get("instant_per_day", 6)         # сразу — не больше стольких в день, остальное подборкой
+    photo_budget = [ss.get("photo_checks_per_run", 25)]   # ремонт по фото — модель, не больше стольких за проход
     sent = queued = 0
     for l in unique[:ss.get("first_run_limit", 25) * 4]:
         dup = find_sale_dup(l, store, cfg) or sale_sources.structural_dup(store, l)
@@ -3183,6 +3192,8 @@ def run_sale_search(cfg: dict, store, settings: dict, force: bool = False) -> in
             sent += act == "cheaper"
             queued += act == "queued"
             continue
+        if photo_budget[0] > 0 and sale_sources.photo_repair(cfg, l):
+            photo_budget[0] -= 1
         sc, why, strong, _ = sale_sources.score(store, l, cfg, ss)
         l["score"], l["why"] = sc, why
         if strong and day.get("instant", 0) + sent < cap:
