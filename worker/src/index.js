@@ -218,27 +218,30 @@ export function pairsToSet(set) {
 }
 
 // ───────────────────────────── Gemini ─────────────────────────────
-export async function gemini(env, system, userText) {
+export async function gemini(env, system, userText, opts = {}) {
   if (!env.GEMINI_KEY) throw new Error("GEMINI_KEY не задан");
+  const SCHEMA_ = opts.schema || SCHEMA;
+  const images = opts.images || [];
   const first = env.AI_MODEL || "gemini-3.8-flash";
   const models = [first, ...["gemini-3.6-flash", "gemini-3.5-flash"].filter(m => m !== first)];
   const variants = [
-    { responseMimeType: "application/json", responseJsonSchema: SCHEMA },
-    { responseMimeType: "application/json", responseSchema: SCHEMA },
+    { responseMimeType: "application/json", responseJsonSchema: SCHEMA_ },
+    { responseMimeType: "application/json", responseSchema: SCHEMA_ },
     { responseMimeType: "application/json" },
   ];
   let lastErr = "";
   for (const model of models) {
     for (let i = 0; i < variants.length; i++) {
-      const sys = system + (i === 2 ? "\n\nФормат ответа — строго JSON по схеме: " + JSON.stringify(SCHEMA) : "");
-      const gen = { temperature: 0.4, maxOutputTokens: 2048, ...variants[i] };
+      const sys = system + (i === 2 ? "\n\nФормат ответа — строго JSON по схеме: " + JSON.stringify(SCHEMA_) : "");
+      const gen = { temperature: opts.temperature ?? 0.4, maxOutputTokens: 2048, ...variants[i] };
       let r, d;
       for (const g of [{ ...gen, thinkingConfig: { thinkingLevel: "low" } }, gen]) {
         r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
           method: "POST",
           headers: { "content-type": "application/json", "x-goog-api-key": env.GEMINI_KEY },
           body: JSON.stringify({ systemInstruction: { parts: [{ text: sys }] },
-            contents: [{ role: "user", parts: [{ text: userText }] }], generationConfig: g }),
+            contents: [{ role: "user", parts: [...images.map(im => ({ inlineData: { mimeType: im.mime, data: im.data } })),
+              { text: userText }] }], generationConfig: g }),
         });
         d = await r.json().catch(() => ({}));
         if (r.ok || !(r.status === 400 && /think/i.test(d?.error?.message || ""))) break;
@@ -258,6 +261,88 @@ export async function gemini(env, system, userText) {
     }
   }
   throw new Error(lastErr || "Gemini недоступен");
+}
+
+// ───────────────────────────── разбор варианта маклера ─────────────────────────────
+export const OFFER_KEYS = ["is_offer", "deal", "price", "currency", "price_period", "rooms", "area", "floor",
+  "floors_total", "district", "address", "landmark", "repair", "building", "furniture", "commission",
+  "mortgage", "documents", "summary"];
+const OFFER_SCHEMA = {
+  type: "object",
+  properties: {
+    facts: { type: "array", description: "по паре на каждый найденный факт", items: { type: "object",
+      properties: { k: { type: "string", description: OFFER_KEYS.join(" | ") }, v: { type: "string" } }, required: ["k", "v"] } },
+  },
+  required: ["facts"],
+};
+const OFFER_SYSTEM = `Ты разбираешь сообщение маклера (риелтора) о квартире в Ташкенте — текст и, если есть, фото
+(часто это скриншот объявления с ценой и параметрами). Извлеки ТОЛЬКО то, что написано или видно.
+Ничего не выдумывай и не угадывай. Пиши факты списком пар {k, v}.
+
+Поля:
+is_offer: yes — это предложение конкретного жилья; no — приветствие, вопрос, «позвоню», «есть варианты» без конкретики
+deal: rent (аренда помесячно) | daily (посуточно) | sale (продажа)
+price: число без пробелов. «44 тыс», «44к», «44.000» → 44000; «1,2 млн у.е.» → 1200000
+currency: USD (также $, у.е., уе, y.e., доллар) | UZS (сум, so'm, сўм)
+price_period: month | day | total (для продажи — total)
+rooms: число комнат. Формат «2/5/9» = 2 комнаты, 5 этаж, 9 этажей
+area: общая площадь, м², число
+floor, floors_total: этаж и этажность, числа
+district: только если назван или однозначен — один из: ${DISTRICTS.join(", ")}
+address: улица/массив/ЖК/дом, как написано; landmark: ориентир (метро, школа, ТЦ)
+repair: коротко, как в тексте (евроремонт, дизайнерский, требует ремонта, без ремонта)
+building: new (новостройка/ЖК) | secondary (вторичка); можно с материалом: «новостройка, монолит»
+furniture: yes | no | частично; commission: как написано («50%», «нет», «за счёт продавца»)
+mortgage: yes | no — только если сказано про ипотеку/кредит; documents: как написано («кадастр готов»)
+summary: одна короткая строка по-русски — важное, чего нет в полях (до 120 символов), иначе не пиши`;
+
+/** «44 тыс» → 44000, «1,2 млн» → 1200000, «52,5» → 52.5, «44,000» / «44 000» → 44000. */
+export function parseNum(v) {
+  let t = String(v || "").toLowerCase().replace(/\u00a0/g, " ");
+  const mult = /млн|mln|million|миллион/.test(t) ? 1e6 : /тыс|ming|\d\s*(k|к)(?![a-zа-яё])|thousand/.test(t) ? 1e3 : 1;
+  t = t.replace(/(\d)[\s'](?=\d{3}\b)/g, "$1");             // пробелы-разделители тысяч
+  t = /\d,\d{3}(\D|$)/.test(t) ? t.replace(/,(?=\d{3}(\D|$))/g, "") : t.replace(",", ".");
+  const m = t.match(/\d+(?:\.\d+)?/);
+  return m ? +m[0] * mult : NaN;
+}
+
+function normOfferFacts(facts) {
+  const o = {};
+  for (const f of Array.isArray(facts) ? facts : []) {
+    const k = String(f?.k || "").trim(), v = String(f?.v ?? "").trim();
+    if (!OFFER_KEYS.includes(k) || !v || /^(null|none|нет данных|-)$/i.test(v)) continue;
+    if (["price", "area"].includes(k)) { const n = parseNum(v); if (n > 0) o[k] = Math.round(n * 100) / 100; continue; }
+    if (["rooms", "floor", "floors_total"].includes(k)) { const n = parseInt(v, 10); if (n > 0 && n < 100) o[k] = n; continue; }
+    if (k === "district") { const i = districtIdx(v); if (i && i !== "any") o.district = DISTRICTS[+i]; continue; }
+    if (k === "is_offer") { o.is_offer = !/^(no|нет|false)$/i.test(v); continue; }
+    if (k === "currency") { o.currency = /uzs|сум|so.?m|сўм/i.test(v) ? "UZS" : "USD"; continue; }
+    o[k] = v.slice(0, k === "summary" ? 160 : 120);
+  }
+  if (o.floor && o.floors_total && o.floor > o.floors_total) delete o.floor;
+  return o;
+}
+
+async function tgPhoto(env, fileId) {
+  const f = await tg(env, "getFile", { file_id: fileId });
+  const path = f?.result?.file_path;
+  if (!path) return null;
+  const r = await fetch(`https://api.telegram.org/file/bot${await botToken(env)}/${path}`);
+  if (!r.ok) return null;
+  const buf = new Uint8Array(await r.arrayBuffer());
+  if (buf.length > 4e6) return null;
+  let bin = "";
+  for (let i = 0; i < buf.length; i += 0x8000) bin += String.fromCharCode(...buf.subarray(i, i + 0x8000));
+  return { mime: /\.png$/i.test(path) ? "image/png" : "image/jpeg", data: btoa(bin) };
+}
+
+export async function parseOffer(env, { text = "", photos = [], deal = "" }) {
+  const images = [];
+  for (const id of photos.slice(0, 2)) { try { const im = await tgPhoto(env, id); if (im) images.push(im); } catch (e) {} }
+  if (!String(text).trim() && !images.length) return { is_offer: false };
+  const out = await gemini(env, OFFER_SYSTEM,
+    (deal ? `Клиент ищет: ${deal === "sale" ? "покупку" : "аренду"}.\n` : "") + `Сообщение маклера:\n${String(text).slice(0, 3000) || "(только фото)"}`,
+    { schema: OFFER_SCHEMA, images, temperature: 0.1 });
+  return normOfferFacts(out.facts);
 }
 
 // ───────────────────────────── хранилище (D1) ─────────────────────────────
@@ -881,6 +966,11 @@ export default {
         await kvSet(env, "last_wake", 0);
         const alive = await wake(env);
         return json({ alive, last_wake: await kvGet(env, "last_wake", 0), last_wake_status: await kvGet(env, "last_wake_status", null) });
+      }
+      if (p === "/svc/parse" && req.method === "POST") {   // Python: разобрать вариант маклера
+        const body = await req.json().catch(() => ({}));
+        try { return json({ ok: true, offer: await parseOffer(env, body) }); }
+        catch (e) { return json({ ok: false, error: String(e.message || e) }, 502); }
       }
       if (p === "/svc/snapshot" && req.method === "POST") {
         const snap = await req.json().catch(() => null);

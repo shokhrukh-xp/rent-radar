@@ -663,6 +663,10 @@ def attach_answer(cfg, store, oid, text):
         return
     note = ((o.get("note") or "") + "\n" if o.get("note") else "") + "💬 " + (text or "").strip()[:600]
     p = parse_offer(text, cfg)
+    ai = rr.ai_parse(cfg, store, text, []) if hasattr(rr, "ai_parse") else None
+    if ai:
+        enrich_offer(cfg, store, oid, ai, fill_only=True)
+        o = get_offer(store, oid)
     sets = {"note": note[-1500:], "replied_at": datetime.now(timezone.utc).isoformat(),
             "status": "shortlist"}
     for k in ("area", "floor", "floors_total", "price_usd", "price_raw"):
@@ -707,16 +711,64 @@ def broker_welcome(cfg, store) -> str:
 def get_offer(store, oid):
     r = store.conn.execute(
         "SELECT oid, broker_chat, broker_name, text, photos, district, rooms, area, "
-        "price_usd, price_raw, floor, floors_total, created_at, status, note "
+        "price_usd, price_raw, floor, floors_total, created_at, status, note, extra "
         "FROM broker_offers WHERE oid=?", (oid,)).fetchone()
     if not r:
         return None
     keys = ["oid", "broker_chat", "broker_name", "text", "photos", "district", "rooms",
             "area", "price_usd", "price_raw", "floor", "floors_total",
-            "created_at", "status", "note"]
+            "created_at", "status", "note", "extra"]
     o = dict(zip(keys, r))
     o["photos"] = json.loads(o["photos"] or "[]")
+    try:
+        o["extra"] = json.loads(o["extra"] or "{}")
+    except (TypeError, ValueError):
+        o["extra"] = {}
     return o
+
+
+EXTRA_KEYS = ("address", "landmark", "repair", "building", "furniture", "commission",
+              "mortgage", "documents", "summary", "deal")
+
+
+def enrich_offer(cfg, store, oid, ai, fill_only=False):
+    """Поля от модели — поверх regex (модель точнее); fill_only — только пустые (ответ на уточнение)."""
+    rr = _rr()
+    o = get_offer(store, oid)
+    if not o or not ai:
+        return
+    sets = {}
+    price = ai.get("price")
+    if price:
+        usd = rr.to_usd(price, ai.get("currency") or "USD", cfg)
+        if usd and (not fill_only or not o.get("price_usd")):
+            sets["price_usd"] = round(usd, 2)
+            sets["price_raw"] = f"{price:g} {ai.get('currency') or 'USD'}"
+    for k in ("rooms", "area", "floor", "floors_total", "district"):
+        v = ai.get(k)
+        if v and (not fill_only or not o.get(k)):
+            sets[k] = v
+    extra = dict(o.get("extra") or {})
+    for k in EXTRA_KEYS:
+        if ai.get(k) and (not fill_only or not extra.get(k)):
+            extra[k] = ai[k]
+    sets["extra"] = json.dumps(extra, ensure_ascii=False)
+    store.conn.execute("UPDATE broker_offers SET " + ", ".join(f"{k}=?" for k in sets)
+                       + " WHERE oid=?", (*sets.values(), oid))
+    store.conn.commit()
+
+
+def mark_as_message(cfg, store, oid):
+    """Не вариант, а реплика маклера — показываем владельцу как сообщение, без карточки."""
+    rr = _rr()
+    o = get_offer(store, oid)
+    if not o:
+        return
+    set_offer_status(store, oid, "message")
+    rr.tg_call(cfg, "sendMessage", {
+        "chat_id": cfg["telegram_chat_id"], "parse_mode": "HTML",
+        "text": f"💬 <b>{rr.escape_html(o['broker_name'] or 'Маклер')}</b> пишет:\n"
+                f"{rr.escape_html((o['text'] or '')[:800])}"})
 
 
 def offers_by_status(store, status, limit=50):
@@ -794,10 +846,37 @@ def offer_card(store, cfg, o, idx=None, prefix="", pos=None, total=None):
         note = price_note(o, idx)
         if note:
             head.append("📊 " + note)
+    ex = o.get("extra") or {}
+    where = ", ".join(x for x in (ex.get("address"), ex.get("landmark")) if x)
+    if where:
+        head.append(f"🗺 {rr.escape_html(where)}")
+    house = ", ".join(x for x in (
+        {"new": "новостройка", "secondary": "вторичка"}.get(ex.get("building"), ex.get("building")),
+        ex.get("repair"),
+        {"yes": "с мебелью", "no": "без мебели"}.get(ex.get("furniture"), ex.get("furniture"))) if x)
+    if house:
+        head.append(f"🏗 {rr.escape_html(house)}")
+    money = []
+    if ex.get("commission"):
+        money.append("комиссия: " + ex["commission"])
+    if ex.get("mortgage"):
+        money.append("ипотека: " + {"yes": "да", "no": "нет"}.get(ex["mortgage"], ex["mortgage"]))
+    if ex.get("documents"):
+        money.append("документы: " + ex["documents"])
+    if money:
+        head.append("💼 " + rr.escape_html("; ".join(money)))
+    if ex.get("summary"):
+        head.append("✨ " + rr.escape_html(ex["summary"]))
+    want = (get_anketa(store).get("ans") or {}).get("deal")
+    got = ex.get("deal")
+    if want and got and {"buy": "sale"}.get(want, want) != got:   # маклер прислал не то
+        what = {"sale": "продажа", "rent": "аренда", "daily": "посуточная аренда"}
+        wish = {"buy": "покупку", "rent": "аренду", "daily": "посуточную аренду"}
+        head.append(f"⚠️ Это {what.get(got, got)}, а вы ищете {wish.get(want, want)}")
     head.append(f"👤 от {rr.escape_html(o['broker_name'] or 'маклера')}")
     body = (o["text"] or "").strip()
     if body:
-        head.append("\n<i>" + rr.escape_html(body[:400]) + "</i>")
+        head.append("\n<i>" + rr.escape_html(body[:300 if ex else 400]) + "</i>")
     if o.get("note"):
         head.append(f"\n📝 {rr.escape_html(o['note'])}")
     return "\n".join(head)

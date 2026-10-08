@@ -2,7 +2,7 @@
 // D1 эмулируется на node:sqlite, Telegram / Gemini / GitHub — подменой fetch.
 import { DatabaseSync } from "node:sqlite";
 import assert from "node:assert/strict";
-import worker, { applyPatch, essentialsOk, finalAns, handleUpdate, summary, pairsToSet, OWNER_KB, BROKER_KB, BTN } from "../src/index.js";
+import worker, { parseNum, applyPatch, essentialsOk, finalAns, handleUpdate, summary, pairsToSet, OWNER_KB, BROKER_KB, BTN } from "../src/index.js";
 
 function d1() {
   const s = new DatabaseSync(":memory:");
@@ -335,6 +335,26 @@ const nEdits = sent.filter(x => x.m === "editMessageText").length;
 await handleUpdate(env, { update_id: ++uid, callback_query: { id: "m6", data: "s:show", message: { message_id: 50, chat: { id: +OWNER } } } });
 assert.equal(sent.filter(x => x.m === "editMessageText").length, nEdits);
 assert.match(texts().at(-1), /Шортлист/);
+
+for (const [v, n] of [["44 тыс", 44000], ["44к", 44000], ["1,2 млн", 1200000], ["52,5", 52.5], ["44,000", 44000],
+                      ["44 000 $", 44000], ["1 250 000", 1250000], ["45000", 45000], ["105.5 м²", 105.5], ["60 ming", 60000]])
+  assert.equal(parseNum(v), n, v);
+// ── разбор варианта маклера: факты → чистые поля; фото уходят в модель картинкой
+geminiQueue.push({ facts: [
+  { k: "is_offer", v: "yes" }, { k: "deal", v: "sale" }, { k: "price", v: "44 тыс" }, { k: "currency", v: "у.е." },
+  { k: "rooms", v: "2" }, { k: "area", v: "52,5" }, { k: "floor", v: "12" }, { k: "floors_total", v: "9" },
+  { k: "district", v: "Мирабадский район" }, { k: "address", v: "ЖК Mirabad Avenue" }, { k: "commission", v: "50%" },
+  { k: "mortgage", v: "yes" }, { k: "summary", v: "евроремонт, документы готовы" }, { k: "junk", v: "x" }, { k: "landmark", v: "null" }] });
+let pr = await (await post("/svc/parse", { text: "2 комн Мирабад 44 тыс у.е.", photos: ["AgAC1"], deal: "sale" })).json();
+assert.equal(pr.ok, true);
+assert.deepEqual(pr.offer, { is_offer: true, deal: "sale", price: 44000, currency: "USD", rooms: 2, area: 52.5, floors_total: 9,
+  district: "Мирабад", address: "ЖК Mirabad Avenue", commission: "50%", mortgage: "yes", summary: "евроремонт, документы готовы" });
+assert.ok(sent.some(x => x.m === "getFile" && x.file_id === "AgAC1"));            // фото скачано для модели
+geminiQueue.push({ facts: [{ k: "is_offer", v: "no" }] });
+pr = await (await post("/svc/parse", { text: "Здравствуйте, есть варианты, позвоню" })).json();
+assert.equal(pr.offer.is_offer, false);
+pr = await (await post("/svc/parse", { text: "x" })).json();                       // модель упала — 502, Python возьмёт regex
+assert.equal(pr.ok, false);
 
 // ── /svc без ключа — 401
 r = await worker.fetch(new Request("https://w.example/svc/updates"), env, { waitUntil() {} });

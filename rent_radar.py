@@ -778,6 +778,10 @@ class Store:
             self.conn.execute("ALTER TABLE brokers ADD COLUMN deals TEXT")
         except sqlite3.OperationalError:
             pass
+        try:                                   # разбор варианта моделью: адрес, ремонт, комиссия…
+            self.conn.execute("ALTER TABLE broker_offers ADD COLUMN extra TEXT")
+        except sqlite3.OperationalError:
+            pass
         try:                                   # Telegram-юзернейм — когда телефона нет (Realting)
             self.conn.execute("ALTER TABLE brokers ADD COLUMN tg TEXT")
         except sqlite3.OperationalError:
@@ -2318,6 +2322,28 @@ def handle_owner_offer(cfg, store, msg):
                            "карточка появится, как только закончите.")
 
 
+def worker_post(cfg, path, payload, timeout=60):
+    try:
+        r = requests.post(cfg["worker_url"] + path, json=payload, timeout=timeout,
+                          headers={"x-svc": cfg.get("worker_key", ""), "user-agent": "rano-radar/1.0"})
+        if r.status_code != 200:
+            log.info("Воркер %s %s: %s", path, r.status_code, r.text[:200])
+            return None
+        return r.json()
+    except (requests.RequestException, ValueError) as e:
+        log.info("Воркер %s недоступен: %s", path, e)
+        return None
+
+
+def ai_parse(cfg, store, text, photos):
+    """Разбор сообщения маклера моделью (текст + фото). None — модель недоступна, остаётся regex."""
+    if not cfg.get("worker_url"):
+        return None
+    deal = request_deal(store)
+    r = worker_post(cfg, "/svc/parse", {"text": text or "", "photos": photos or [], "deal": deal})
+    return (r or {}).get("offer") if (r or {}).get("ok") else None
+
+
 def flush_pending_offer(cfg, store, sale_store=None):
     """Показываем вариант, когда отправитель замолчал: альбом и текст дособраны."""
     pend = store.get_kv("pending_offers") or {}
@@ -2333,6 +2359,13 @@ def flush_pending_offer(cfg, store, sale_store=None):
     store.set_kv("pending_offers", pend)
     for k in due:
         try:
+            o = concierge.get_offer(store, int(k))
+            ai = ai_parse(cfg, store, o["text"], o["photos"]) if o else None
+            if ai is not None and ai.get("is_offer") is False and o and not o["photos"]:
+                concierge.mark_as_message(cfg, store, int(k))   # «позвоню», «есть варианты» — не карточка
+                continue
+            if ai:
+                concierge.enrich_offer(cfg, store, int(k), ai)
             concierge.notify_offer(cfg, store, int(k))
             if request_deal(store) == "sale":
                 send_offer_analysis(cfg, store, int(k), sale_store)

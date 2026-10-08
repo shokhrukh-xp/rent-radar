@@ -1,5 +1,6 @@
 """Оффлайн-верификация Амины (без сети): python3 test_offline.py"""
 import sqlite3
+from datetime import datetime, timezone
 import time
 from pathlib import Path
 
@@ -1739,3 +1740,59 @@ with mock.patch.object(rr, "tg_call", lambda *a, **k: (_ for _ in ()).throw(Asse
 assert not ss2.brokers(status="new", deal="sale") and ss2.get_kv("outreach") == {"sent": 1, "skipped": 1}
 sdb2.unlink(missing_ok=True)
 print("OK — мгновенные кнопки: снимок вариантов и маклеров для воркера, сохранение нажатий")
+
+# ============ разбор вариантов моделью (через воркер): точнее regex, реплики — не карточки ============
+adb = Path("/tmp/test_ai.db"); adb.unlink(missing_ok=True)
+ast = rr.Store(adb)
+ast.set_kv("anketa", {"ans": {"deal": "buy"}})
+acfg = dict(cfg, worker_url="https://w.example", worker_key="k")
+CALLS_AI = []
+def fake_post(cfg_, path, payload, timeout=60):
+    CALLS_AI.append((path, payload))
+    t = payload["text"]
+    if "позвоню" in t:
+        return {"ok": True, "offer": {"is_offer": False}}
+    if "этаж 7" in t:
+        return {"ok": True, "offer": {"is_offer": True, "floor": 7, "floors_total": 9, "commission": "нет"}}
+    return {"ok": True, "offer": {"is_offer": True, "deal": "sale", "price": 44000, "currency": "USD", "rooms": 2,
+                                  "area": 52.5, "district": "Мирабад", "address": "ЖК Mirabad Avenue",
+                                  "repair": "евроремонт", "building": "new", "commission": "50%", "mortgage": "yes"}}
+AI_SENT = []
+with mock.patch.object(rr, "worker_post", fake_post), \
+        mock.patch.object(rr, "tg_call", lambda c, m, pl, **k: (AI_SENT.append((m, pl)), {"ok": True})[1]), \
+        mock.patch.object(rr, "send_offer_analysis", lambda *a, **k: False):
+    o1, _ = rr.intake_offer(acfg, ast, "chat:1", 1, "Азиз", "Продаю двушку, Мирабад, 44 тыс у.е., ипотека есть", ["ph"])
+    o2, _ = rr.intake_offer(acfg, ast, "chat:2", 2, "Бек", "Здравствуйте, есть варианты, позвоню", [])
+    pend = ast.get_kv("pending_offers")
+    for k in pend: pend[k]["at"] -= 100
+    ast.set_kv("pending_offers", pend)
+    rr.flush_pending_offer(acfg, ast)
+    a = cg.get_offer(ast, o1)
+    assert a["price_usd"] == 44000 and a["area"] == 52.5 and a["district"] == "Мирабад"   # regex «44 тыс» не понял
+    assert a["extra"]["address"] == "ЖК Mirabad Avenue" and a["extra"]["mortgage"] == "yes"
+    card = cg.offer_card(ast, acfg, a)
+    assert "🗺 ЖК Mirabad Avenue" in card and "новостройка, евроремонт" in card and "комиссия: 50%" in card and "ипотека: да" in card
+    assert "⚠️" not in card                                                    # продажа при покупке — ок
+    cg.enrich_offer(acfg, ast, o1, {"deal": "rent"})
+    assert "⚠️ Это аренда, а вы ищете покупку" in cg.offer_card(ast, acfg, cg.get_offer(ast, o1))
+    cg.enrich_offer(acfg, ast, o1, {"deal": "sale"})
+    assert cg.get_offer(ast, o2)["status"] == "message"                          # реплика — не карточка
+    assert any("Бек</b> пишет" in pl.get("text", "") for _, pl in AI_SENT)
+    assert CALLS_AI[0][1]["photos"] == ["ph"] and CALLS_AI[0][1]["deal"] == "sale"
+    # ответ на уточнение: модель дополняет только пустые поля
+    cg.set_offer_status(ast, o1, "asked")
+    ast.conn.execute("UPDATE broker_offers SET asked_at=? WHERE oid=?", (datetime.now(timezone.utc).isoformat(), o1))
+    ast.conn.commit()
+    cg.attach_answer(acfg, ast, o1, "Да, этаж 7 из 9, комиссии нет, адрес тот же")
+    a = cg.get_offer(ast, o1)
+    assert a["floor"] == 7 and a["extra"]["commission"] == "50%"                 # не перезаписали
+# модель недоступна — работает regex, карточка всё равно приходит
+with mock.patch.object(rr, "worker_post", lambda *a, **k: None), \
+        mock.patch.object(rr, "tg_call", lambda c, m, pl, **k: {"ok": True}), \
+        mock.patch.object(rr, "send_offer_analysis", lambda *a, **k: False):
+    o3, _ = rr.intake_offer(acfg, ast, "chat:3", 3, "Ж", "3 комн Юнусабад 80 м2 60 000$", [])
+    pend = ast.get_kv("pending_offers"); pend[str(o3)]["at"] -= 100; ast.set_kv("pending_offers", pend)
+    rr.flush_pending_offer(acfg, ast)
+    assert cg.get_offer(ast, o3)["price_usd"] == 60000 and cg.get_offer(ast, o3)["status"] == "new"
+adb.unlink(missing_ok=True)
+print("OK — разбор вариантов моделью: поля, адрес/ремонт/комиссия в карточке, реплики, запасной regex")
