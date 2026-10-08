@@ -776,13 +776,17 @@ class Store:
             self.conn.execute("ALTER TABLE brokers ADD COLUMN deals TEXT")
         except sqlite3.OperationalError:
             pass
+        try:                                   # Telegram-юзернейм — когда телефона нет (Realting)
+            self.conn.execute("ALTER TABLE brokers ADD COLUMN tg TEXT")
+        except sqlite3.OperationalError:
+            pass
         self.conn.commit()
 
-    def upsert_broker(self, bid, source, name, phone, ads, district, price, deal="rent"):
+    def upsert_broker(self, bid, source, name, phone, ads, district, price, deal="rent", tg=None):
         """Копим карточку маклера: телефон, районы, диапазон цен, аренда/продажа.
         Диапазон цен копим только по аренде — цены продажи в нём бессмысленны."""
         row = self.conn.execute(
-            "SELECT districts, min_price, max_price, phone, ads, deals, name FROM brokers WHERE bid=?",
+            "SELECT districts, min_price, max_price, phone, ads, deals, name, tg FROM brokers WHERE bid=?",
             (bid,)).fetchone()
         ds = set()
         lo = hi = None
@@ -794,6 +798,7 @@ class Store:
             ads = max(ads or 0, row[4] or 0)
             deals |= set(json.loads(row[5])) if row[5] else {"rent"}
             name = name or row[6]
+            tg = tg or row[7]
         if deal != "rent":
             price = None
         if district:
@@ -806,18 +811,18 @@ class Store:
         if row:
             self.conn.execute(
                 "UPDATE brokers SET name=?, phone=?, ads=?, districts=?, "
-                "min_price=?, max_price=?, deals=? WHERE bid=?",
-                (name, phone, ads, json.dumps(sorted(ds), ensure_ascii=False), lo, hi, dj, bid))
+                "min_price=?, max_price=?, deals=?, tg=? WHERE bid=?",
+                (name, phone, ads, json.dumps(sorted(ds), ensure_ascii=False), lo, hi, dj, tg, bid))
         else:
             self.conn.execute(
                 "INSERT INTO brokers(bid, source, name, phone, ads, districts, "
-                "min_price, max_price, first_seen, deals) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                "min_price, max_price, first_seen, deals, tg) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                 (bid, source, name, phone, ads,
-                 json.dumps(sorted(ds), ensure_ascii=False), lo, hi, now, dj))
+                 json.dumps(sorted(ds), ensure_ascii=False), lo, hi, now, dj, tg))
         self.conn.commit()
 
     def brokers(self, status=None, with_phone=True, limit=50, deal=None):
-        q = "SELECT bid, source, name, phone, ads, districts, min_price, max_price, status, deals " \
+        q = "SELECT bid, source, name, phone, ads, districts, min_price, max_price, status, deals, tg " \
             "FROM brokers WHERE 1=1"
         args = []
         if status:
@@ -826,15 +831,15 @@ class Store:
             q += " AND deals LIKE '%\"sale\"%'"
         elif deal == "rent":                   # старые записи без пометки — арендные
             q += " AND (deals IS NULL OR deals LIKE '%\"rent\"%')"
-        if with_phone:
-            q += " AND phone IS NOT NULL AND phone != ''"
+        if with_phone:                         # есть контакт: телефон или Telegram
+            q += " AND ((phone IS NOT NULL AND phone != '') OR (tg IS NOT NULL AND tg != ''))"
         q += " ORDER BY ads DESC LIMIT ?"; args.append(limit)
         out = []
         for r in self.conn.execute(q, args):
             out.append({"bid": r[0], "source": r[1], "name": r[2], "phone": r[3],
                         "ads": r[4], "districts": json.loads(r[5] or "[]"),
                         "min_price": r[6], "max_price": r[7], "status": r[8],
-                        "deals": json.loads(r[9]) if r[9] else ["rent"]})
+                        "deals": json.loads(r[9]) if r[9] else ["rent"], "tg": r[10] or ""})
         return out
 
     def broker_status(self, bid, status):
@@ -850,7 +855,8 @@ class Store:
             "SELECT status, COUNT(*) FROM brokers" + cond + " GROUP BY status").fetchall()
         total = self.conn.execute("SELECT COUNT(*) FROM brokers" + cond).fetchone()[0]
         withph = self.conn.execute(
-            "SELECT COUNT(*) FROM brokers" + cond + " AND phone IS NOT NULL AND phone!=''").fetchone()[0]
+            "SELECT COUNT(*) FROM brokers" + cond +
+            " AND ((phone IS NOT NULL AND phone!='') OR (tg IS NOT NULL AND tg!=''))").fetchone()[0]
         return total, withph, dict(rows)
 
     def seller_ads_cached(self, seller_id: str, max_age_days: int):
@@ -1614,6 +1620,7 @@ def harvest_sale_brokers(cfg, store) -> int:
 # ------------------------------- маклеры с площадок, где контакт открыт ----
 # Realt24: API отдаёт телефон и флаг isCommissioned (с комиссией = посредник).
 # Joymee: фильтр advertiser_type=2 («агентство/посредник»), телефон — в карточке.
+# Realting: у агентств открыт Telegram (телефоны на сайте зашифрованы — не трогаем).
 # OLX и Birbir закрыты защитой от ботов (403 даже с домашнего IP) — не обходим.
 # Yangiuylar — каталог застройщиков, маклеров там нет.
 REALT24_API = "https://api.realt24.uz/api/properties"
@@ -1703,6 +1710,50 @@ def harvest_joymee(store, deal, pages=3) -> int:
     return n
 
 
+REALTING_AGENCIES = "https://realting.uz/agencies"
+REALTING_TG_RE = re.compile(r'href="https://(?:telegram\.me|t\.me)/([A-Za-z][A-Za-z0-9_]{3,31})[?"]')
+REALTING_SKIP = {"realting_uz_news", "realtinguzloginbot", "share"}
+
+
+def parse_realting_agencies(page: str) -> list:
+    """Карточки агентств: id, название, город, число объектов, Telegram.
+    Телефоны на странице зашифрованы и раскрываются скриптом сайта по клику — их не трогаем."""
+    out = []
+    parts = page.split('class="teaser-company')[1:]
+    for part in parts:
+        mid = re.search(r'data-id="(\d+)"', part)
+        name = re.search(r'<div class="title">\s*<a [^>]*>([^<]+)</a>', part)
+        addr = re.search(r'<div class="address">([^<]+)</div>', part)
+        units = sum(int(x) for x in re.findall(r'class="unit-item"[^>]*>.*?<span>(\d+)</span>', part, re.S))
+        tg = next((u for u in REALTING_TG_RE.findall(part) if u.lower() not in REALTING_SKIP), "")
+        if mid:
+            out.append({"id": mid.group(1), "name": html_lib.unescape(name.group(1)).strip() if name else "",
+                        "city": html_lib.unescape(addr.group(1)).strip() if addr else "",
+                        "objects": units, "tg": tg})
+    return out
+
+
+def harvest_realting(store, pages=3) -> int:
+    """Агентства Realting по кругу — по несколько страниц за проход."""
+    start = store.get_kv("realting_page") or 1
+    n, page = 0, start
+    for page in range(start, start + pages):
+        r = requests.get(REALTING_AGENCIES, params={"page": page}, headers=HEADERS, timeout=25)
+        r.raise_for_status()
+        cards = parse_realting_agencies(r.text)
+        if not cards:                                  # каталог кончился — в следующий раз с начала
+            page = 0
+            break
+        for c in cards:
+            if c["tg"] and "Ташкент" in c["city"]:
+                store.upsert_broker(f"realting:{c['id']}", "Realting", c["name"][:60], None,
+                                    c["objects"], None, None, deal="sale", tg=c["tg"])
+                n += 1
+        time.sleep(1)
+    store.set_kv("realting_page", page + 1)
+    return n
+
+
 def harvest_market_brokers(cfg, store) -> int:
     """Маклеры по аренде и продаже с Realt24 и Joymee."""
     n = 0
@@ -1715,6 +1766,13 @@ def harvest_market_brokers(cfg, store) -> int:
                     log.info("[маклеры] %s · %s: %d", name, "продажа" if deal == "sale" else "аренда", k)
             except Exception as e:                        # одна площадка не роняет остальные
                 log.warning("[маклеры] %s · %s: %s", name, deal, e)
+    try:                                                  # агентства Realting — продажа
+        k = harvest_realting(store)
+        n += k
+        if k:
+            log.info("[маклеры] Realting · агентства: %d", k)
+    except Exception as e:
+        log.warning("[маклеры] Realting: %s", e)
     return n
 
 
@@ -1771,6 +1829,12 @@ def wa_link(phone: str, text: str) -> str:
     return f"https://wa.me/{digits}?text={quote(text)}"
 
 
+def tg_user_link(username: str, text: str) -> str:
+    """Чат с пользователем Telegram с уже набранным текстом (как у Realting)."""
+    from urllib.parse import quote
+    return f"https://t.me/{username.lstrip('@')}?text={quote(text)}"
+
+
 def tg_phone_link(phone: str) -> str:
     digits = re.sub(r"[^\d]", "", phone or "")
     if len(digits) == 9:
@@ -1794,7 +1858,7 @@ def send_broker_cards(cfg, store, settings, limit=10, text=None, deal=None) -> s
     if not pool:
         send_telegram(cfg, f"📇 Новых маклеров {kind} с телефоном пока нет.\n"
                            f"Всего в базе {kind}: {total} (с телефоном {withph}).\n"
-                           + ("Собираю их с Realt24, Joymee, Uybor и из Telegram-каналов — "
+                           + ("Собираю их с Realt24, Joymee, Realting, Uybor и из Telegram-каналов — "
                               "загляните через час: /brokers" if deal == "sale" else
                               "База пополняется по мере работы радара — попробуйте позже."))
         return ""
@@ -1813,12 +1877,17 @@ def send_broker_cards(cfg, store, settings, limit=10, text=None, deal=None) -> s
         price = ""
         if deal == "rent" and b["min_price"] and b["max_price"]:
             price = f" · ${b['min_price']:.0f}–{b['max_price']:.0f}"
+        phone = b["phone"] or ""
+        contact = (f"📞 {escape_html(fmt_phone(phone) if len(phone) == 9 else phone)}" if phone
+                   else f"✈️ @{escape_html(b['tg'])}")
         body = (f"📇 <b>{escape_html(b['name'] or 'Маклер')}</b> · {escape_html(b['source'])}\n"
-                f"📞 {escape_html(fmt_phone(b['phone']) if len(b['phone']) == 9 else b['phone'])}\n"
-                f"🏘 {b['ads']} объявлений · районы: {escape_html(d)}{price}")
+                f"{contact}\n"
+                f"🏘 {b['ads']} объявлений" + (f" · районы: {escape_html(d)}" if b["districts"] else "") + price)
+        first_row = ([{"text": "📱 WhatsApp с текстом", "url": wa_link(phone, text)},
+                      {"text": "✈️ Telegram", "url": tg_phone_link(phone)}] if phone else
+                     [{"text": "✈️ Telegram с текстом", "url": tg_user_link(b["tg"], text)}])
         kb = {"inline_keyboard": [
-            [{"text": "📱 WhatsApp с текстом", "url": wa_link(b["phone"], text)},
-             {"text": "✈️ Telegram", "url": tg_phone_link(b["phone"])}],
+            first_row,
             [{"text": "✅ Написал", "callback_data": f"bw:{b['bid']}"},
              {"text": "🚫 Пропустить", "callback_data": f"bx:{b['bid']}"}],
         ]}

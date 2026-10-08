@@ -1549,3 +1549,42 @@ assert ms3.get_kv("joymee_agents") == {"501": "951234567", "502": ""}
 assert not ms3.brokers(deal="rent")                               # сделка не перепутана
 mdb2.unlink(missing_ok=True)
 print("OK — маклеры с Realt24 и Joymee: телефон, посредник/хозяин, Ташкент, без повторных запросов")
+
+# ============ Realting: агентства с Telegram (телефоны зашифрованы — не берём) ============
+RT_HTML = """
+<div class="teaser-company mb-sm" data-id="501"><div class="title"> <a href="https://realting.uz/agencies/a">Агентство А</a></div>
+<div class="address">Узбекистан, Ташкент</div><a class="unit-item" title="Жилая"><img src="x"> <span>12</span></a>
+<a class="btn" href="https://telegram.me/agency_a?text=%F0%9F%92%AC">Написать в Telegram</a>
+<span data-encr-ph="Zm9vYmFy"></span></div>
+<div class="teaser-company mb-sm" data-id="502"><div class="title"> <a href="/agencies/b">Агентство Б</a></div>
+<div class="address">Узбекистан, Бухара</div><a href="https://telegram.me/agency_b?text=x">Telegram</a></div>
+<div class="teaser-company mb-sm" data-id="503"><div class="title"> <a href="/agencies/c">Без телеграма</a></div>
+<div class="address">Узбекистан, Ташкент</div><a href="https://telegram.me/share?url=x">share</a></div>
+"""
+cards = rr.parse_realting_agencies(RT_HTML)
+assert [c["tg"] for c in cards] == ["agency_a", "agency_b", ""] and cards[0]["objects"] == 12
+rdb = Path("/tmp/test_realting.db"); rdb.unlink(missing_ok=True)
+rs = rr.Store(rdb)
+pages = {1: RT_HTML, 2: ""}
+class _H:
+    def __init__(s, t): s.text, s.status_code = t, 200
+    def raise_for_status(s): pass
+with _mk.patch.object(rr.requests, "get", lambda url, params=None, **k: _H(pages.get(params["page"], ""))), \
+        _mk.patch.object(rr.time, "sleep"):
+    assert rr.harvest_realting(rs, pages=3) == 1                   # только Ташкент и с Telegram
+assert rs.get_kv("realting_page") == 1                             # каталог кончился — снова с начала
+b = rs.brokers(deal="sale")[0]
+assert b["bid"] == "realting:501" and b["tg"] == "agency_a" and not b["phone"]
+assert rs.broker_stats("sale")[1] == 1                             # Telegram считается контактом
+rs.set_kv("anketa", {"ans": {"deal": "buy"}})
+CARDS = []
+with _mk.patch.object(rr, "tg_call", lambda c, m, pl, **k: (CARDS.append(pl), {"ok": True})[1]), \
+        _mk.patch.object(rr, "send_telegram", lambda c, t: (CARDS.append({"text": t}), True)[1]), \
+        _mk.patch.object(rr.time, "sleep"):
+    rr.send_broker_cards(cfg, rs, rr.default_settings(), text="Хочу купить квартиру")
+card = CARDS[1]
+assert "✈️ @agency_a" in card["text"] and "📞" not in card["text"]
+kb = json.loads(card["reply_markup"])["inline_keyboard"]
+assert kb[0][0]["url"].startswith("https://t.me/agency_a?text=") and "WhatsApp" not in json.dumps(kb, ensure_ascii=False)
+rdb.unlink(missing_ok=True)
+print("OK — Realting: агентства Ташкента с Telegram, обход каталога по кругу, карточка с Telegram-ссылкой")
