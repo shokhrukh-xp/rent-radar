@@ -1,0 +1,16 @@
+# Ra'no — webhook-«лицо» бота: ИИ-интервью сразу, остальное — в очередь для Python на Actions.
+# Деплой:  cd worker && npx wrangler deploy
+# Секреты: npx wrangler secret put BOT_TOKEN | GEMINI_KEY | OWNER_CHAT | TG_SECRET | SVC_KEY | GH_TOKEN
+name = "rano-bot"
+main = "src/index.js"
+compatibility_date = "2026-09-01"
+
+[vars]
+GH_REPO = "shokhrukh-xp/rent-radar"
+GH_WORKFLOW = "radar.yml"
+AI_MODEL = "gemini-3.8-flash"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "rano"
+database_id = "e31433a9-bb25-4225-ad09-ea6d7caef25c"

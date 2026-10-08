@@ -153,6 +153,12 @@ def load_config() -> dict:
         cfg["telegram_bot_token"] = os.environ["RADAR_BOT_TOKEN"]
     if os.environ.get("RADAR_CHAT_ID"):
         cfg["telegram_chat_id"] = os.environ["RADAR_CHAT_ID"]
+    # Webhook-воркер (Cloudflare): он принимает обновления Telegram и ведёт
+    # ИИ-интервью, а нам отдаёт очередь. Без него — старый getUpdates.
+    if os.environ.get("RADAR_WORKER_URL"):
+        cfg["worker_url"] = os.environ["RADAR_WORKER_URL"].rstrip("/")
+    if os.environ.get("RADAR_WORKER_KEY"):
+        cfg["worker_key"] = os.environ["RADAR_WORKER_KEY"]
     if "PUT_YOUR" in str(cfg["telegram_bot_token"]) or "PUT_YOUR" in str(cfg["telegram_chat_id"]):
         print(f"Заполните telegram_bot_token и telegram_chat_id в {CONFIG_PATH} (см. README) "
               "или передайте их через переменные окружения RADAR_BOT_TOKEN / RADAR_CHAT_ID.")
@@ -1114,12 +1120,12 @@ def send_listing(cfg, settings: dict, l: dict, likely_makler: bool, text: str = 
 WELCOME_TEXT = (
     "👋 Здравствуйте! Я <b>Ra'no</b> — ваш ассистент по поиску жилья в Ташкенте.\n\n"
     "Как я работаю:\n"
-    "1. Вы отмечаете параметры — это минута в приложении.\n"
+    "1. Вы своими словами рассказываете, что ищете, — я уточню детали.\n"
     "2. Я составляю запрос и рассылаю его проверенным маклерам.\n"
     "3. Присылаю подходящие варианты по одному — вы жмёте «да» или «нет», "
     "я уточняю детали и веду переписку за вас.\n\n"
     "🎁 Первые проверенные варианты — бесплатно.\n\n"
-    "Начнём? Нажмите <b>«Открыть приложение»</b> ниже 👇")
+    "Начнём? Напишите, что ищете, — например: «снять трёшку в Мирабаде до $1400» 👇")
 
 HELP_TEXT = """🏠 <b>Ra'no</b> — ваш ассистент по поиску жилья
 
@@ -1135,7 +1141,7 @@ HELP_TEXT = """🏠 <b>Ra'no</b> — ваш ассистент по поиску
 /min — минимальная цена
 /rooms — комнатность
 /district — районы
-/app — открыть приложение (все параметры на одном экране)
+/new — описать поиск заново: просто напишите, что ищете, своими словами
 /anketa — то же; /steps — старый пошаговый режим
 /shortlist — шортлист и запрос деталей у маклеров
 /offers — показать новые варианты от маклеров
@@ -1209,7 +1215,7 @@ def kb_menu(cfg: dict, settings: dict) -> dict:
         [_btn("🔎 Подобрать лучшее сейчас", "f")],
         # Мини-апп открывается только с reply-клавиатуры: Telegram разрешает
         # WebApp.sendData() исключительно оттуда. Здесь — кнопка, которая её пришлёт.
-        [_btn("🏠 Открыть приложение", "ank"), _btn("📇 Написать маклерам", "b")],
+        [_btn("💬 Задать поиск", "ank"), _btn("📇 Написать маклерам", "b")],
         [_btn("📥 Новые варианты", "off"), _btn("📋 Шортлист", "sl")],
         [_btn("🏢 Класс: новый ЖК с ремонтом" if settings.get("segment") == "premium"
               else "🏢 Класс: любой", "sg")],
@@ -1337,7 +1343,7 @@ def handle_command(text: str, settings: dict, store, cfg: dict):
         if not ans or not concierge.apply_webapp_data(
                 cfg, store, json.dumps({"v": 2, "ans": ans}, ensure_ascii=False)):
             concierge.send_app_button(
-                cfg, store, "Не получилось прочитать параметры — откройте приложение ещё раз.")
+                cfg, store, "Не получилось прочитать параметры — опишите поиск словами, я соберу заново.")
         return "", None
     if cmd == "/start":
         # Первое касание: тёплое знакомство, одно понятное действие, честное
@@ -1401,7 +1407,7 @@ def handle_command(text: str, settings: dict, store, cfg: dict):
     if cmd in ("/anketa", "/start_search", "/profile"):
         concierge.send_app_button(
             cfg, store,
-            "📋 Параметры поиска удобнее задать в приложении — кнопка под полем ввода.\n"
+            "📋 Опишите своими словами, что ищете, — я уточню остальное.\n"
             "Если хочется по старинке, пошагово кнопками — /steps")
         return "", None
     if cmd == "/steps":
@@ -1699,7 +1705,7 @@ def handle_callback(data: str, settings: dict, store, cfg: dict, message_id=None
         return "Подбираю лучшее…", None
     if act == "ank":
         concierge.send_app_button(cfg, store)
-        return "Кнопка приложения отправлена", None
+        return "Опишите поиск в чате", None
     if act == "sl":
         concierge.show_shortlist(cfg, store)
         return "Шортлист", None
@@ -1792,13 +1798,45 @@ def flush_pending_offer(cfg, store):
         log.warning("не показал вариант %s: %s", p.get("oid"), e)
 
 
+RUN_DEADLINE = None      # до какого времени (epoch) живёт этот процесс — сообщаем воркеру
+
+
+def worker_call(cfg, path, params=None, timeout=20):
+    try:
+        r = requests.get(cfg["worker_url"] + path, params=params or {}, timeout=timeout,
+                         headers={"x-svc": cfg.get("worker_key", "")})
+        if r.status_code != 200:
+            log.error("Воркер %s %s: %s", path, r.status_code, r.text[:200])
+            return None
+        return r.json()
+    except requests.RequestException as e:
+        log.error("Воркер недоступен: %s", e)
+        return None
+
+
+def fetch_updates(cfg, store, long_poll=0):
+    """Обновления: из очереди воркера (если он настроен) или getUpdates.
+
+    Возвращает (resp, offset_key). У воркера свои номера — отдельный offset."""
+    if not cfg.get("worker_url"):
+        offset = store.get_kv("tg_offset", 0)
+        return tg_call(cfg, "getUpdates", {"offset": offset + 1, "timeout": long_poll},
+                       timeout=long_poll + 20), "tg_offset"
+    offset = store.get_kv("wq_offset", 0)
+    until = int((RUN_DEADLINE or time.time() + 60) + 90)
+    end = time.time() + long_poll
+    while True:                                   # «long-poll» опросом раз в 3 с
+        resp = worker_call(cfg, "/svc/updates", {"after": offset, "until": until})
+        if not resp or resp.get("result") or time.time() >= end:
+            return resp, "wq_offset"
+        time.sleep(3)
+
+
 def process_commands(cfg: dict, store, long_poll: int = 0) -> dict:
     """Читает новые сообщения/нажатия, применяет их, отвечает."""
     settings = {**default_settings(), **(store.get_kv("settings") or {})}
-    offset = store.get_kv("tg_offset", 0)
-    resp = tg_call(cfg, "getUpdates",
-                   {"offset": offset + 1, "timeout": long_poll},
-                   timeout=long_poll + 20)
+    resp, offset_key = fetch_updates(cfg, store, long_poll)
+    offset = store.get_kv(offset_key, 0)
     if not resp:
         return settings
     changed = False
@@ -1851,7 +1889,7 @@ def process_commands(cfg: dict, store, long_poll: int = 0) -> dict:
         if reply or view:
             changed = True
             log.info("Команда: %s", text[:50])
-    store.set_kv("tg_offset", offset)
+    store.set_kv(offset_key, offset)
     if changed:
         store.set_kv("settings", settings)
     return settings
@@ -2343,6 +2381,8 @@ def run():
         except (IndexError, ValueError):
             minutes = 0.0
     deadline = time.time() + minutes * 60 if minutes else None
+    global RUN_DEADLINE
+    RUN_DEADLINE = deadline
     cfg = load_config()
     store = Store(DB_PATH)
     store.prune()
@@ -2472,6 +2512,8 @@ def run():
         if elapsed < 3:
             time.sleep(3 - elapsed)
 
+    if cfg.get("worker_url") and not once:
+        worker_call(cfg, "/svc/bye", timeout=10)   # воркер будет будить нас сам
     log.info("Готово" if once or deadline else "Остановлено")
 
 

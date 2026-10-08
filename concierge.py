@@ -535,7 +535,7 @@ def finish_anketa(cfg, store):
     kb = {"inline_keyboard": [
         [{"text": "✅ Утвердить и показать маклеров", "callback_data": "q:ok"}],
         [{"text": "✏️ Изменить текст", "callback_data": "q:edit"},
-         {"text": "🔄 Пройти анкету заново", "callback_data": "q:again"}],
+         {"text": "🔄 Начать заново", "callback_data": "q:again"}],
     ]}
     rr.tg_call(cfg, "sendMessage", {
         "chat_id": cfg["telegram_chat_id"], "parse_mode": "HTML",
@@ -1024,20 +1024,16 @@ def webapp_url(store, cfg=None):
 
 
 def send_app_button(cfg, store, text=None):
-    """Постоянная клавиатура с кнопкой мини-аппа.
-
-    Именно reply-кнопка, а не inline: только из неё Telegram разрешает
-    WebApp.sendData() — иначе форма не смогла бы вернуть данные боту.
-    """
+    """Раньше — кнопка мини-аппа. Теперь параметры собираются в чате:
+    просим описать поиск словами и убираем старую клавиатуру с кнопкой."""
     rr = _rr()
-    kb = {"keyboard": [[{"text": "🏠 Открыть приложение",
-                         "web_app": {"url": webapp_url(store, cfg)}}]],
-          "resize_keyboard": True, "is_persistent": True}
     return rr.tg_call(cfg, "sendMessage", {
         "chat_id": cfg["telegram_chat_id"],
-        "text": text or ("📱 Кнопка приложения — под полем ввода.\n"
-                         "Там все параметры поиска на одном экране."),
-        "reply_markup": json.dumps(kb, ensure_ascii=False)})
+        "text": text or ("💬 Опишите своими словами, что ищете — например: «снять трёшку "
+                         "в Мирабаде до $1400, с ремонтом, заезд в ноябре». "
+                         "Остальное я уточню сама."),
+        "parse_mode": "HTML",
+        "reply_markup": json.dumps({"remove_keyboard": True})})
 
 
 ALLOWED = {f["k"] for f in STEPS} | {
@@ -1156,7 +1152,8 @@ def apply_webapp_data(cfg, store, raw):
         ans["floor_pref"] = [x for x in fp if x in ("nf", "nl", "mid", "any")]
 
     a = get_anketa(store)
-    a["ans"] = {**a.get("ans", {}), **ans}
+    # replace: из чата-интервью приходит полный набор — старые ответы не смешиваем
+    a["ans"] = ans if data.get("replace") else {**a.get("ans", {}), **ans}
     a["i"] = len(STEPS)
     save_anketa(store, a)
     finish_anketa(cfg, store)

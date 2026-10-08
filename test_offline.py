@@ -1,5 +1,6 @@
 """Оффлайн-верификация Амины (без сети): python3 test_offline.py"""
 import sqlite3
+import time
 from pathlib import Path
 
 import rent_radar as rr
@@ -941,14 +942,13 @@ assert u.startswith(cg.WEBAPP_URL + "#")
 import base64 as _b64
 assert json.loads(_b64.b64decode(u.split("#", 1)[1]).decode())["rooms"] == ["2", "3"]
 
-# кнопка приходит именно reply-клавиатурой с web_app (иначе sendData не работает)
+# мини-апп убран: вместо кнопки — просьба описать поиск словами и снятие старой клавиатуры
 with mock.patch.object(rr, "tg_call", fake2):
     cg.send_app_button(cfg, ms2)
 m, pl = SENT2[-1]
 kb = json.loads(pl["reply_markup"])
-assert "keyboard" in kb and "inline_keyboard" not in kb
-assert kb["keyboard"][0][0]["web_app"]["url"].startswith(cg.WEBAPP_URL)
-assert kb.get("is_persistent") is True
+assert kb == {"remove_keyboard": True}
+assert "своими словами" in pl["text"]
 
 # данные из формы применяются и сразу дают готовый текст
 payload = json.dumps({"v": 2, "ans": {
@@ -980,8 +980,7 @@ with mock.patch.object(rr, "tg_call", fake2):
 with mock.patch.object(rr, "tg_call", fake2):
     SENT2.clear()
     rr.handle_command("/app", rr.default_settings(), ms2, cfg)
-    assert any("reply_markup" in pl and "keyboard" in pl.get("reply_markup", "")
-               for _, pl in SENT2)
+    assert any("remove_keyboard" in pl.get("reply_markup", "") for _, pl in SENT2)
     SENT2.clear()
     rr.handle_command("/steps", rr.default_settings(), ms2, cfg)
     assert any("Анкета" in str(pl.get("text", "")) for _, pl in SENT2)
@@ -1005,8 +1004,43 @@ with mock.patch.object(rr, "tg_call", fake2):
     SENT2.clear()
     rr.handle_command("/start pМУСОР", rr.default_settings(), ms2, cfg)
     assert any("Не получилось" in str(pl.get("text", "")) for _, pl in SENT2)
+# чат-интервью (воркер) присылает ПОЛНЫЙ набор с replace — старые ответы не примешиваются
+cg.save_anketa(ms2, {"i": 0, "ans": {"deal": "rent", "pets": "dog", "who": "group", "rooms": ["1"]}})
+with mock.patch.object(rr, "tg_call", fake2):
+    assert cg.apply_webapp_data(cfg, ms2, json.dumps({"v": 3, "replace": True, "ans": {
+        "lang": "ru", "deal": "rent", "object": "flat", "city": "tashkent", "contact": "bot",
+        "rooms": ["3"], "districts": ["2"], "budget": "1400", "class": "premium"}}))
+ans = cg.get_anketa(ms2)["ans"]
+assert "pets" not in ans and "who" not in ans and ans["rooms"] == ["3"]
+req = ms2.get_kv("request_text")
+assert "Мирабад" in req and "$1 400" in req and "собак" not in req
+
+# очередь воркера вместо getUpdates: свой offset, подтверждение, until для «будильника»
+wcfg = dict(cfg, worker_url="https://w.example", worker_key="k")
+CALLS = []
+QUEUE = [{"update_id": 7, "message": {"chat": {"id": 4242}, "text": "/help"}}]
+class _R:
+    def __init__(s, d): s.status_code, s._d, s.text = 200, d, ""
+    def json(s): return s._d
+def fake_get(url, params=None, timeout=None, headers=None):
+    CALLS.append((url, dict(params or {}), headers))
+    after = int((params or {}).get("after", 0))
+    return _R({"ok": True, "result": [u for u in QUEUE if u["update_id"] > after]})
+wcfg["telegram_chat_id"] = str(QUEUE[0]["message"]["chat"]["id"])
+rr.RUN_DEADLINE = time.time() + 600
+with mock.patch.object(rr.requests, "get", fake_get), mock.patch.object(rr, "tg_call", fake2):
+    SENT2.clear()
+    rr.process_commands(wcfg, ms2, long_poll=0)
+    assert ms2.get_kv("wq_offset") == 7
+    assert any("Ra'no" in str(pl.get("text", "")) for _, pl in SENT2)      # /help отработал
+    assert not any(m_ == "getUpdates" for m_, _ in SENT2)
+    rr.process_commands(wcfg, ms2, long_poll=0)                             # повторно — подтверждаем 7
+assert CALLS[-1][1]["after"] == 7 and CALLS[-1][2]["x-svc"] == "k"
+assert CALLS[-1][0] == "https://w.example/svc/updates"
+assert CALLS[-1][1]["until"] >= time.time() + 600
+rr.RUN_DEADLINE = None
 mdb.unlink(missing_ok=True)
-print("OK — мини-апп: ссылка, кнопка, приём данных формы, /start p<код> из кнопки меню")
+print("OK — параметры: чат-интервью (replace), очередь воркера, старые ссылки мини-аппа")
 
 # ================= ПЕРЕИМЕНОВАНИЕ: голос Амины =================
 

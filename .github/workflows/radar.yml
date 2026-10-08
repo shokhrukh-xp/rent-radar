@@ -53,6 +53,9 @@ jobs:
           RADAR_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           RADAR_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           RADAR_STATE_DIR: ${{ github.workspace }}/state
+          # обновления Telegram принимает webhook-воркер (worker/), отсюда — его очередь
+          RADAR_WORKER_URL: ${{ secrets.RADAR_WORKER_URL }}
+          RADAR_WORKER_KEY: ${{ secrets.RADAR_WORKER_KEY }}
         run: |
           git -C state config user.name "rent-radar"
           git -C state config user.email "actions@users.noreply.github.com"

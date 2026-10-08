@@ -1,0 +1,469 @@
+/* Ra'no — «лицо» бота на Cloudflare Worker.
+ *
+ * Зачем: Python-бот живёт на GitHub Actions и онлайн лишь ~50 минут из 4–7 часов.
+ * Чату так нельзя. Поэтому Telegram шлёт ВСЕ обновления сюда (webhook):
+ *   • владелец пишет текстом → ИИ-интервью (Gemini) отвечает сразу и собирает
+ *     параметры поиска; когда их хватает — кладём их в очередь для Python
+ *     (как раньше web_app_data из мини-аппа) и будим Actions;
+ *   • всё остальное (маклеры, команды, кнопки) — в очередь D1 + будим Actions.
+ * Python вместо getUpdates забирает очередь: GET /svc/updates.
+ *
+ * Секреты (wrangler secret put): BOT_TOKEN, GEMINI_KEY, TG_SECRET, SVC_KEY,
+ *   GH_TOKEN (fine-grained, rent-radar: Actions read/write) — без него просто не будим.
+ * Переменные (wrangler.toml): OWNER_CHAT, GH_REPO, GH_WORKFLOW, AI_MODEL.
+ */
+
+// ───────────────────────────── справочники ─────────────────────────────
+export const DISTRICTS = ["Алмазар", "Бектемир", "Мирабад", "Мирзо-Улугбек", "Сергели", "Учтепа",
+  "Чиланзар", "Шайхантахур", "Юнусабад", "Яккасарай", "Янгихаёт", "Яшнабад"];
+const DISTRICTS_UZ = ["Olmazor", "Bektemir", "Mirobod", "Mirzo Ulug'bek", "Sergeli", "Uchtepa",
+  "Chilonzor", "Shayxontohur", "Yunusobod", "Yakkasaroy", "Yangihayot", "Yashnobod"];
+const E = {
+  lang: ["ru", "uz", "en"], deal: ["rent", "daily", "buy"],
+  object: ["flat", "house", "dacha", "land"], city: ["tashkent", "charvak", "region", "other"],
+  class: ["any", "new", "premium", "reno", "biz"], furniture: ["yes", "no", "any"],
+  term: ["12", "6_12", "3_6", "flex", "d1_3", "d4_7", "d7_30", "dflex"],
+  movein: ["now", "month", "flex", "date"],
+  who: ["single", "couple", "family_kids", "family", "big", "group"],
+  pets: ["no", "cat", "dog", "pet_other"], parking: ["yes", "any"], contact: ["bot", "me", "both"],
+};
+const M = { rooms: ["1", "2", "3", "4", "any"], floor_pref: ["nf", "nl", "mid", "any"] };
+const DATES = ["movein_date", "date_from", "date_to"];
+const ALL_KEYS = [...Object.keys(E), ...Object.keys(M), "districts", "city_other",
+  "budget", "floor_min", "floor_max", ...DATES];
+const START_CMDS = ["/start", "/new", "/app", "/mini", "/anketa", "/steps", "/search",
+  "/start_search", "/profile", "/params"];
+
+// ───────────────────────────── нормализация ответа модели ─────────────────────────────
+const norm = s => String(s || "").toLowerCase().replace(/ё/g, "е").replace(/[^a-zа-я0-9]/g, "");
+function districtIdx(name) {
+  const n = norm(name);
+  if (!n) return null;
+  if (n === "any" || n === "любой" || n === "все") return "any";
+  for (let i = 0; i < DISTRICTS.length; i++) {
+    const a = norm(DISTRICTS[i]), b = norm(DISTRICTS_UZ[i]);
+    if (n === a || n === b || (n.length >= 4 && (a.startsWith(n) || b.startsWith(n) || n.startsWith(a.slice(0, 5)))))
+      return String(i);
+  }
+  return null;
+}
+const isoOk = s => /^\d{4}-\d{2}-\d{2}$/.test(String(s || "")) && !isNaN(Date.parse(s));
+
+/** Применяет {set, clear} модели к ans с жёсткой проверкой значений. */
+export function applyPatch(ans, set, clear) {
+  const out = { ...ans };
+  for (const k of (Array.isArray(clear) ? clear : [])) if (ALL_KEYS.includes(k)) delete out[k];
+  for (const [k, v] of Object.entries(set || {})) {
+    if (v === null || v === undefined || v === "") continue;
+    if (E[k]) { const s = String(v); if (E[k].includes(s)) out[k] = s; continue; }
+    if (M[k]) {
+      const arr = (Array.isArray(v) ? v : [v]).map(String).filter(x => M[k].includes(x));
+      out[k] = arr.includes("any") ? [] : [...new Set(arr)];
+      continue;
+    }
+    if (k === "districts") {
+      const arr = (Array.isArray(v) ? v : [v]).map(districtIdx).filter(Boolean);
+      out.districts = arr.includes("any") ? [] : [...new Set(arr)].sort((a, b) => a - b);
+      continue;
+    }
+    if (k === "budget") { const n = Math.round(+String(v).replace(/[^\d.]/g, "")); if (n > 0 && n < 1e8) out.budget = String(n); continue; }
+    if (k === "floor_min" || k === "floor_max") { const n = parseInt(v, 10); if (n >= 1 && n <= 60) out[k] = String(n); continue; }
+    if (DATES.includes(k)) { if (isoOk(v)) out[k] = String(v); continue; }
+    if (k === "city_other") { out.city_other = String(v).trim().slice(0, 40); continue; }
+  }
+  if (out.movein_date && !out.movein) out.movein = "date";
+  return out;
+}
+
+/** Хватает ли параметров, чтобы собрать запрос маклерам. */
+export function essentialsOk(a) {
+  return !!(a.deal && a.city && a.budget && (a.object === "land" || (a.rooms && a.rooms.length) || a.rooms_any));
+}
+
+/** Полный набор для Python: недостающее — значениями по умолчанию. */
+export function finalAns(a) {
+  const out = { lang: "ru", deal: "rent", object: "flat", city: "tashkent", contact: "bot", ...a };
+  delete out.rooms_any;
+  return out;
+}
+
+// ───────────────────────────── промпт и схема ─────────────────────────────
+const SYSTEM = `Ты — Ra'no, ИИ-ассистент по подбору жилья в Узбекистане (в основном Ташкент).
+Ты всегда ИИ-ассистент, никогда не выдаёшь себя за человека. В этом чате ты коротким
+дружелюбным разговором выясняешь, что ищет клиент, и заполняешь параметры поиска.
+По ним потом автоматически соберётся запрос маклерам.
+
+Как вести разговор:
+- Пиши коротко и тепло, без канцелярита: 1–3 предложения, не больше двух вопросов за раз.
+- Отвечай на языке клиента (русский; узбекский — латиницей; английский) и ставь lang.
+- Сразу забирай из сообщения всё, что можно. Не переспрашивай уже известное.
+- Сначала главное: что ищем (аренда на длительный срок / посуточно / покупка), тип жилья,
+  город и районы (для Ташкента), сколько комнат, бюджет в долларах.
+- Затем ОДНИМ сообщением спроси про пожелания: ремонт/класс дома, мебель, этаж,
+  сроки (аренда — на сколько и когда заезд; посуточно — даты заезда и выезда),
+  кто будет жить, животные, парковка. «Неважно»/пропуск — не заполняй или ставь any.
+- Бюджет: аренда — $ в месяц, посуточно — $ в сутки, покупка — $ за объект.
+  Если назвали сумму в сумах — переведи по ~12 700 сум за $ и скажи, что перевела.
+- «Трёшка» = 3 комнаты, «однушка» = 1. «Любой район» → districts ["any"].
+  «Любое количество комнат» → rooms ["any"].
+- Даты — в формате YYYY-MM-DD, считай от сегодняшней даты (она дана ниже).
+- Ничего не выдумывай, не обещай квартир и цен, не дави и не торопи.
+- ready=true, когда известны deal, city, budget и (кроме участка) rooms, И ты уже спросил
+  про пожелания (или клиент сам сказал, что остальное неважно / «ищи» / «хватит»).
+  Тогда в reply одной-двумя строками перечисли собранное и скажи, что собираешь запрос маклерам.
+- Клиент может потом менять что угодно словами («бюджет 1200», «добавь Юнусабад»,
+  «парковка не нужна»). Обнови поля и снова верни ready=true, если главное известно.
+- Если сообщение не про жильё — ответь коротко и мягко верни к поиску.
+
+Ответ — JSON: reply (текст клиенту), ready, set (ТОЛЬКО изменившиеся поля),
+clear (имена полей, которые клиент попросил сбросить).
+
+Поля set:
+lang: ru|uz|en
+deal: rent (длительная аренда) | daily (посуточно) | buy (покупка)
+object: flat (квартира) | house (дом/таунхаус) | dacha | land (участок)
+city: tashkent | charvak (Чарвак/Чимган) | region (Ташкентская обл.) | other (тогда city_other — название)
+districts: массив из ${DISTRICTS.join(", ")} или ["any"]
+rooms: массив из "1","2","3","4" (4 = 4 и больше) или ["any"]
+budget: целое число $ (верхняя граница)
+class: any | new (новостройка/ЖК) | premium (ЖК + дизайнерский ремонт) | reno (вторичка с хорошим ремонтом) | biz (бизнес/премиум-класс)
+furniture: yes | no | any
+floor_pref: массив из nf (не первый), nl (не последний), mid (не первый и не последний) или ["any"]; floor_min, floor_max — числа
+term (аренда): 12 (от года) | 6_12 | 3_6 | flex; (посуточно): d1_3 | d4_7 | d7_30 | dflex
+movein (аренда): now | month | flex | date (+ movein_date)
+date_from, date_to (посуточно)
+who: single | couple | family_kids | family (без детей) | big (большая семья) | group (друзья/коллеги)
+pets: no | cat | dog | pet_other
+parking: yes (нужна) | any
+contact: bot (маклеры пишут ассистенту — по умолчанию) | me (лично клиенту) | both`;
+
+const S = (en) => ({ type: "string", enum: en });
+export const SCHEMA = {
+  type: "object",
+  properties: {
+    reply: { type: "string" },
+    ready: { type: "boolean" },
+    set: {
+      type: "object",
+      properties: {
+        ...Object.fromEntries(Object.entries(E).map(([k, v]) => [k, S(v)])),
+        city_other: { type: "string" },
+        districts: { type: "array", items: S([...DISTRICTS, "any"]) },
+        rooms: { type: "array", items: S(M.rooms) },
+        floor_pref: { type: "array", items: S(M.floor_pref) },
+        budget: { type: "integer" }, floor_min: { type: "integer" }, floor_max: { type: "integer" },
+        movein_date: { type: "string" }, date_from: { type: "string" }, date_to: { type: "string" },
+      },
+    },
+    clear: { type: "array", items: { type: "string" } },
+  },
+  required: ["reply", "ready", "set"],
+};
+
+// ───────────────────────────── Gemini ─────────────────────────────
+export async function gemini(env, system, userText) {
+  if (!env.GEMINI_KEY) throw new Error("GEMINI_KEY не задан");
+  const first = env.AI_MODEL || "gemini-3.8-flash";
+  const models = [first, ...["gemini-3.6-flash", "gemini-3.5-flash"].filter(m => m !== first)];
+  const variants = [
+    { responseMimeType: "application/json", responseJsonSchema: SCHEMA },
+    { responseMimeType: "application/json", responseSchema: SCHEMA },
+    { responseMimeType: "application/json" },
+  ];
+  let lastErr = "";
+  for (const model of models) {
+    for (let i = 0; i < variants.length; i++) {
+      const sys = system + (i === 2 ? "\n\nФормат ответа — строго JSON по схеме: " + JSON.stringify(SCHEMA) : "");
+      const gen = { temperature: 0.4, maxOutputTokens: 2048, ...variants[i] };
+      let r, d;
+      for (const g of [{ ...gen, thinkingConfig: { thinkingLevel: "low" } }, gen]) {
+        r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
+          method: "POST",
+          headers: { "content-type": "application/json", "x-goog-api-key": env.GEMINI_KEY },
+          body: JSON.stringify({ systemInstruction: { parts: [{ text: sys }] },
+            contents: [{ role: "user", parts: [{ text: userText }] }], generationConfig: g }),
+        });
+        d = await r.json().catch(() => ({}));
+        if (r.ok || !(r.status === 400 && /think/i.test(d?.error?.message || ""))) break;
+      }
+      if (r.ok) {
+        const raw = (d.candidates?.[0]?.content?.parts || []).filter(p => !p.thought).map(p => p.text || "").join("")
+          .trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
+        try { return JSON.parse(raw); } catch (e) {
+          const a = raw.indexOf("{"), z = raw.lastIndexOf("}");
+          if (a >= 0 && z > a) try { return JSON.parse(raw.slice(a, z + 1)); } catch (e2) {}
+          lastErr = "не JSON"; continue;
+        }
+      }
+      lastErr = `${model} ${r.status}: ${d?.error?.message || ""}`;
+      if ([429, 503, 404, 500].includes(r.status)) break;   // следующая модель
+      if (r.status !== 400) break;                          // 400 — пробуем другой формат схемы
+    }
+  }
+  throw new Error(lastErr || "Gemini недоступен");
+}
+
+// ───────────────────────────── хранилище (D1) ─────────────────────────────
+let schemaReady = false;
+async function db(env) {
+  if (!schemaReady) {
+    await env.DB.batch([
+      env.DB.prepare("CREATE TABLE IF NOT EXISTS queue (id INTEGER PRIMARY KEY AUTOINCREMENT, upd TEXT NOT NULL, at INTEGER NOT NULL)"),
+      env.DB.prepare("CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT)"),
+    ]);
+    schemaReady = true;
+  }
+  return env.DB;
+}
+async function kvGet(env, k, dflt = null) {
+  const r = await (await db(env)).prepare("SELECT v FROM kv WHERE k=?").bind(k).first();
+  if (!r) return dflt;
+  try { return JSON.parse(r.v); } catch (e) { return dflt; }
+}
+async function kvSet(env, k, v) {
+  await (await db(env)).prepare("INSERT INTO kv (k, v) VALUES (?, ?) ON CONFLICT(k) DO UPDATE SET v=excluded.v")
+    .bind(k, JSON.stringify(v)).run();
+}
+async function enqueue(env, upd) {
+  await (await db(env)).prepare("INSERT INTO queue (upd, at) VALUES (?, ?)").bind(JSON.stringify(upd), Date.now()).run();
+}
+
+// ───────────────────────────── Telegram ─────────────────────────────
+export async function tg(env, method, body) {
+  const r = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/${method}`, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  return r.json().catch(() => ({ ok: false }));
+}
+const say = (env, chat, text, extra = {}) => tg(env, "sendMessage", { chat_id: chat, text, ...extra });
+
+// ───────────────────────────── «будильник» для Python ─────────────────────────────
+async function pythonAlive(env) {
+  const hb = await kvGet(env, "py_alive", null);
+  return !!(hb && Date.now() < hb.until && Date.now() - hb.at < 15 * 60e3);
+}
+/** Будит GitHub Actions, если Python сейчас не работает. Возвращает true, если он уже жив. */
+export async function wake(env) {
+  if (await pythonAlive(env)) return true;
+  const last = await kvGet(env, "last_wake", 0);
+  if (Date.now() - last < 4 * 60e3) return false;     // уже будили — запуск в пути
+  await kvSet(env, "last_wake", Date.now());
+  if (!env.GH_TOKEN || !env.GH_REPO) return false;
+  const r = await fetch(`https://api.github.com/repos/${env.GH_REPO}/actions/workflows/${env.GH_WORKFLOW || "radar.yml"}/dispatches`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${env.GH_TOKEN}`, accept: "application/vnd.github+json",
+      "user-agent": "rano-worker", "x-github-api-version": "2022-11-28" },
+    body: JSON.stringify({ ref: "main" }),
+  });
+  if (r.status !== 204) console.log("wake failed", r.status, await r.text());
+  return false;
+}
+async function queueAndWake(env, upd, chat, note) {
+  await enqueue(env, upd);
+  const alive = await wake(env);
+  if (!alive && chat && note) {
+    const w = await kvGet(env, "wait_note", 0);              // не чаще раза в 5 минут
+    if (Date.now() - w > 5 * 60e3) { await kvSet(env, "wait_note", Date.now()); await say(env, chat, note); }
+  }
+  return alive;
+}
+
+// ───────────────────────────── интервью ─────────────────────────────
+const GREET = {
+  ru: "Привет! Я Ra'no, ИИ-ассистент по поиску жилья. Расскажите своими словами, что ищете — например: «снять трёшку в Мирабаде до $1400, с ремонтом, заезд в ноябре». Остальное уточню сама.",
+  uz: "Salom! Men Ra'no, uy-joy qidirish bo'yicha AI-yordamchiman. Nima qidirayotganingizni o'z so'zlaringiz bilan yozing — masalan: «Mirobodda 3 xonali, oyiga $1400 gacha, remont bilan». Qolganini o'zim so'rayman.",
+  en: "Hi! I'm Ra'no, an AI assistant for finding a home. Tell me in your own words what you're looking for — e.g. \"rent a 3-room flat in Mirabad up to $1400, renovated, moving in November\". I'll ask about the rest.",
+};
+const WAIT = {
+  ru: "⏳ Запускаю основной модуль — ответ придёт через 1–2 минуты.",
+  uz: "⏳ Asosiy modulni ishga tushiryapman — javob 1–2 daqiqada keladi.",
+  en: "⏳ Starting the main module — the reply will come in 1–2 minutes.",
+};
+const ivKey = chat => "iv:" + chat;
+const emptyIv = () => ({ ans: {}, hist: [], sent: "", mode: "" });
+
+export function summary(a) {
+  const deal = { rent: "аренда", daily: "посуточно", buy: "покупка" }[a.deal] || "";
+  const obj = { flat: "квартира", house: "дом", dacha: "дача", land: "участок" }[a.object] || "";
+  const rooms = (a.rooms || []).length ? a.rooms.map(r => r === "4" ? "4+" : r).join("/") + "-комн." : "";
+  const ds = (a.districts || []).map(i => DISTRICTS[+i]).filter(Boolean).join(", ");
+  const b = a.budget ? `до $${a.budget}${a.deal === "daily" ? "/сутки" : a.deal === "buy" ? "" : "/мес"}` : "";
+  return [deal, obj, rooms, ds || (a.city === "tashkent" ? "Ташкент" : a.city_other || ""), b].filter(Boolean).join(" · ");
+}
+
+function buildPrompt(iv, text, today) {
+  const hist = iv.hist.slice(-16).map(h => (h.r === "u" ? "Клиент: " : "Ra'no: ") + h.t).join("\n");
+  return `Сегодня: ${today}.\nТекущие параметры (JSON): ${JSON.stringify(iv.ans)}\n` +
+    (hist ? `История диалога:\n${hist}\n` : "") + `Новое сообщение клиента: ${text}`;
+}
+
+/** Один ход интервью без отправки в Telegram: модель → проверка → новое состояние. */
+export async function interviewCore(env, iv, text) {
+  const out = await gemini(env, SYSTEM, buildPrompt(iv, text, new Date().toISOString().slice(0, 10)));
+  const set = { ...(out.set || {}) };
+  const roomsAny = Array.isArray(set.rooms) && set.rooms.includes("any");
+  iv.ans = applyPatch(iv.ans, set, out.clear);
+  if (roomsAny) iv.ans.rooms_any = true; else if (set.rooms) delete iv.ans.rooms_any;
+  const reply = String(out.reply || "").trim().slice(0, 3500) || "Расскажите, пожалуйста, что ищете?";
+  iv.hist.push({ r: "u", t: String(text).slice(0, 1000) }, { r: "a", t: reply });
+  iv.hist = iv.hist.slice(-20);
+  const fin = finalAns(iv.ans);
+  const sig = JSON.stringify(fin);
+  let ready = false;
+  if (out.ready && essentialsOk(iv.ans) && sig !== iv.sent) { iv.sent = sig; ready = true; }
+  return { reply, ready, fin, raw: out };
+}
+
+export async function interviewTurn(env, chat, text) {
+  const iv = await kvGet(env, ivKey(chat), null) || emptyIv();
+  tg(env, "sendChatAction", { chat_id: chat, action: "typing" }).catch(() => {});
+  let res;
+  try {
+    res = await interviewCore(env, iv, text);
+  } catch (e) {
+    console.log("gemini error", e.message);
+    await say(env, chat, "Не получилось обработать сообщение — попробуйте ещё раз через минуту.");
+    return;
+  }
+  let { reply, ready, fin } = res;
+  await kvSet(env, ivKey(chat), iv);
+  if (ready) {
+    await enqueue(env, { message: { chat: { id: +chat || chat, type: "private" }, from: { id: +chat || chat },
+      date: Math.floor(Date.now() / 1000),
+      web_app_data: { data: JSON.stringify({ v: 3, replace: true, src: "chat", ans: fin }) } } });
+    const alive = await wake(env);
+    const lang = fin.lang || "ru";
+    reply += "\n\n" + (alive
+      ? { ru: "📝 Собираю запрос маклерам…", uz: "📝 Maklerlarga so'rov tayyorlayapman…", en: "📝 Building the request to brokers…" }[lang]
+      : { ru: "📝 Собираю запрос маклерам — пришлю через 1–2 минуты.", uz: "📝 Maklerlarga so'rov tayyorlayapman — 1–2 daqiqada yuboraman.", en: "📝 Building the request to brokers — it'll arrive in 1–2 minutes." }[lang]);
+  }
+  await say(env, chat, reply, { reply_markup: { remove_keyboard: true } });
+}
+
+async function startInterview(env, chat, fresh, lang = "ru") {
+  let iv = await kvGet(env, ivKey(chat), null);
+  if (fresh || !iv || !essentialsOk(iv.ans || {})) {
+    iv = emptyIv();
+    await kvSet(env, ivKey(chat), iv);
+    await say(env, chat, GREET[lang] || GREET.ru, { reply_markup: { remove_keyboard: true } });
+    return;
+  }
+  await say(env, chat, `С возвращением! Сейчас ищем: ${summary(iv.ans)}.\n` +
+    "Напишите, что поменять, — или /new, чтобы начать заново.", { reply_markup: { remove_keyboard: true } });
+}
+
+// ───────────────────────────── разбор обновления ─────────────────────────────
+export async function handleUpdate(env, upd) {
+  const owner = String(env.OWNER_CHAT);
+  const last = await kvGet(env, "last_upd", 0);
+  if (upd.update_id && upd.update_id <= last) return "dup";        // повтор от Telegram
+  if (upd.update_id) await kvSet(env, "last_upd", upd.update_id);
+
+  const cb = upd.callback_query;
+  if (cb) {
+    const chat = String(cb.message?.chat?.id ?? "");
+    if (chat !== owner) return "skip";
+    const data = cb.data || "";
+    if (data === "q:again") {
+      await tg(env, "answerCallbackQuery", { callback_query_id: cb.id, text: "Начинаем заново" });
+      await startInterview(env, chat, true, (await kvGet(env, ivKey(chat), {}))?.ans?.lang);
+      return "interview";
+    }
+    if (data === "q:edit") {
+      const iv = await kvGet(env, ivKey(chat), null) || emptyIv();
+      iv.mode = "await_text"; await kvSet(env, ivKey(chat), iv);
+    }
+    const alive = await pythonAlive(env);
+    await tg(env, "answerCallbackQuery", { callback_query_id: cb.id,
+      text: alive ? "" : "Принято — выполню через 1–2 минуты" });
+    await queueAndWake(env, upd);
+    return "queued";
+  }
+
+  const msg = upd.message || upd.edited_message;
+  if (!msg) { await enqueue(env, upd); return "queued"; }
+  const chat = String(msg.chat?.id ?? "");
+  if (chat !== owner) {                         // маклер прислал вариант
+    await queueAndWake(env, upd);
+    return "queued";
+  }
+  const text = (msg.text || "").trim();
+  const lang = (msg.from?.language_code || "").slice(0, 2);
+  const L = ["uz", "en"].includes(lang) ? lang : "ru";
+
+  if (text.startsWith("/")) {
+    const [c0, ...rest] = text.split(/\s+/);
+    const cmd = c0.toLowerCase().split("@")[0];
+    const arg = rest.join(" ");
+    if (START_CMDS.includes(cmd) && !(cmd === "/start" && /^p/.test(arg))) {
+      await startInterview(env, chat, cmd !== "/start" && cmd !== "/params", L);
+      return "interview";
+    }
+    await queueAndWake(env, upd, chat, WAIT[L]);
+    return "queued";
+  }
+  if (!text || msg.web_app_data || upd.edited_message) {
+    await queueAndWake(env, upd);
+    return "queued";
+  }
+  const iv = await kvGet(env, ivKey(chat), null);
+  if (iv && iv.mode === "await_text") {          // «✏️ Изменить текст» — это для Python
+    iv.mode = ""; await kvSet(env, ivKey(chat), iv);
+    await queueAndWake(env, upd, chat, WAIT[L]);
+    return "queued";
+  }
+  await interviewTurn(env, chat, text);
+  return "interview";
+}
+
+// ───────────────────────────── HTTP ─────────────────────────────
+const json = (o, s = 200) => new Response(JSON.stringify(o), { status: s, headers: { "content-type": "application/json" } });
+
+export default {
+  async fetch(req, env, ctx) {
+    const url = new URL(req.url);
+    const p = url.pathname;
+    if (p === "/tg" && req.method === "POST") {
+      if (env.TG_SECRET && req.headers.get("x-telegram-bot-api-secret-token") !== env.TG_SECRET)
+        return new Response("forbidden", { status: 403 });
+      const upd = await req.json().catch(() => null);
+      if (upd) ctx.waitUntil(handleUpdate(env, upd).catch(e => console.log("update error", e.stack || e)));
+      return new Response("ok");
+    }
+    if (p.startsWith("/svc/")) {
+      if (!env.SVC_KEY || req.headers.get("x-svc") !== env.SVC_KEY) return json({ error: "нет ключа" }, 401);
+      if (p === "/svc/updates") {
+        const after = parseInt(url.searchParams.get("after") || "0", 10) || 0;
+        const until = parseInt(url.searchParams.get("until") || "0", 10) || 0;
+        await kvSet(env, "py_alive", { at: Date.now(), until: until ? until * 1000 : Date.now() + 120e3 });
+        const d = await db(env);
+        if (after) await d.prepare("DELETE FROM queue WHERE id<=?").bind(after).run();
+        const r = await d.prepare("SELECT id, upd FROM queue WHERE id>? ORDER BY id LIMIT 100").bind(after).all();
+        const updates = (r.results || []).map(x => ({ ...JSON.parse(x.upd), update_id: x.id }));
+        return json({ ok: true, result: updates });
+      }
+      if (p === "/svc/bye") { await kvSet(env, "py_alive", null); return json({ ok: true }); }
+      if (p === "/svc/setup") {
+        const hook = await tg(env, "setWebhook", { url: url.origin + "/tg", secret_token: env.TG_SECRET || undefined,
+          allowed_updates: ["message", "edited_message", "callback_query"], drop_pending_updates: false });
+        // кнопка меню «Параметры» (мини-апп) больше не нужна — возвращаем список команд
+        const menu = await tg(env, "setChatMenuButton", { menu_button: { type: "commands" } });
+        const menuOwner = await tg(env, "setChatMenuButton", { chat_id: +env.OWNER_CHAT, menu_button: { type: "commands" } });
+        const info = await tg(env, "getWebhookInfo", {});
+        return json({ hook, menu, menuOwner, info: info.result });
+      }
+      if (p === "/svc/try") {            // проверка промпта вживую, без Telegram и очереди
+        if (url.searchParams.get("reset")) await kvSet(env, "iv:test", emptyIv());
+        const iv = await kvGet(env, "iv:test", null) || emptyIv();
+        const res = await interviewCore(env, iv, url.searchParams.get("text") || "");
+        await kvSet(env, "iv:test", iv);
+        return json({ ...res, ans: iv.ans });
+      }
+      if (p === "/svc/state") {
+        return json({ alive: await pythonAlive(env), iv: await kvGet(env, ivKey(env.OWNER_CHAT), null),
+          queue: (await (await db(env)).prepare("SELECT COUNT(*) n FROM queue").first())?.n });
+      }
+      return json({ error: "нет такого" }, 404);
+    }
+    return new Response("Ra'no worker ok");
+  },
+};
