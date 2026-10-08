@@ -18,6 +18,7 @@ function d1() {
 const sent = [], gh = [];
 const tgFail = {};                                // метод → ответить ok:false (как Telegram при ошибке)
 let geminiQueue = [];
+const geminiCalls = [];
 globalThis.fetch = async (url, opt = {}) => {
   url = String(url);
   const body = opt.body ? JSON.parse(opt.body) : {};
@@ -28,6 +29,7 @@ globalThis.fetch = async (url, opt = {}) => {
     return new Response(JSON.stringify({ ok: true, result: {} }));
   }
   if (url.includes("generativelanguage")) {
+    geminiCalls.push(JSON.stringify(body));
     const next = geminiQueue.shift();
     if (!next) return new Response(JSON.stringify({ error: { message: "no mock" } }), { status: 500 });
     return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: JSON.stringify(next) }] } }] }));
@@ -401,6 +403,41 @@ const nEdits = sent.filter(x => x.m === "editMessageText").length;
 await handleUpdate(env, { update_id: ++uid, callback_query: { id: "m6", data: "s:show", message: { message_id: 50, chat: { id: +OWNER } } } });
 assert.equal(sent.filter(x => x.m === "editMessageText").length, nEdits);
 assert.match(texts().at(-1), /Шортлист/);
+
+// ── разговор понимает, что у бота есть: подборка с номерами, шортлист — и делает, а не обещает
+{ const row = await env.DB.prepare("SELECT v FROM kv WHERE k='ui'").first();
+  const ui = JSON.parse(row.v);
+  ui.ctx = { pick_pending: 0, last_pick: [1, 2, 3, 4, 5].map(n => ({ n, key: `sale:joymee:10${n}`, text: `вариант ${n}` })),
+             shortlist: [{ n: 1, oid: 22, text: "$41 000" }] };
+  await env.DB.prepare("UPDATE kv SET v=? WHERE k='ui'").bind(JSON.stringify(ui)).run(); }
+await drain(); sent.length = 0;
+geminiQueue.push({ reply: "Показываю 2 и 4 👇", ready: false, set: [], intent: "show_item", items: ["2", "4"] });
+await handleUpdate(env, msg("покажи 2 и 4, есть фото?"));
+got = await drain();
+assert.deepEqual(got.map(u => u.callback_query?.data), ["L:v:sale:joymee:102", "L:v:sale:joymee:104"]);
+assert.match(texts().at(-1), /Показываю 2 и 4/);
+geminiQueue.push({ reply: "Показываю все 👇", ready: false, set: [], intent: "show_item", items: [] });
+await handleUpdate(env, msg("покажи все 5 с фото"));
+assert.equal((await drain()).length, 5);
+geminiQueue.push({ reply: "Сейчас покажу", ready: false, set: [], intent: "show_item", items: ["9"] });
+await handleUpdate(env, msg("а девятую?"));
+assert.match(texts().at(-1), /только 5/); assert.equal((await drain()).length, 0);
+geminiQueue.push({ reply: "Вот подборка 👇", ready: false, set: [], intent: "show_pick" });
+await handleUpdate(env, msg("покажи подборку ещё раз"));
+assert.equal((await drain()).at(-1).callback_query.data, "R:last");
+geminiQueue.push({ reply: "Бегу проверять сайты 🏃‍♀️", ready: false, set: [], intent: "search_now" });
+await handleUpdate(env, msg("ищи сама"));
+assert.equal((await drain()).at(-1).callback_query.data, "R:check");
+assert.match(texts().at(-1), /Бегу проверять/);
+geminiQueue.push({ reply: "Открываю", ready: false, set: [], intent: "sl_item", items: ["1"] });
+await handleUpdate(env, msg("открой первый из шортлиста"));
+assert.match(texts().at(-1) + JSON.stringify(sent.at(-1)), /Вариант #22|s:o:22/);
+// модель видит, что у бота есть, и что уже сделано
+geminiQueue.push({ reply: "ок", ready: false, set: [] });
+await handleUpdate(env, msg("спасибо"));
+const lastCall = geminiCalls.at(-1);
+assert.match(lastCall, /Сейчас у бота/); assert.match(lastCall, /sale:joymee:102/); assert.match(lastCall, /\[система\] показаны объявления 2, 4/);
+await drain();
 
 for (const [v, n] of [["44 тыс", 44000], ["44к", 44000], ["1,2 млн", 1200000], ["52,5", 52.5], ["44,000", 44000],
                       ["44 000 $", 44000], ["1 250 000", 1250000], ["45000", 45000], ["105.5 м²", 105.5], ["60 ming", 60000]])

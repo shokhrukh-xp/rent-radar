@@ -2000,6 +2000,60 @@ def send_next_broker(cfg, store) -> bool:
 SNAPSHOT_EVERY = 15
 
 
+def show_site_listing(cfg, key) -> str:
+    """Полная карточка объявления с сайта: фото, описание, разбор цены, 👍 / Мимо."""
+    if not SALE_DB_PATH.exists():
+        return "Объявление не найдено"
+    sst = Store(SALE_DB_PATH)
+    try:
+        row = sst.conn.execute("SELECT data FROM listings WHERE key LIKE ?",
+                               (key.replace("%", "") + "%",)).fetchone()
+        if not row:
+            return "Объявление не найдено"
+        l = json.loads(row[0] or "{}")
+        ids = send_listing(cfg, {"photos": True}, l, False, text=format_sale_message(l, cfg))
+        if not ids:
+            return "Не получилось отправить 🙈"
+        send_sale_analysis(cfg, sst, l, kb=sale_kb(l["key"], ids))
+    finally:
+        sst.conn.close()
+    return "" if l.get("photo_urls") else "Фото у этого объявления нет — только описание"
+
+
+def _plain(html_text) -> str:
+    return html_lib.unescape(re.sub(r"<[^>]+>", "", html_text or "")).strip()
+
+
+def chat_context(cfg, store) -> dict:
+    """Что сейчас есть у бота — для разговора: подборка с номерами, шортлист, счётчики.
+    Модель опирается только на это и не выдумывает, что показала."""
+    ctx = {"fresh_start": bool(store.get_kv("fresh_start"))}
+    try:
+        ss = (effective_sale_cfg(cfg, store).get("sale_search") or {})
+        ctx["site_search"] = sale_criteria_text(ss).split("\n")[0] if ss.get("enabled") else "выключен"
+    except Exception:
+        pass
+    if SALE_DB_PATH.exists():
+        sst = Store(SALE_DB_PATH)
+        try:
+            day = sale_sources.day_stats(sst)
+            ctx["today"] = {k: day.get(k, 0) for k in ("seen", "fit", "instant", "picked")}
+            ctx["pick_pending"] = len(sale_sources.pick_pending(sst))
+            ctx["last_pick"] = [{"n": i, "key": x["key"], "text": _plain(x["line"])[:140]}
+                                for i, x in enumerate(sst.get_kv("last_pick") or [], 1)]
+            ctx["shown_today"] = [{"key": x["key"], "text": _plain(x["line"])[:140]}
+                                  for x in (sst.get_kv("shown_recent") or [])[-5:]]
+        finally:
+            sst.conn.close()
+    _, rows, _ = concierge.shortlist_items(store, cfg, "n")
+    ctx["shortlist"] = [{"n": i, "oid": r["oid"], "text": _plain(r["line"])[:120], "stage": r["stage"]}
+                        for i, r in enumerate(rows[:10], 1)]
+    q = lambda sql: store.conn.execute(sql).fetchone()[0]
+    ctx["broker_offers_new"] = q("SELECT COUNT(*) FROM broker_offers WHERE status IN ('new','later')")
+    ctx["brokers_written"] = q("SELECT COUNT(*) FROM brokers WHERE status='contacted'")
+    return ctx
+
+
 SRC_LABEL = {"realt24": "Realt24", "joymee": "Joymee", "realting": "Realting",
              "yangiuylar": "Yangiuylar", "telegram": "Telegram-каналы"}
 
@@ -2121,6 +2175,11 @@ def ui_snapshot(cfg, store, settings) -> dict:
             log.info("сводка рынка для снимка: %s", e)
     if mk.get("text"):
         texts["/rynok"] = mk["text"]
+    try:
+        ctx = chat_context(cfg, store)
+    except Exception as e:
+        log.info("контекст разговора для снимка: %s", e)
+        ctx = {}
     screens = {}
     for name, fn in (("/rano", rano_screen), ("/via", via_screen)):
         try:
@@ -2129,7 +2188,7 @@ def ui_snapshot(cfg, store, settings) -> dict:
             log.info("экран %s для снимка: %s", name, e)
     return {"offers": offers, "offers_total": len(pool), "shortlist": shortlist, "written": written,
             "sl": sl, "sl_empty": concierge.SL_EMPTY, "cards": cards, "texts": texts,
-            "screens": screens,
+            "screens": screens, "ctx": ctx,
             "free": cfg.get("free_offers", 2), "deal": deal,
             "brokers": brokers, "brokers_total": len(ranked),
             "header": outreach_header(store, deal, text, len(ranked)) if ranked else "",
@@ -2226,6 +2285,17 @@ def handle_callback(data: str, settings: dict, store, cfg: dict, message_id=None
     if d.startswith("o:"):
         toast, _ = concierge.handle_offer_cb(d, cfg, store, message_id)
         return toast, None
+    if d == "R:last":                          # «покажи подборку ещё раз»
+        if not SALE_DB_PATH.exists():
+            return "Подборок ещё не было", None
+        sst = Store(SALE_DB_PATH)
+        try:
+            n = sale_sources.resend_last_pick(cfg, sst)
+        finally:
+            sst.conn.close()
+        return ("" if n else "Подборок ещё не было — скоро будет 🙂"), None
+    if d.startswith("L:v:"):                   # фото и разбор объявления из подборки
+        return show_site_listing(cfg, d[4:].split("|")[0]), None
     if d.startswith("L:"):                     # объявление с сайта: в шортлист / мимо
         kind, key = d[2:3], d[4:].split("|")[0]
         row = None
@@ -2260,7 +2330,7 @@ def handle_callback(data: str, settings: dict, store, cfg: dict, message_id=None
             sst.conn.close()
         return ("" if n else "Подборка пуста — новое пришлю, как найду"), None
     if d == "R:check":
-        store.set_kv("sale_force", True)
+        store.set_kv("sale_force", "button")
         return "Проверяю все сайты — 1–2 минуты", None
     if d.startswith("s:"):
         toast, done = concierge.handle_shortlist_cb(d, cfg, store, message_id)
@@ -3100,6 +3170,7 @@ def run_sale_search(cfg: dict, store, settings: dict, force: bool = False) -> in
             sent += 1
             log.info("[продажа] сразу (%s): %s", sc, l["title"][:60])
             send_sale_analysis(cfg, store, l, kb=sale_kb(l["key"], ids))
+            sale_sources.remember_shown(store, l, why)
             time.sleep(1)
         else:
             store.save(l, notified=False)
@@ -3358,7 +3429,8 @@ def run():
             except Exception as e:
                 log.warning("[маклеры продажи] сбор не удался: %s", e)
 
-        force_sale = bool(store.get_kv("sale_force"))          # «Проверить сайты сейчас»
+        force_flag = store.get_kv("sale_force")                # «Проверить сайты сейчас» или новые параметры
+        force_sale = bool(force_flag)
         fresh = bool(store.get_kv("fresh_start"))              # после сброса — ждём новых параметров из чата
         if sale_store is not None and not fresh and (once or now >= next_sale or force_sale):
             next_sale = now + (sale_cfg.get("uybor") or {}).get("interval_seconds", 600)
@@ -3366,7 +3438,7 @@ def run():
                 store.set_kv("sale_force", False)
             try:
                 n = run_sale_search(effective_sale_cfg(cfg, store), sale_store, settings, force=force_sale)
-                if force_sale:
+                if force_flag == "button":
                     st = sale_sources.day_stats(sale_store)
                     send_telegram(cfg, f"🔄 Пробежалась по всем сайтам! Сегодня просмотрено {st.get('seen', 0)}, "
                                        f"подошло {st.get('fit', 0)}; в подборке ждут "

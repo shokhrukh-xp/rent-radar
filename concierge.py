@@ -559,7 +559,9 @@ def finish_anketa(cfg, store):
         "chat_id": cfg["telegram_chat_id"], "parse_mode": "HTML",
         "text": "📝 <b>Готовый запрос маклерам</b>\n\n"
                 f"<code>{rr.escape_html(text)}</code>\n\n"
-                "Гляньте, всё ли так 👀 Можно утвердить или переписать своими словами.",
+                "Гляньте, всё ли так 👀 Можно утвердить или переписать своими словами."
+                + ("\n\n🔎 А по сайтам я уже побежала сама — выгодное пришлю сразу, остальное подборкой."
+                   if (get_anketa(store).get("ans") or {}).get("deal") == "buy" else ""),
         "reply_markup": json.dumps(kb, ensure_ascii=False)})
 
 
@@ -1694,5 +1696,6 @@ def apply_webapp_data(cfg, store, raw):
     a["i"] = len(STEPS)
     save_anketa(store, a)
     store.set_kv("fresh_start", False)          # после сброса поиск по сайтам ждал этих параметров
+    store.set_kv("sale_force", True)            # новые параметры — сразу пробежаться по сайтам
     finish_anketa(cfg, store)
     return True

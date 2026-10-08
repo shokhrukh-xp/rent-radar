@@ -372,6 +372,20 @@ def _():
     SS.maybe_daily_pick(cfg, sale, eve.replace(hour=19, minute=40))
 
 
+@scen("14. «покажи подборку ещё раз», «покажи 2 с фото», контекст разговора")
+def _():
+    rr.handle_callback("R:last", settings, store, cfg, 1)
+    lp = sale.get_kv("last_pick") or []
+    expect(lp, "последняя подборка запомнена")
+    if lp:
+        rr.handle_callback(f"L:v:{lp[min(1, len(lp) - 1)]['key']}", settings, store, cfg, 1)
+        expect(any("L:n:" in " ".join(r["kb"]) for r in MSGS if r["scen"] == SCEN), "карточка с 👍/Мимо")
+    ctx = rr.chat_context(cfg, store)
+    expect(ctx.get("last_pick") and ctx.get("shortlist") is not None, f"контекст: {list(ctx)}")
+    print(f"   контекст для разговора: {len(json.dumps(ctx, ensure_ascii=False))} символов, "
+          f"подборка {len(ctx.get('last_pick', []))}, шортлист {len(ctx.get('shortlist', []))}")
+
+
 for p in P:
     p.stop()
 

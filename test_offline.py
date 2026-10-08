@@ -1979,6 +1979,17 @@ with mock.patch.object(rr, "tg_call", xtg):
 pk = XT[-1][1]
 assert pk["text"].index("joymee.uz/announcements/77") < pk["text"].index("realting.uz/property/555")
 assert "L:s:sale:joymee:77" in pk["reply_markup"] and SS.pick_pending(xs) == []
+assert "L:v:sale:joymee:77" in pk["reply_markup"]                                 # 📷 — фото и разбор
+assert [x["key"] for x in xs.get_kv("last_pick")] == ["sale:joymee:77", "sale:realting:555"]
+XT.clear()
+with mock.patch.object(rr, "tg_call", xtg):
+    assert SS.resend_last_pick(cfg, xs) == 2
+assert "Последняя подборка" in XT[-1][1]["text"] and "L:v:sale:realting:555" in XT[-1][1]["reply_markup"]
+XT.clear()
+with mock.patch.object(rr, "tg_call", xtg), mock.patch.object(rr, "SALE_DB_PATH", xdb):
+    t5, _ = rr.handle_callback("L:v:sale:joymee:77", rr.default_settings(), ys if "ys" in dir() else None, cfg, 1)
+assert any(m == "sendMessage" and "L:n:sale:joymee:77" in pl.get("reply_markup", "") for m, pl in XT)   # разбор с 👍/Мимо
+assert any("Открыть на Joymee" in (pl.get("text") or "") for m, pl in XT)
 assert xs.conn.execute("SELECT notified FROM listings WHERE key='sale:joymee:77'").fetchone()[0] == 1
 with mock.patch.object(rr, "tg_call", xtg), mock.patch.object(rr, "SALE_DB_PATH", xdb):
     t1, _ = rr.handle_callback("L:s:sale:joymee:77", rr.default_settings(), ys, cfg, 1)
@@ -2031,5 +2042,8 @@ assert not ys.get_kv("fresh_start")
 with mock.patch.object(rr, "SALE_DB_PATH", xdb):
     snap = rr.ui_snapshot(cfg, ys, rr.default_settings())
 assert set(snap["screens"]) == {"/rano", "/via"}
+c = snap["ctx"]
+assert c["last_pick"][0]["n"] == 1 and c["last_pick"][0]["key"].startswith("sale:") and "<" not in c["last_pick"][0]["text"]
+assert "shortlist" in c and "today" in c and "pick_pending" in c
 xdb.unlink(missing_ok=True); ydb.unlink(missing_ok=True)
 print("OK — Ищет Ra'no: Realt24/Joymee/Realting, цена за м², дубли между сайтами, подборка, 👍 → шортлист, экраны")

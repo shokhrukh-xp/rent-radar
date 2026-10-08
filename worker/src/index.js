@@ -171,15 +171,30 @@ note: короткая фраза для маклеров о том, для че
   «рассрочка», «ближе к центру», «рядом со школой». Пиши её целиком заново (с прежним содержимым),
   на языке письма маклерам (русский, для lang=uz — узбекский).
 
-intent — что клиент хочет сделать этим сообщением:
+intent — что клиент хочет сделать этим сообщением (выбери ОДНО):
   search — описывает или меняет поиск (по умолчанию);
   restart — начать новый поиск с нуля («давай заново», «теперь ищу аренду, забудь прошлое»);
-  show_offers — посмотреть, что прислали маклеры («что прислали?», «покажи варианты»);
-  shortlist — отобранные варианты; brokers — разослать запрос / написать маклерам;
+  search_now — «ищи сама», «поищи на сайтах», «проверь, что нового» — пробежаться по сайтам прямо сейчас;
+  show_pick — показать подборку с сайтов («что нашла?», «покажи подборку», «покажи все», «ещё раз список»);
+  show_item — показать конкретные объявления из ПОСЛЕДНЕЙ ПОДБОРКИ с фото и разбором цены
+    («покажи 2 и 4», «есть фото у первой?», «покажи все 5 с фото») — номера в items
+    (все — перечисли все номера из last_pick; не больше 5);
+  rano_status — как идёт поиск по сайтам, сколько нашла; via_status — как дела с маклерами;
+  show_offers — что прислали маклеры; shortlist — отобранные варианты (шортлист);
+  sl_item — открыть вариант из шортлиста по номеру (номер в items);
+  brokers — разослать запрос / написать маклерам;
   add_offer — добавить вариант, который ему прислали в WhatsApp («мне скинули квартиру, добавь»);
-  market — цены рынка; request_text — показать текст запроса; sale_search — что нашлось на Uybor;
-  help — что ты умеешь / как пользоваться.
-  Для всего, кроме search и restart, set оставь пустым, а reply — одной короткой фразой.
+  market — цены рынка; request_text — показать текст запроса маклерам; help — что ты умеешь.
+  Для всего, кроме search и restart, set оставь пустым, а reply — одной короткой фразой-подводкой
+  («Показываю 👇», «Бегу проверять сайты 🏃‍♀️»): само действие выполнит система сразу после твоего ответа.
+
+Что у тебя есть (блок «Сейчас у бота» в запросе) — это правда, опирайся ТОЛЬКО на неё:
+  last_pick — последняя подборка с сайтов с номерами, как их видел клиент; shortlist — шортлист с номерами;
+  pick_pending — сколько новых ждут подборки; today — сколько объявлений просмотрела и подошло сегодня.
+  Никогда не говори, что что-то показала, отправила, нашла или «открываю», если этого нет в данных или
+  если это не делает выбранный intent. Если клиент ссылается на то, чего нет (номер больше списка,
+  подборок ещё не было) — честно скажи и предложи, что можно сделать.
+  Фото есть у объявлений с сайтов: их показывает show_item. Ты сама картинки не видишь.
 
 Честность: если ты ничего не записал в set — не пиши «учла», «обновила запрос».
 «Центр» без названий районов — не выдумывай districts, а положи «ближе к центру» в note.`;
@@ -209,7 +224,8 @@ export const SCHEMA = {
       },
     },
     clear: { type: "array", items: { type: "string" } },
-    intent: { type: "string", description: "search | restart | show_offers | shortlist | brokers | add_offer | market | help | request_text | sale_search" },
+    intent: { type: "string", description: "search | restart | search_now | show_pick | show_item | rano_status | via_status | show_offers | shortlist | sl_item | brokers | add_offer | market | help | request_text" },
+    items: { type: "array", items: { type: "string" }, description: "номера пунктов для show_item / sl_item" },
   },
   required: ["reply", "ready", "set"],
 };
@@ -414,7 +430,7 @@ const MORE_MENU = { inline_keyboard: [
 ] };
 // намерения из обычных фраз → что делает Python
 const INTENT_CMD = { show_offers: "/offers", shortlist: "/shortlist", brokers: "/brokers",
-  market: "/rynok", help: "/help", request_text: "/request", sale_search: "/sale" };
+  market: "/rynok", help: "/help", request_text: "/request", sale_search: "/rano" };
 
 // Готовые тексты из снимка (цены рынка, поиск на Uybor, текст запроса, справка) — сразу.
 async function instantText(env, chat, cmd) {
@@ -783,15 +799,16 @@ export function summary(a) {
   return [deal, obj, rooms, ds || (a.city === "tashkent" ? "Ташкент" : a.city_other || ""), b].filter(Boolean).join(" · ");
 }
 
-function buildPrompt(iv, text, today) {
-  const hist = iv.hist.slice(-16).map(h => (h.r === "u" ? "Клиент: " : "Ra'no: ") + h.t).join("\n");
+function buildPrompt(iv, text, today, ctx = null) {
+  const hist = iv.hist.slice(-16).map(h => (h.r === "u" ? "Клиент: " : h.r === "s" ? "[система] " : "Ra'no: ") + h.t).join("\n");
   return `Сегодня: ${today}.\nТекущие параметры (JSON): ${JSON.stringify(iv.ans)}\n` +
+    (ctx ? `Сейчас у бота (JSON): ${JSON.stringify(ctx).slice(0, 3500)}\n` : "") +
     (hist ? `История диалога:\n${hist}\n` : "") + `Новое сообщение клиента: ${text}`;
 }
 
 /** Один ход интервью без отправки в Telegram: модель → проверка → новое состояние. */
-export async function interviewCore(env, iv, text) {
-  const out = await gemini(env, SYSTEM, buildPrompt(iv, text, new Date().toISOString().slice(0, 10)));
+export async function interviewCore(env, iv, text, ctx = null) {
+  const out = await gemini(env, SYSTEM, buildPrompt(iv, text, new Date().toISOString().slice(0, 10), ctx));
   const set = pairsToSet(out.set);
   const roomsAny = Array.isArray(set.rooms) && set.rooms.includes("any");
   iv.ans = applyPatch(iv.ans, set, out.clear);
@@ -806,12 +823,61 @@ export async function interviewCore(env, iv, text) {
   return { reply, ready, fin, raw: out, via: out._via };
 }
 
+// Действия из разговора: модель выбрала intent — делаем сразу, а в историю пишем, что сделали
+async function chatAction(env, chat, intent, items, ui, iv, reply) {
+  const ctx = ui?.ctx || {};
+  const nums = [...new Set((items || []).map(x => parseInt(x, 10)).filter(n => n > 0))].slice(0, 5);
+  const note = t => { iv.hist.push({ r: "s", t }); iv.hist = iv.hist.slice(-20); };
+  const queue = async data => queueAndWake(env, { callback_query: { id: "chat", data, _toast_done: true, _from_chat: true,
+    message: { message_id: 0, chat: { id: +chat || chat } } } });
+  if (intent === "search_now") {
+    await say(env, chat, reply || "Бегу проверять сайты 🏃‍♀️ Новое пришлю через минуту-две.");
+    await queue("R:check"); note("запущена проверка всех сайтов");
+  } else if (intent === "show_pick") {
+    await say(env, chat, reply || "Показываю 👇");
+    if (ctx.pick_pending) { await queue("R:pick"); note("отправлена новая подборка"); }
+    else if ((ctx.last_pick || []).length) { await queue("R:last"); note("повторно показана последняя подборка"); }
+    else { await showScreen(env, chat, "/rano"); note("подборок ещё не было — показан статус поиска"); }
+  } else if (intent === "show_item") {
+    const list = ctx.last_pick || [];
+    const pick = (nums.length ? nums : list.map(x => x.n)).filter(n => n <= list.length).slice(0, 5);
+    if (!pick.length) {
+      await say(env, chat, list.length ? `В последней подборке только ${list.length} — назовите номер от 1 до ${list.length} 🙂`
+        : "Подборок с сайтов пока не было — как только найду, пришлю с номерами 🙂");
+      note("номер не найден в подборке");
+    } else {
+      await say(env, chat, reply || `Показываю ${pick.join(", ")} 👇`);
+      for (const n of pick) await queue(`L:v:${list[n - 1].key}`.slice(0, 64));
+      note(`показаны объявления ${pick.join(", ")} из подборки с фото и разбором`);
+    }
+  } else if (intent === "sl_item") {
+    const list = ctx.shortlist || [];
+    const n = nums[0];
+    if (!n || n > list.length) {
+      await say(env, chat, list.length ? `В шортлисте ${list.length} — назовите номер от 1 до ${list.length} 🙂` : "Шортлист пока пуст 🙂");
+    } else {
+      const card = ui?.cards?.[String(list[n - 1].oid)];
+      if (card) await say(env, chat, card.text, { parse_mode: "HTML", reply_markup: card.kb });
+      else await queue(`s:o:${list[n - 1].oid}`);
+      note(`открыт вариант ${n} из шортлиста`);
+    }
+  } else if (intent === "rano_status" || intent === "via_status") {
+    await showScreen(env, chat, intent === "rano_status" ? "/rano" : "/via");
+    note(intent === "rano_status" ? "показан статус поиска по сайтам" : "показан статус маклеров");
+  } else if (intent === "shortlist") {
+    await showShortlist(env, chat); note("показан шортлист");
+  } else return null;
+  await kvSet(env, ivKey(chat), iv);
+  return intent;
+}
+
 export async function interviewTurn(env, chat, text) {
   const iv = await kvGet(env, ivKey(chat), null) || emptyIv();
   tg(env, "sendChatAction", { chat_id: chat, action: "typing" }).catch(() => {});
   let res;
+  const ui = await kvGet(env, "ui", null);
   try {
-    res = await interviewCore(env, iv, text);
+    res = await interviewCore(env, iv, text, ui?.ctx || null);
   } catch (e) {
     console.log("gemini error", e.message);
     await say(env, chat, "Ой, я запнулась 🙈 Попробуйте ещё раз через минуту.");
@@ -829,6 +895,8 @@ export async function interviewTurn(env, chat, text) {
     await say(env, chat, "🔄 С чистого листа!\n\n" + reply, { reply_markup: OWNER_KB });
     return;
   }
+  const act = await chatAction(env, chat, intent, res.raw?.items, ui, iv, reply);
+  if (act) return act;
   if (intent === "add_offer") return startAddMode(env, chat);
   if (intent === "show_offers") { await kvSet(env, ivKey(chat), iv); return showOffers(env, chat); }
   if (intent === "brokers") { await kvSet(env, ivKey(chat), iv); return startOutreach(env, chat); }
@@ -953,6 +1021,12 @@ export async function handleUpdate(env, upd) {
       }
       await tg(env, "answerCallbackQuery", { callback_query_id: cb.id, text: "Уже отмечено" });
       return "noop";
+    }
+    if (/^L:v:/.test(data) || data === "R:last") {          // фото и разбор / последняя подборка — Python
+      await tg(env, "answerCallbackQuery", { callback_query_id: cb.id, text: data === "R:last" ? "Показываю 👇" : "📷 Открываю…" });
+      upd.callback_query = { ...cb, _toast_done: true };
+      await queueAndWake(env, upd);
+      return "site";
     }
     if (/^L:[sn]:/.test(data) || data === "R:check") {     // объявление с сайта / «проверить сайты»
       await tg(env, "answerCallbackQuery", { callback_query_id: cb.id,
@@ -1241,9 +1315,10 @@ export default {
       if (p === "/svc/try") {            // проверка промпта вживую, без Telegram и очереди
         if (url.searchParams.get("reset")) await kvSet(env, "iv:test", emptyIv());
         const iv = await kvGet(env, "iv:test", null) || emptyIv();
-        const res = await interviewCore(env, iv, url.searchParams.get("text") || "");
+        const ctx = url.searchParams.get("ctx") ? JSON.parse(url.searchParams.get("ctx")) : ((await kvGet(env, "ui", null))?.ctx || null);
+        const res = await interviewCore(env, iv, url.searchParams.get("text") || "", ctx);
         await kvSet(env, "iv:test", iv);
-        return json({ ...res, ans: iv.ans });
+        return json({ ...res, intent: res.raw?.intent, items: res.raw?.items, ans: iv.ans });
       }
       if (p === "/svc/state") {
         return json({ alive: await pythonAlive(env), iv: await kvGet(env, ivKey(env.OWNER_CHAT), null),

@@ -458,40 +458,71 @@ def pick_pending(store):
     return fresh
 
 
+def _pick_message(top, header, rest=0):
+    """Текст и кнопки подборки: номер — строка; 📷 N — фото и разбор, 👍 N — в шортлист."""
+    lines = [header, ""]
+    for i, x in enumerate(top, 1):
+        lines.append(f"{i}. {x['line']}")
+    lines += ["", "📷 + номер — фото и разбор цены, 👍 + номер — заберу в шортлист. "
+                  "Можно и словами: «покажи 2 и 4», «есть фото у первой?»"]
+    rows = []
+    for icon, act in (("📷", "v"), ("👍", "s")):
+        row = []
+        for i, x in enumerate(top, 1):
+            row.append({"text": f"{icon} {i}", "callback_data": f"L:{act}:{x['key']}"[:64]})
+            if len(row) == 5:
+                rows.append(row); row = []
+        if row:
+            rows.append(row)
+    if rest:
+        rows.append([{"text": f"Показать ещё ({rest})", "callback_data": "R:pick"}])
+    return "\n".join(lines)[:4000], {"inline_keyboard": rows}
+
+
 def send_pick(cfg, store, limit=7, reason="Подборка дня"):
-    """Лучшие из накопленного одним сообщением; присланное помечаем, остальное ждёт."""
+    """Лучшие из накопленного одним сообщением; присланное помечаем, остальное ждёт.
+    Показанное запоминаем как «последнюю подборку» — на неё ссылаются «покажи 2 и 4»."""
     rr = _rr()
     q = pick_pending(store)
     if not q:
         return 0
     top, rest = q[:limit], q[limit:]
-    lines = [f"🔎 <b>{reason}</b> — {len(top)} из {len(q)} новых, самые интересные сверху ✨", ""]
-    for i, x in enumerate(top, 1):
-        lines.append(f"{i}. {x['line']}")
-    lines += ["", "Понравилось? Жмите 👍 с номером — заберу в шортлист, дальше помогу с уточнением и просмотром."]
-    rows, row = [], []
-    for i, x in enumerate(top, 1):
-        row.append({"text": f"👍 {i}", "callback_data": f"L:s:{x['key']}"[:64]})
-        if len(row) == 4:
-            rows.append(row); row = []
-    if row:
-        rows.append(row)
-    if rest:
-        rows.append([{"text": f"Показать ещё ({len(rest)})", "callback_data": "R:pick"}])
+    text, kb = _pick_message(top, f"🔎 <b>{reason}</b> — {len(top)} из {len(q)} новых, самые интересные сверху ✨",
+                             len(rest))
     ok = rr.tg_call(cfg, "sendMessage", {
-        "chat_id": cfg["telegram_chat_id"], "text": "\n".join(lines)[:4000], "parse_mode": "HTML",
-        "disable_web_page_preview": True,
-        "reply_markup": json.dumps({"inline_keyboard": rows}, ensure_ascii=False)})
+        "chat_id": cfg["telegram_chat_id"], "text": text, "parse_mode": "HTML",
+        "disable_web_page_preview": True, "reply_markup": json.dumps(kb, ensure_ascii=False)})
     if ok is None:
         return 0
     for x in top:
         store.conn.execute("UPDATE listings SET notified=1 WHERE key=?", (x["key"],))
     store.conn.commit()
     store.set_kv("sale_pick", rest)
+    store.set_kv("last_pick", [{"key": x["key"], "line": x["line"]} for x in top])
     st = store.get_kv("sale_day") or {}
     st["picked"] = st.get("picked", 0) + len(top)
     store.set_kv("sale_day", st)
     return len(top)
+
+
+def resend_last_pick(cfg, store):
+    """«Покажи подборку ещё раз» — последняя подборка с теми же номерами."""
+    rr = _rr()
+    top = store.get_kv("last_pick") or []
+    if not top:
+        return 0
+    text, kb = _pick_message(top, f"🔎 <b>Последняя подборка</b> — {len(top)} шт., номера те же")
+    rr.tg_call(cfg, "sendMessage", {
+        "chat_id": cfg["telegram_chat_id"], "text": text, "parse_mode": "HTML",
+        "disable_web_page_preview": True, "reply_markup": json.dumps(kb, ensure_ascii=False)})
+    return len(top)
+
+
+def remember_shown(store, l, why):
+    """Карточка ушла сразу (не в подборке) — тоже запоминаем, чтобы понимать «а та, что утром?»."""
+    rec = (store.get_kv("shown_recent") or [])[-14:]
+    rec.append({"key": l["key"], "line": pick_line(l, why), "at": time.time()})
+    store.set_kv("shown_recent", rec)
 
 
 def maybe_daily_pick(cfg, store, now=None):
