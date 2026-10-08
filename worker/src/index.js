@@ -911,6 +911,13 @@ export async function handleUpdate(env, upd) {
       return "cancel";
     }
     if (data === "L:x") {                        // уже нажато — кнопка-отметка
+      const btns = (cb.message?.reply_markup?.inline_keyboard || []).flat();
+      if (btns.some(b => /Не подходит/.test(b.text || ""))) {   // «Мимо» до обновления — убрать из чата сейчас
+        const mid = cb.message.message_id;
+        const r = await tg(env, "deleteMessages", { chat_id: chat, message_ids: [mid, mid - 1] });
+        await tg(env, "answerCallbackQuery", { callback_query_id: cb.id, text: r && r.ok ? "👎 Убрала" : "Это сообщение уже не удалить — удалите вручную" });
+        return "removed";
+      }
       await tg(env, "answerCallbackQuery", { callback_query_id: cb.id, text: "Уже отмечено" });
       return "noop";
     }

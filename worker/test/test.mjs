@@ -393,6 +393,9 @@ await drain();
 const nq = (await drain()).length;
 await handleUpdate(env, { update_id: ++uid, callback_query: { id: "L5", data: "L:x", message: { message_id: 63, chat: { id: +OWNER } } } });
 assert.equal((await drain()).length, 0);
+await handleUpdate(env, { update_id: ++uid, callback_query: { id: "L6", data: "L:x", message: { message_id: 80, chat: { id: +OWNER },
+  reply_markup: { inline_keyboard: [[{ text: "👎 Не подходит — убрала", callback_data: "L:x" }]] } } } });
+assert.deepEqual(sent.filter(x => x.m === "deleteMessages").at(-1).message_ids, [80, 79]);
 // «Шортлист» из другого сообщения — новым сообщением, не правкой чужого
 const nEdits = sent.filter(x => x.m === "editMessageText").length;
 await handleUpdate(env, { update_id: ++uid, callback_query: { id: "m6", data: "s:show", message: { message_id: 50, chat: { id: +OWNER } } } });
