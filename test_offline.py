@@ -987,7 +987,7 @@ with mock.patch.object(rr, "tg_call", fake_tg), \
     ow = cs.conn.execute("SELECT oid, broker_name, broker_chat, photos, price_usd FROM broker_offers "
                          "WHERE broker_chat='owner'").fetchall()
     assert len(ow) == 1 and ow[0][1] == "Бахтиёр" and json.loads(ow[0][3]) == ["w1"] and ow[0][4] == 41000
-    assert any("Принято" in pl.get("text", "") for _, pl in SENT)
+    assert any("Приняла" in pl.get("text", "") for _, pl in SENT)
     SENT.clear()
     cg.handle_triage_cb(f"t:r:{ow[0][0]}:d", cfg, cs)              # «мимо» — боту писать некому
     assert not [pl for m, pl in SENT if str(pl.get("chat_id")) == "owner"]

@@ -1943,7 +1943,7 @@ def broker_card(b, deal, text):
                else f"✈️ @{escape_html(b['tg'])}")
     body = (f"📇 <b>{escape_html(b['name'] or 'Маклер')}</b> · {escape_html(b['source'])}\n"
             f"{contact}\n"
-            f"🏘 {b['ads']} объявлений" + (f" · районы: {escape_html(d)}" if b["districts"] else "") + price)
+            f"🏘 {b['ads']} {concierge.plural(b['ads'] or 0, 'объявление', 'объявления', 'объявлений')}" + (f" · районы: {escape_html(d)}" if b["districts"] else "") + price)
     row = ([{"text": "📱 WhatsApp с текстом", "url": wa_link(phone, text)},
             {"text": "✈️ Telegram", "url": tg_phone_link(phone)}] if phone else
            [{"text": "✈️ Telegram с текстом", "url": tg_user_link(b["tg"], text)}])
@@ -1976,9 +1976,9 @@ def send_next_broker(cfg, store) -> bool:
     text = st.get("text") or store.get_kv("request_text") or ""
     pool = ranked_brokers(store, deal)
     if not pool:
-        send_telegram(cfg, f"✅ Рассылка закончена: написано {st.get('sent', 0)}, "
-                           f"пропущено {st.get('skipped', 0)}. Новые маклеры добавляются сами — "
-                           "загляните через пару часов — кнопка «📇 Через маклеров».")
+        send_telegram(cfg, f"✅ Всех прошли: написали {st.get('sent', 0)}, "
+                           f"пропустили {st.get('skipped', 0)}. Новые маклеры появляются сами — "
+                           "загляните через пару часов в «📇 Через маклеров», подкину ещё.")
         return False
     b = pool[0]
     body, first_row = broker_card(b, deal, text)
@@ -2365,15 +2365,13 @@ def handle_callback(data: str, settings: dict, store, cfg: dict, message_id=None
 def broker_ack(cfg) -> str:
     """Имя клиента маклерам не раскрываем — и незачем, и склонения ломаются.
 
-    Двуязычно (ру + уз): часть маклеров пишет только на узбекском."""
+    Двуязычно (ру + уз): часть маклеров пишет только на узбекском. Тот же текст — у воркера."""
     a = cfg.get("assistant_name", "Ra'no")
-    return (f"Здравствуйте! Я {a}, ИИ-ассистент — веду поиск жилья для клиента "
-            f"и передаю ему варианты.\n"
-            f"Спасибо, получила! Если подойдёт, вернусь с уточнениями. "
-            f"Присылайте ещё, что есть по параметрам.\n\n"
-            f"Assalomu alaykum! Men {a}, AI-yordamchiman — mijoz uchun uy-joy "
-            f"qidiryapman. Rahmat, qabul qilindi! Mos kelsa, aniqlik kiritish "
-            f"uchun yozaman. Parametrlarga mos variantlar bo'lsa, yuboravering.")
+    return (f"Здравствуйте! Я {a}, ИИ-ассистент — ищу жильё для клиента и передаю ему варианты.\n"
+            f"Rahmat, получила! 🙌 Если зацепит — вернусь с вопросами. "
+            f"Есть ещё что-то по параметрам — присылайте.\n\n"
+            f"Assalomu alaykum! Men {a}, AI-yordamchiman — mijoz uchun uy-joy qidiryapman. "
+            f"Rahmat, qabul qildim! Mos kelsa, savollar bilan qaytaman.")
 
 
 BROKER_QUIET_SECONDS = 40      # маклер замолчал — значит, вариант дописан, показываем
@@ -2439,7 +2437,7 @@ def handle_broker_message(cfg, store, msg):
             concierge.attach_answer(cfg, store, asked, text)
             if not msg.get("_acked"):
                 tg_call(cfg, "sendMessage", {"chat_id": chat_id,
-                                             "text": "Спасибо, передала клиенту! / Rahmat, mijozga yetkazdim!"})
+                                             "text": "Rahmat, передала клиенту! 🙌 / Mijozga yetkazdim!"})
             return
 
     try:
@@ -2474,8 +2472,8 @@ def handle_owner_offer(cfg, store, msg):
     oid, is_new = intake_offer(cfg, store, f"owner:{who}", "owner", who, text, photos,
                                msg.get("media_group_id"))
     if is_new:
-        send_telegram(cfg, f"📥 Принято — вариант #{oid}. Допришлите фото или текст, если есть, "
-                           "карточка появится, как только закончите.")
+        send_telegram(cfg, f"📥 Приняла — вариант #{oid}. Есть ещё фото или текст — досылайте, "
+                           "карточку соберу, как закончите.")
 
 
 def worker_post(cfg, path, payload, timeout=60):
@@ -2863,6 +2861,14 @@ def classify_sale_seller(l: dict, ss: dict, store, cfg) -> str:
     return why
 
 
+def fmt_area(a) -> str:
+    """38.0 → 38, 27.21 → 27.2."""
+    try:
+        return f"{round(float(a), 1):g}"
+    except (TypeError, ValueError):
+        return str(a)
+
+
 def _money(v: float) -> str:
     return f"{v:,.0f}".replace(",", " ")
 
@@ -2878,7 +2884,7 @@ def format_sale_message(l: dict, cfg: dict) -> str:
     if l.get("rooms"):
         spec.append(f'{l["rooms"]}-комн')
     if l.get("area"):
-        spec.append(f'{l["area"]} м²')
+        spec.append(f'{fmt_area(l["area"])} м²')
     if l.get("floor"):
         spec.append(f'этаж {l["floor"]}'
                     + (f'/{l["floors_total"]}' if l.get("floors_total") else ""))
@@ -3200,7 +3206,7 @@ def sale_status_text(cfg: dict) -> str:
         except ValueError:
             d = {}
         bits = [f'{d["rooms"]}-комн' if d.get("rooms") else "",
-                f'{d["area"]} м²' if d.get("area") else "",
+                f'{fmt_area(d["area"])} м²' if d.get("area") else "",
                 f'${_money(d["price_usd"])}' if d.get("price_usd") else ""]
         label = ", ".join(b for b in bits if b) or "вариант"
         lines.append(f'• <a href="{url}">{label}</a> — {escape_html(d.get("district") or "")}')

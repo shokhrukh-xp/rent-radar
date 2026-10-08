@@ -194,7 +194,8 @@ def digest_text(d, now):
         lines += ["", "📅 <b>Завтра просмотры</b>"] + [_viewing_line(*x) for x in d["tomorrow"]]
     tip = ""                                   # один следующий шаг — самый полезный
     if d["pending"]:
-        tip = f"Разберите {d['pending']} вариант(а) — пара нажатий: 👍 / 🕐 / 👎, а дальше я сама."
+        tip = (f"Разберите {d['pending']} {cg.plural(d['pending'], 'вариант', 'варианта', 'вариантов')} — "
+               "пара нажатий: 👍 / 🕐 / 👎, а дальше я сама.")
     elif not d["contacted_total"]:
         tip = "Давайте начнём с рассылки маклерам — без неё им просто не о чем нам писать 🙂"
     elif not d["contacted_today"] and d["contacted_total"] < 60:

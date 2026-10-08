@@ -427,7 +427,7 @@ def pick_line(l, why):
     if l.get("rooms"):
         bits.append(f"{l['rooms']}к")
     if l.get("area"):
-        bits.append(f"{l['area']:g} м²")
+        bits.append(f"{round(l['area'], 1):g} м²")
     if l.get("floor"):
         bits.append(f"{l['floor']}/{l['floors_total']}" if l.get("floors_total") else f"эт. {l['floor']}")
     if l.get("district"):

@@ -18,6 +18,21 @@ from datetime import datetime, timedelta, timezone
 TZ = timezone(timedelta(hours=5))
 
 
+def plural(n, one, few, many):
+    """1 вариант, 2 варианта, 5 вариантов."""
+    n = abs(int(n))
+    if n % 10 == 1 and n % 100 != 11:
+        return one
+    if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14:
+        return few
+    return many
+
+
+def fmt_money(v):
+    """$48 000 — с пробелом между тысячами, как в остальных карточках."""
+    return "$" + f"{v:,.0f}".replace(",", " ")
+
+
 def _rr():
     import rent_radar
     return rent_radar
@@ -544,7 +559,7 @@ def finish_anketa(cfg, store):
         "chat_id": cfg["telegram_chat_id"], "parse_mode": "HTML",
         "text": "📝 <b>Готовый запрос маклерам</b>\n\n"
                 f"<code>{rr.escape_html(text)}</code>\n\n"
-                "Проверьте текст. Можно утвердить или переписать своими словами.",
+                "Гляньте, всё ли так 👀 Можно утвердить или переписать своими словами.",
         "reply_markup": json.dumps(kb, ensure_ascii=False)})
 
 
@@ -848,7 +863,7 @@ def price_note(offer, idx):
     med, n = ref
     delta = (p - med) / med * 100
     word = ("дешевле" if delta < -8 else "дороже" if delta > 8 else "по рынку")
-    return f"{word} предложений маклеров ({delta:+.0f}% к ${med:.0f}, выборка {n})"
+    return f"{word} предложений маклеров ({delta:+.0f}% к {fmt_money(med)}, выборка {n})"
 
 
 # ------------------------------------------------- карточка и триаж -----
@@ -874,9 +889,9 @@ def offer_card(store, cfg, o, idx=None, prefix="", pos=None, total=None):
     if facts:
         head.append(" · ".join(facts))
     if o["price_usd"]:
-        line = f"💰 ${o['price_usd']:.0f}"
+        line = f"💰 {fmt_money(o['price_usd'])}"
         if o["area"]:
-            line += f" · ${o['price_usd'] / o['area']:.1f}/м²"
+            line += f" · {fmt_money(o['price_usd'] / o['area'])}/м²"
         head.append(line)
         note = price_note(o, idx)
         if note:
@@ -917,7 +932,7 @@ def offer_card(store, cfg, o, idx=None, prefix="", pos=None, total=None):
     if body:
         head.append("\n<i>" + rr.escape_html(body[:300 if ex else 400]) + "</i>")
     if o.get("note"):
-        head.append(f"\n📝 {rr.escape_html(o['note'])}")
+        head.append("\n" + rr.escape_html(o["note"]).strip())
     return "\n".join(head)
 
 
@@ -1007,20 +1022,19 @@ def _more_teaser(cfg, remaining):
 
 
 DECLINE_REASONS = [
-    ("p", "💸 Дорого", "клиенту дороговато — если есть дешевле, присылайте"),
-    ("d", "📍 Район", "не подходит район"),
-    ("c", "🛠 Состояние", "не подошло состояние квартиры"),
-    ("a", "📐 Площадь/планировка", "не подошли площадь или планировка"),
-    ("x", "Без причины", ""),
+    ("p", "💸 Дорого", "дороговато", "Найдётся что-то дешевле — присылайте"),
+    ("d", "📍 Район", "не тот район", "Будет что-то в нужных районах — присылайте"),
+    ("c", "🛠 Состояние", "не подошло состояние квартиры", "Будет вариант в лучшем состоянии — присылайте"),
+    ("a", "📐 Площадь/планировка", "не подошли площадь или планировка", "Будет другая планировка — присылайте"),
+    ("x", "Без причины", "", "Найдётся что-то ближе к параметрам — присылайте"),
 ]
 
 
 def decline_text(cfg, reason=""):
     a = cfg.get("assistant_name", "Ra'no")
-    why = next((w for c, _, w in DECLINE_REASONS if c == reason), "")
-    return (f"Rahmat за вариант! 🙏 Клиенту, увы, не подошёл" + (f": {why}" if why else "") + ". "
-            f"Если найдётся что-то ближе к параметрам — присылайте, с радостью посмотрю. "
-            f"({a})")
+    r = next((x for x in DECLINE_REASONS if x[0] == reason), DECLINE_REASONS[-1])
+    return (f"Rahmat за вариант! 🙏 Клиенту, увы, не подошёл" + (f" — {r[2]}" if r[2] else "") + ". "
+            f"{r[3]}, с радостью посмотрю. ({a})")
 
 
 def can_message_broker(o) -> bool:
@@ -1043,7 +1057,7 @@ def handle_triage_cb(data, cfg, store):
         set_offer_status(store, oid, "later")
         return "🕐 Отложила", True
     if kind == "n":                          # сначала причина — от неё зависит подсказка маклеру
-        rows = [[{"text": t, "callback_data": f"t:r:{oid}:{c}"}] for c, t, _ in DECLINE_REASONS]
+        rows = [[{"text": t, "callback_data": f"t:r:{oid}:{c}"}] for c, t, *_ in DECLINE_REASONS]
         rr.tg_call(cfg, "sendMessage", {
             "chat_id": cfg["telegram_chat_id"],
             "text": f"Что не так с вариантом #{oid}?"
@@ -1054,7 +1068,7 @@ def handle_triage_cb(data, cfg, store):
     set_offer_status(store, oid, "rejected")
     if reason:
         store.conn.execute("UPDATE broker_offers SET note=COALESCE(note,'') || ? WHERE oid=?",
-                           (f"\n👎 {next((t for c, t, _ in DECLINE_REASONS if c == reason), '')}", oid))
+                           (f"\n👎 {next((t for c, t, *_ in DECLINE_REASONS if c == reason), '')}", oid))
         store.conn.commit()
     if can_message_broker(o):
         rr.tg_call(cfg, "sendMessage",
@@ -1135,13 +1149,14 @@ def shortlist_items(store, cfg, sort="n"):
             bits.append(f"{o['area']:.0f}м²")
         if o["district"]:
             bits.append(o["district"])
-        price = f"${o['price_usd']:.0f}" if o["price_usd"] else "цена?"
+        price = fmt_money(o["price_usd"]) if o["price_usd"] else "цена?"
         if o["price_usd"] and o["area"]:
-            price += f" ({o['price_usd'] / o['area']:.1f}/м²)"
+            price += f" ({fmt_money(o['price_usd'] / o['area'])}/м²)"
         st = stage_of(o)
         rows.append({"oid": o["oid"], "line": f"<b>{price}</b> · {' · '.join(bits) or '—'}",
                      "stage": st, "note": price_note(o, idx)})
-    title = (f"📋 <b>Шортлист</b> — {len(rows)} вариантов ({SORTS.get(sort, SORTS['n'])[0]})\n"
+    title = (f"📋 <b>Шортлист</b> — {len(rows)} {plural(len(rows), 'вариант', 'варианта', 'вариантов')} "
+             f"({SORTS.get(sort, SORTS['n'])[0]})\n"
              f"<i>Нажмите номер — открою карточку: уточнить, назначить просмотр, заметка.</i>\n"
              if rows else "")
     return title, rows, sum(1 for o in items if askable(o))
@@ -1276,7 +1291,7 @@ def _offer_tag(o):
     if o.get("district"):
         tag.append(o["district"])
     if o.get("price_usd"):
-        tag.append(f"${o['price_usd']:.0f}")
+        tag.append(fmt_money(o["price_usd"]))
     return ", ".join(tag)
 
 
@@ -1386,7 +1401,7 @@ def details_question(o, cfg=None, deal="rent"):
     if o["district"]:
         tag.append(o["district"])
     if o["price_usd"]:
-        tag.append(f"${o['price_usd']:.0f}")
+        tag.append(fmt_money(o["price_usd"]))
     if tag:
         q[1] += f" ({', '.join(tag)})"
     q[1] += ":"
@@ -1437,7 +1452,7 @@ def request_details(cfg, store, oids=None):
             sent += 1
     store.conn.commit()
     if sent:
-        rr.send_telegram(cfg, f"📨 Спросила маклеров по {sent} вариантам.\n"
+        rr.send_telegram(cfg, f"📨 Спросила маклеров по {sent} {plural(sent, 'варианту', 'вариантам', 'вариантам')}.\n"
                               "Как ответят — прикреплю к карточкам. "
                               "А если кто-то промолчит сутки — подскажу, напомнить ли.")
     for o in manual:                         # готовый текст, чтобы отправить самому
