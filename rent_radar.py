@@ -1889,6 +1889,15 @@ def request_deal(store) -> str:
     return "sale" if ans.get("deal") == "buy" else "rent"
 
 
+def rent_search_on(store) -> bool:
+    """Карточки аренды — только когда клиент ищет аренду. Ищет покупку (или параметры ещё не заданы) —
+    объявления аренды молча запоминаем: из них собираем маклеров и рынок, но в чат не шлём."""
+    if store.get_kv("fresh_start"):
+        return False
+    ans = (store.get_kv("anketa") or {}).get("ans") or {}
+    return ans.get("deal", "rent") == "rent"
+
+
 CENTRAL_DISTRICTS = {"Мирабад", "Яккасарай", "Шайхантахур", "Юнусабад"}
 
 
@@ -3382,6 +3391,7 @@ def run():
             followup.run(cfg, store, sale_store)     # напоминания, просмотры, вечерняя сводка
         eff = effective_cfg(cfg, settings)
         market = analyst.market_stats(store)
+        rent_on = rent_search_on(store)
         for name, scfg in enabled.items():
             if not once and now < next_run[name]:
                 continue
@@ -3410,6 +3420,10 @@ def run():
                 ads_cnt = count_seller_ads(l, store, cfg)
                 l["seller_ads"] = ads_cnt
                 harvest_broker(l, store, cfg, ads_cnt)
+
+                if not rent_on:                     # клиент покупает — аренду в чат не шлём
+                    store.save(l, notified=False)
+                    continue
 
                 if not passes_filters(l, eff) or not passes_user_filters(l, settings):
                     store.save(l, notified=False)

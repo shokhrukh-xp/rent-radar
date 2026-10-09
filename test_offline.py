@@ -2202,3 +2202,13 @@ assert calls == [("/svc/repair", {"urls": ["https://a/1.jpg", "https://a/2.jpg"]
 assert "repair_photo" in rr.Store.KEEP
 rdb.unlink(missing_ok=True)
 print("OK — анализ: ремонт в цене и сравнении, ипотека в сумах, торг, сворачиваемые детали")
+
+# ============ ищет покупку — карточки аренды не шлём ============
+qdb = Path("/tmp/test_rent_on.db"); qdb.unlink(missing_ok=True); qs = rr.Store(qdb)
+assert rr.rent_search_on(qs)                                                     # старый режим без анкеты — аренда
+qs.set_kv("anketa", {"ans": {"deal": "buy", "budget": "50000"}}); assert not rr.rent_search_on(qs)
+qs.set_kv("anketa", {"ans": {"deal": "daily"}}); assert not rr.rent_search_on(qs)
+qs.set_kv("anketa", {"ans": {"deal": "rent"}}); assert rr.rent_search_on(qs)
+qs.set_kv("fresh_start", True); assert not rr.rent_search_on(qs)                 # после сброса — ждём параметров
+qdb.unlink(missing_ok=True)
+print("OK — покупка: объявления аренды в чат не идут, только запоминаются")
