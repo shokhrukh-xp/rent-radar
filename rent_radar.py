@@ -1648,7 +1648,8 @@ def effective_sale_cfg(cfg, store):
     ss["enabled"] = True
     import sale_sources                          # каналы, которые добавили пользователи
     base = list(ss.get("sale_channels") or sale_sources.SALE_CHANNELS)
-    ss["sale_channels"] = base + [c for c in user_channels(store, "sale") if c.lower() not in {b.lower() for b in base}]
+    ss["sale_channels"] = live_channels(store, base + [c for c in user_channels(store, "sale")
+                                                       if c.lower() not in {b.lower() for b in base}])
     return {**cfg, "sale_search": ss}
 
 
@@ -2161,12 +2162,74 @@ def handle_channel_suggestion(cfg, store, msg) -> int:
     return added
 
 
+CH_RECHECK_DAYS = 7
+
+
+def channel_paused(store, name) -> bool:
+    return bool(((store.get_kv("channel_health") or {}).get(name.lower()) or {}).get("paused"))
+
+
+def live_channels(store, names) -> list:
+    """Каналы без отключённых еженедельной проверкой."""
+    h = store.get_kv("channel_health") or {}
+    return [n for n in names if not (h.get(n.lower()) or {}).get("paused")]
+
+
+def recheck_channels(cfg, store, now=None, force=False) -> dict:
+    """Раз в неделю: каждый канал (встроенные и добавленные пользователями) проверяется заново.
+    Замолчал больше месяца или закрылся — отключаем сразу; не прошёл проверку две недели подряд — тоже.
+    Ожил — возвращаем. Сбой сети не в счёт. Владельцу — короткий отчёт, только если что-то поменялось."""
+    import sale_sources
+    now = now or datetime.now(timezone.utc)
+    last = store.get_kv("ch_check_at") or 0
+    if not force and time.time() - last < CH_RECHECK_DAYS * 86400:
+        return {}
+    store.set_kv("ch_check_at", time.time())
+    base = list(((cfg.get("sources") or {}).get("telegram") or {}).get("channels") or []) + list(sale_sources.SALE_CHANNELS)
+    names, seen = [], set()
+    for n in base + [n for n, v in (store.get_kv("user_channels") or {}).items() if not v.get("blocked")]:
+        if n.lower() not in seen:
+            seen.add(n.lower()); names.append(n)
+    health = store.get_kv("channel_health") or {}
+    off, back = [], []
+    for n in names:
+        v = sale_sources.verify_channel(n, now=now)
+        h = health.get(n.lower()) or {}
+        if "Telegram не ответил" in (v.get("reason") or ""):
+            continue                                  # сеть — не повод отключать
+        if v.get("ok"):
+            if h.get("paused"):
+                back.append(n)
+            h = {"ok": True, "fails": 0, "paused": False}
+        else:
+            fails = h.get("fails", 0) + 1
+            hard = (v.get("newest_days") or 0) > 30 or "группа" in (v.get("reason") or "")
+            if not h.get("paused") and (hard or fails >= 2):
+                off.append((n, v.get("reason")))
+            h = {"ok": False, "fails": fails, "paused": h.get("paused") or hard or fails >= 2, "reason": v.get("reason")}
+        h["checked"] = now.isoformat()
+        health[n.lower()] = h
+        time.sleep(1)
+    store.set_kv("channel_health", health)
+    if off or back:
+        lines = ["📡 <b>Проверка источников</b> (раз в неделю)"]
+        lines += [f"⏸ Отключила @{escape_html(n)} — {escape_html(r or '')}" for n, r in off]
+        lines += [f"▶️ Вернула @{escape_html(n)} — снова живой" for n in back]
+        n_live = len(live_channels(store, names))
+        lines.append(f"\nСейчас в поиске Telegram-каналов: {n_live} из {len(names)}.")
+        send_telegram(cfg, "\n".join(lines))
+    return {"off": [n for n, _ in off], "back": back, "checked": len(names)}
+
+
 def sources_text(cfg, store):
     reg = store.get_kv("user_channels") or {}
     act = [(n, v) for n, v in reg.items() if v.get("active", True) and not v.get("blocked")]
     lines = ["📡 <b>Источники</b>",
              f"Сайты: Uybor, Joymee, Realt24, Realting, Yangiuylar. Telegram-каналов: {len(known_channels(cfg)) + len(act)}.",
              "", "Знаете канал с объявлениями по Ташкенту? Пришлите ссылку (t.me/…) или @имя — проверю и добавлю."]
+    paused = [n for n, h in (store.get_kv("channel_health") or {}).items() if h.get("paused")]
+    if paused:
+        lines += ["", "⏸ <b>Отключены проверкой</b> (молчат или без объявлений): " + ", ".join("@" + escape_html(n) for n in paused)]
     if act:
         lines += ["", "<b>Добавили пользователи:</b>"]
         what = {"sale": "продажа", "rent": "аренда", "both": "продажа и аренда"}
@@ -3760,6 +3823,10 @@ def run():
         push_snapshot(cfg, store, settings)
         if not once:
             followup.run(cfg, store, sale_store)     # напоминания, просмотры, вечерняя сводка
+            try:
+                recheck_channels(cfg, store)         # раз в неделю — живы ли каналы
+            except Exception as e:
+                log.warning("проверка каналов не удалась: %s", e)
         eff = effective_cfg(cfg, settings)
         market = analyst.market_stats(store)
         rent_on = rent_search_on(store)
@@ -3769,10 +3836,11 @@ def run():
             # аренда не нужна (клиент покупает) — смотрим реже: только для маклеров и рынка
             next_run[name] = now + scfg.get("interval_seconds", 120) * (1 if rent_on else 5)
             try:
-                if name == "telegram":           # + каналы, которые добавили пользователи
+                if name == "telegram":           # + каналы, которые добавили пользователи; без замолчавших
                     extra = [c for c in user_channels(store, "rent") if c.lower() not in
                              {x.lower() for x in scfg.get("channels") or []}]
-                    listings = SOURCE_FETCHERS[name](dict(scfg, channels=list(scfg.get("channels") or []) + extra), cfg)
+                    chans = live_channels(store, list(scfg.get("channels") or []) + extra)
+                    listings = SOURCE_FETCHERS[name](dict(scfg, channels=chans), cfg)
                 else:
                     listings = SOURCE_FETCHERS[name](scfg, cfg)
             except Exception as e:

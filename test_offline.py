@@ -2396,3 +2396,32 @@ with mock.patch.object(SS.requests, "get", fake_tme), mock.patch.object(rr, "tg_
 assert "на сегодня хватит" in CT[-1][1]["text"]
 cdb.unlink(missing_ok=True)
 print("OK — каналы от пользователей: проверка живости и объявлений, общая база, уведомление владельцу, «убрать», лимит")
+
+# ============ еженедельная перепроверка каналов: отключить замолчавшие, вернуть оживших ============
+hdb2 = Path("/tmp/test_chhealth.db"); hdb2.unlink(missing_ok=True); hs2 = rr.Store(hdb2)
+VERD = {}
+def fake_verify(name, now=None):
+    return VERD.get(name.lower(), {"ok": True})
+ccfg = dict(cfg, sources={"telegram": {"channels": ["alive_a", "quiet_b", "gone_c"]}})
+HT2 = []
+with mock.patch.object(SS, "verify_channel", fake_verify), mock.patch.object(SS, "SALE_CHANNELS", ["sale_d"]), \
+        mock.patch.object(rr, "tg_call", lambda c, m, p, **k: (HT2.append(p), {"ok": True})[1]), mock.patch.object(rr.time, "sleep"):
+    VERD.update(quiet_b={"ok": False, "reason": "последний пост 10 дн. назад — канал не живой", "newest_days": 10},
+                gone_c={"ok": False, "reason": "последний пост 45 дн. назад — канал не живой", "newest_days": 45},
+                sale_d={"ok": False, "reason": "Telegram не ответил (timeout)"})
+    r1 = rr.recheck_channels(ccfg, hs2, force=True)
+    assert r1["off"] == ["gone_c"] and r1["checked"] == 4                      # замолчал >30 дн. — сразу; 10 дн. — ждём
+    assert rr.live_channels(hs2, ["alive_a", "quiet_b", "gone_c", "sale_d"]) == ["alive_a", "quiet_b", "sale_d"]
+    assert "Отключила @gone_c" in HT2[-1]["text"]
+    assert rr.recheck_channels(ccfg, hs2) == {}                                 # раньше недели — не проверяем
+    r2 = rr.recheck_channels(ccfg, hs2, force=True)
+    assert r2["off"] == ["quiet_b"]                                             # вторую неделю подряд — отключаем
+    VERD["gone_c"] = {"ok": True}
+    r3 = rr.recheck_channels(ccfg, hs2, force=True)
+    assert r3["back"] == ["gone_c"] and "Вернула @gone_c" in HT2[-1]["text"]
+    assert not rr.channel_paused(hs2, "sale_d")                                 # сбой сети — не в счёт
+    hs2.set_kv("anketa", {"ans": {"deal": "buy", "object": "flat", "budget": "50000"}})
+    assert "quiet_b" not in rr.effective_sale_cfg(ccfg, hs2)["sale_search"]["sale_channels"]
+assert "Отключены проверкой" in rr.sources_text(ccfg, hs2) and "@quiet_b" in rr.sources_text(ccfg, hs2)
+hdb2.unlink(missing_ok=True)
+print("OK — каналы раз в неделю: замолчал >30 дн. — сразу, не прошёл 2 недели — отключаем, ожил — возвращаем, сбой сети не в счёт")
