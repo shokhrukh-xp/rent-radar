@@ -9,6 +9,7 @@ compatibility_date = "2026-09-01"
 GH_REPO = "shokhrukh-xp/rent-radar"
 GH_WORKFLOW = "radar.yml"
 AI_MODEL = "gemini-3.8-flash"
+WAKE_GH = "off"            # Python работает на сервере sonar (deploy/server); GitHub Actions — только вручную
 
 [[d1_databases]]
 binding = "DB"
