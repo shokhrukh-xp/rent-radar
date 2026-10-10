@@ -3395,7 +3395,8 @@ def run():
         for name, scfg in enabled.items():
             if not once and now < next_run[name]:
                 continue
-            next_run[name] = now + scfg.get("interval_seconds", 120)
+            # аренда не нужна (клиент покупает) — смотрим реже: только для маклеров и рынка
+            next_run[name] = now + scfg.get("interval_seconds", 120) * (1 if rent_on else 5)
             try:
                 listings = SOURCE_FETCHERS[name](scfg, cfg)
             except Exception as e:
@@ -3484,7 +3485,7 @@ def run():
         force_sale = bool(force_flag)
         fresh = bool(store.get_kv("fresh_start"))              # после сброса — ждём новых параметров из чата
         if sale_store is not None and not fresh and (once or now >= next_sale or force_sale):
-            next_sale = now + (sale_cfg.get("uybor") or {}).get("interval_seconds", 600)
+            next_sale = now + (sale_cfg.get("uybor") or {}).get("interval_seconds", 180)
             if force_sale:
                 store.set_kv("sale_force", False)
             try:

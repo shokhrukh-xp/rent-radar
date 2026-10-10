@@ -738,6 +738,7 @@ async function pythonAlive(env) {
 /** Будит GitHub Actions, если Python сейчас не работает. Возвращает true, если он уже жив. */
 export async function wake(env) {
   if (await pythonAlive(env)) return true;
+  if (env.WAKE_GH === "off") return false;            // Python живёт на своём сервере — GitHub не будим
   const last = await kvGet(env, "last_wake", 0);
   if (Date.now() - last < 4 * 60e3) return false;     // уже будили — запуск в пути
   await kvSet(env, "last_wake", Date.now());
@@ -1336,6 +1337,7 @@ export default {
         try { return json({ ok: true, offer: await parseOffer(env, body) }); }
         catch (e) { return json({ ok: false, error: String(e.message || e) }, 502); }
       }
+      if (p === "/svc/owner") return json({ chat: env.OWNER_CHAT || null });   // для .env сервера: не секрет
       if (p === "/svc/repair" && req.method === "POST") {  // Python: ремонт по фото объявления
         const body = await req.json().catch(() => ({}));
         try { return json({ ok: true, repair: await repairFromPhotos(env, body) }); }

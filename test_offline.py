@@ -1830,7 +1830,8 @@ fdb = Path("/tmp/test_fu.db"); fdb.unlink(missing_ok=True)
 fs = rr.Store(fdb)
 FU = []
 ftg = lambda c, m, pl, **k: (FU.append((m, pl)), {"ok": True})[1]
-T = lambda h, m=0, d=0: (datetime(2026, 10, 8, h, m, tzinfo=cg.TZ) + timedelta(days=d))
+_D0 = (datetime.now(cg.TZ) + timedelta(days=2)).date()      # всегда в будущем: set_viewing сверяется с реальным «сейчас»
+T = lambda h, m=0, d=0: (datetime(_D0.year, _D0.month, _D0.day, h, m, tzinfo=cg.TZ) + timedelta(days=d))
 with mock.patch.object(rr, "tg_call", ftg):
     a1, _ = cg.save_offer(fs, cfg, 4242, "Аброр", "2 комн Мирабад 50 м2 48 000$", [])
     a2, _ = cg.save_offer(fs, cfg, 4343, "Дильноза", "2 комн Яккасарай 55 м2 47 000$", [])

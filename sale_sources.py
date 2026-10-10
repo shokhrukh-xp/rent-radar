@@ -343,8 +343,9 @@ def normalize(l, cfg):
     return l
 
 
-SOURCES = {"realt24": (fetch_realt24, 900), "joymee": (fetch_joymee, 900),
-           "realting": (fetch_realting, 1800), "telegram": (fetch_tg_sale, 1200),
+# как часто проверять (сек): сервер работает круглосуточно — свежее находим за ~5 минут
+SOURCES = {"realt24": (fetch_realt24, 300), "joymee": (fetch_joymee, 300),
+           "realting": (fetch_realting, 900), "telegram": (fetch_tg_sale, 300),
            "yangiuylar": (fetch_yangiuylar, 6 * 3600)}
 
 

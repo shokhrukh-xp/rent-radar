@@ -1,0 +1,14 @@
+# Ra'no на сервере sonar: /opt/rano/{app,state,keys,.env}. Запуск: cd /opt/rano && docker compose up -d --build
+services:
+  rano:
+    build: ./app/deploy/server
+    container_name: rano
+    restart: unless-stopped
+    env_file: .env            # RADAR_BOT_TOKEN, RADAR_CHAT_ID, RADAR_WORKER_URL, RADAR_WORKER_KEY — вписывает владелец
+    volumes:
+      - /opt/rano:/opt/rano
+    mem_limit: 512m
+    cpus: 0.75
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
