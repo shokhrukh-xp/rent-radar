@@ -768,7 +768,8 @@ def broker_welcome(cfg, store) -> str:
     return (f"Assalomu alaykum! Я {a} 👋, ИИ-ассистент — ищу жильё для клиента.\n"
             + (f"\nКлиент ищет:\n{want}\n" if want else "")
             + "\nПришлите подходящие варианты: фото, точный адрес, этаж, площадь, цену и "
-              "комиссию — одним сообщением или альбомом, я не тороплю. Передам клиенту сразу же.\n\n"
+              "комиссию — одним сообщением или альбомом, я не тороплю. Передам клиенту сразу же.\n"
+              "Знаете хороший канал с объявлениями? Пришлите ссылку — добавлю в поиск 📡\n\n"
               f"Assalomu alaykum! Men {a}, AI-yordamchiman. Mos variantlarni yuboring: foto, "
               "manzil, qavat, maydon, narx va vositachilik haqi.")
 

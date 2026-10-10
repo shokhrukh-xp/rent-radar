@@ -1232,6 +1232,8 @@ HELP_TEXT = """🏠 <b>Ra'no</b> — ваш ИИ-ассистент по пои�
 
 Поменять поиск — просто напишите («бюджет 60 тысяч», «добавь Юнусабад»).
 Варианты из WhatsApp — перешлите сюда, соберу карточку с анализом цены.
+Ссылка на объявление (OLX, Uybor, Joymee, канал) — разберу и найду похожие.
+Знаете Telegram-канал с объявлениями по Ташкенту — пришлите ссылку или @имя: проверю и добавлю в поиск для всех 📡
 Понравилось объявление с сайта — «👍 В шортлист». В шортлисте нажмите номер: уточнить, назначить просмотр, заметка, «посмотрел».
 Напоминаю сама: если маклер молчит сутки, утром в день просмотра и за 2 часа до него; в 20:00 — итоги дня. Я пунктуальная 😉
 
@@ -1446,6 +1448,8 @@ def handle_command(text: str, settings: dict, store, cfg: dict):
         return sale_status_text(cfg), None
     if cmd in ("/rynok", "/market", "/рынок"):
         return sale_market_text(cfg), None
+    if cmd in ("/sources", "/kanallar", "/источники"):
+        return sources_text(cfg, store), None
     if cmd in ("/owner", "/hozyain"):
         if arg in OFF_WORDS or arg in RESET_WORDS:
             settings["owner_only"] = False
@@ -1642,6 +1646,9 @@ def effective_sale_cfg(cfg, store):
         ss["districts"] = list(DISTRICT_LIST)
     ss["mortgage"] = "ипотек" in str(ans.get("note") or "").lower() or ans.get("payment") == "mortgage"
     ss["enabled"] = True
+    import sale_sources                          # каналы, которые добавили пользователи
+    base = list(ss.get("sale_channels") or sale_sources.SALE_CHANNELS)
+    ss["sale_channels"] = base + [c for c in user_channels(store, "sale") if c.lower() not in {b.lower() for b in base}]
     return {**cfg, "sale_search": ss}
 
 
@@ -2082,6 +2089,102 @@ def show_site_listing(cfg, key) -> str:
     return "" if l.get("photo_urls") else "Фото у этого объявления нет — только описание"
 
 
+# ------------------------------------------------ каналы от пользователей --
+# Общая база источников: клиенты и маклеры присылают каналы, Ra'no проверяет и добавляет,
+# владелец получает уведомление и может убрать. Хранится в radar.db (kv «user_channels»).
+
+CH_PER_DAY = 10
+
+
+def user_channels(store, deal=None) -> list:
+    reg = store.get_kv("user_channels") or {}
+    return [n for n, v in reg.items() if v.get("active", True) and not v.get("blocked")
+            and (deal is None or v.get("deal") in (deal, "both"))]
+
+
+def known_channels(cfg) -> set:
+    import sale_sources
+    base = set(((cfg.get("sources") or {}).get("telegram") or {}).get("channels") or [])
+    return {c.lower() for c in base | set(sale_sources.SALE_CHANNELS)}
+
+
+def handle_channel_suggestion(cfg, store, msg) -> int:
+    """Пользователь прислал канал(ы): проверить, добавить в общую базу, ответить ему и сообщить владельцу."""
+    import sale_sources
+    chat = msg.get("chat") or {}
+    chat_id = chat.get("id")
+    owner = str(chat_id) == str(cfg["telegram_chat_id"])
+    who = " ".join(x for x in (chat.get("first_name"), chat.get("last_name")) if x) or chat.get("username") or "пользователь"
+    day = datetime.now(TASHKENT_TZ).date().isoformat()
+    used = store.get_kv(f"ch_sugg:{chat_id}:{day}") or 0
+    reg = store.get_kv("user_channels") or {}
+    base = known_channels(cfg)
+    lines, added = [], 0
+    for name in (msg.get("_channel") or [])[:5]:
+        low = name.lower()
+        ex = next((k for k in reg if k.lower() == low), None)
+        if ex and reg[ex].get("blocked"):
+            lines.append(f"• @{name} — этот канал уже смотрели, он не подошёл")
+            continue
+        if low in base or (ex and reg[ex].get("active", True)):
+            lines.append(f"• @{name} — уже отслеживаю 👍")
+            continue
+        if used >= CH_PER_DAY and not owner:
+            lines.append(f"• @{name} — на сегодня хватит, пришлите завтра 🙏")
+            continue
+        used += 1
+        v = sale_sources.verify_channel(name)
+        if not v.get("ok"):
+            lines.append(f"• @{name} — не добавила: {v.get('reason')}")
+            continue
+        deal = v["deal"]
+        reg[name] = {"deal": deal, "title": v.get("title"), "subs": v.get("subs"), "per_day": v.get("per_day"),
+                     "by": who[:40], "by_chat": str(chat_id), "at": datetime.now(timezone.utc).isoformat(), "active": True}
+        what = {"sale": "продажа", "rent": "аренда", "both": "продажа и аренда"}[deal]
+        lines.append(f"• @{name} — ✅ добавила в поиск: {what}, ~{v.get('per_day')} постов в день")
+        added += 1
+        if not owner:
+            tg_call(cfg, "sendMessage", {
+                "chat_id": cfg["telegram_chat_id"], "parse_mode": "HTML", "disable_notification": True,
+                "text": f"📡 <b>Новый источник</b> от {escape_html(who)}: "
+                        f'<a href="https://t.me/s/{name}">@{escape_html(name)}</a> — {escape_html(v.get("title") or "")}'
+                        f'{", " + escape_html(v["subs"]) + " подписчиков" if v.get("subs") else ""}, '
+                        f"{what}, ~{v.get('per_day')} постов в день. Уже в поиске.",
+                "reply_markup": json.dumps({"inline_keyboard": [[{"text": "🗑 Убрать", "callback_data": f"ch:rm:{name}"[:64]}]]},
+                                           ensure_ascii=False)})
+    store.set_kv("user_channels", reg)
+    store.set_kv(f"ch_sugg:{chat_id}:{day}", used)
+    head = "📡 <b>Спасибо!</b> " + ("Добавила в общую базу — теперь его видят все поиски Ra'no 🙌" if added
+                                     else "Проверила:")
+    tg_call(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML", "disable_web_page_preview": True,
+                                 "text": head + "\n" + escape_html("\n".join(lines))})
+    return added
+
+
+def sources_text(cfg, store):
+    reg = store.get_kv("user_channels") or {}
+    act = [(n, v) for n, v in reg.items() if v.get("active", True) and not v.get("blocked")]
+    lines = ["📡 <b>Источники</b>",
+             f"Сайты: Uybor, Joymee, Realt24, Realting, Yangiuylar. Telegram-каналов: {len(known_channels(cfg)) + len(act)}.",
+             "", "Знаете канал с объявлениями по Ташкенту? Пришлите ссылку (t.me/…) или @имя — проверю и добавлю."]
+    if act:
+        lines += ["", "<b>Добавили пользователи:</b>"]
+        what = {"sale": "продажа", "rent": "аренда", "both": "продажа и аренда"}
+        for n, v in sorted(act, key=lambda x: x[1].get("at", ""), reverse=True)[:20]:
+            lines.append(f'• <a href="https://t.me/s/{n}">@{escape_html(n)}</a> — {what.get(v.get("deal"), "")}, '
+                         f'от {escape_html(v.get("by") or "")}')
+    return "\n".join(lines)
+
+
+def remove_channel(store, name) -> str:
+    reg = store.get_kv("user_channels") or {}
+    if name not in reg:
+        return "Такого источника нет"
+    reg[name].update(active=False, blocked=True)
+    store.set_kv("user_channels", reg)
+    return f"🗑 Убрала @{name} из поиска"
+
+
 LIKE_WORDS = re.compile(r"похож|такие же|такую же|подобн|аналог|o'?xshash|ўхшаш|shunga o", re.I)
 
 
@@ -2515,6 +2618,10 @@ def handle_callback(data: str, settings: dict, store, cfg: dict, message_id=None
         finally:
             sst.conn.close()
         return ("" if n else "Подборок ещё не было — скоро будет 🙂"), None
+    if d.startswith("ch:rm:"):                 # убрать канал из общей базы
+        t = remove_channel(store, d[6:])
+        send_telegram(cfg, t)
+        return t, None
     if d.startswith(("L:sim:", "L:like:")):    # похожие / искать такие же
         key = d.split(":", 2)[2]
         if not SALE_DB_PATH.exists():
@@ -2935,6 +3042,9 @@ def process_commands(cfg: dict, store, long_poll: int = 0) -> dict:
 
         msg = upd.get("message") or upd.get("edited_message") or {}
         chat = msg.get("chat") or {}
+        if msg.get("_channel"):              # прислали канал — владелец или маклер
+            handle_channel_suggestion(cfg, store, msg)
+            continue
         if str(chat.get("id") or "") != str(cfg["telegram_chat_id"]):
             handle_broker_message(cfg, store, msg)   # это маклер прислал вариант
             continue
@@ -3659,7 +3769,12 @@ def run():
             # аренда не нужна (клиент покупает) — смотрим реже: только для маклеров и рынка
             next_run[name] = now + scfg.get("interval_seconds", 120) * (1 if rent_on else 5)
             try:
-                listings = SOURCE_FETCHERS[name](scfg, cfg)
+                if name == "telegram":           # + каналы, которые добавили пользователи
+                    extra = [c for c in user_channels(store, "rent") if c.lower() not in
+                             {x.lower() for x in scfg.get("channels") or []}]
+                    listings = SOURCE_FETCHERS[name](dict(scfg, channels=list(scfg.get("channels") or []) + extra), cfg)
+                else:
+                    listings = SOURCE_FETCHERS[name](scfg, cfg)
             except Exception as e:
                 log.warning("[%s] ошибка получения: %s", name, e)
                 next_run[name] = now + min(900, scfg.get("interval_seconds", 120) * 3)

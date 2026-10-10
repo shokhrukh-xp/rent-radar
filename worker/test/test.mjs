@@ -2,7 +2,7 @@
 // D1 эмулируется на node:sqlite, Telegram / Gemini / GitHub — подменой fetch.
 import { DatabaseSync } from "node:sqlite";
 import assert from "node:assert/strict";
-import worker, { repairFromPhotos, linkFacts, parseNum, applyPatch, essentialsOk, finalAns, handleUpdate, summary, pairsToSet, OWNER_KB, BROKER_KB, BTN, parseWhen, PROFILE, interviewCore } from "../src/index.js";
+import worker, { repairFromPhotos, linkFacts, suggestedChannels, parseNum, applyPatch, essentialsOk, finalAns, handleUpdate, summary, pairsToSet, OWNER_KB, BROKER_KB, BTN, parseWhen, PROFILE, interviewCore } from "../src/index.js";
 
 function d1() {
   const s = new DatabaseSync(":memory:");
@@ -523,3 +523,18 @@ assert.ok(geminiCalls.at(-1).includes("url_context"));
 geminiQueue.push({ opened: false, facts: [] });
 assert.equal((await linkFacts(env, "https://www.olx.uz/d/y.html")).opened, false);
 console.log("OK — ссылки: владелец прислал ссылку → Python; модель читает объявление, не открылось — так и говорим");
+
+// ── предложенные каналы
+assert.deepEqual(suggestedChannels("https://t.me/arentash"), ["arentash"]);
+assert.deepEqual(suggestedChannels("вот хороший канал @uybozor_toshkent_uybor"), ["uybozor_toshkent_uybor"]);
+assert.deepEqual(suggestedChannels("@kivartirauz"), ["kivartirauz"]);
+assert.deepEqual(suggestedChannels("https://t.me/arentash/8840"), []);                 // пост — это объявление, не канал
+assert.deepEqual(suggestedChannels("напишите @rano_smart_bot"), []);
+assert.deepEqual(suggestedChannels("позвоните Азизу @aziz_realty завтра в 10, квартира 2/4/9 за 45 000"), []);   // упоминание, не канал
+sent.length = 0;
+assert.equal(await handleUpdate(env, msg("t.me/s/bezmakler_uz")), "channel");
+assert.ok(texts().some(t => /Проверяю @bezmakler_uz/.test(t)));
+sent.length = 0;
+assert.equal(await handleUpdate(env, msg("канал @kvartira_bez_posrednika", "555001")), "channel");   // маклер тоже может
+assert.ok(texts().some(t => /Спасибо! Проверяю/.test(t)));
+console.log("OK — каналы от пользователей: ссылка или @имя → проверка в Python; посты и упоминания людей — не каналы");

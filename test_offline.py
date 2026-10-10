@@ -2339,3 +2339,60 @@ a2 = cg.get_anketa(rs2)["ans"]
 assert a2["deal"] == "rent" and a2["budget"] == "770" and rs2.get_kv("settings")["max_price_usd"] == 770
 rdb2.unlink(missing_ok=True); sdb2.unlink(missing_ok=True)
 print("OK — аренда: Realt24 и Joymee источниками, узбекская кириллица в каналах, ссылка на аренду — сравнение, похожие, «искать такие»")
+
+# ============ каналы от пользователей: проверка, общая база, уведомление, «убрать» ============
+def tg_page(posts, title="Ташкент квартиры", subs="2.1K", hours_ago=2):
+    t0 = datetime.now(timezone.utc) - timedelta(hours=hours_ago)
+    body = "".join(f'<div class="tgme_widget_message_text js-message_text" dir="auto">{p}</div>'
+                   f'<time datetime="{(t0 - timedelta(hours=i)).isoformat()}">' for i, p in enumerate(posts))
+    return (f'<meta property="og:title" content="{title}"><span class="counter_value">{subs}</span> '
+            f'<span class="counter_type">subscribers</span>' + body)
+ADS = ["Сдаётся 2-комн, Юнусабад, 3/9, 55 м², 600$ в месяц", "Ижарага 2 хона Чилонзор, ойига 450$, 4 қават",
+       "Аренда 1-комн Мирабад 400 у.е., 2 этаж", "Сдается 3 комн Яккасарай 800$, 70 м²"]
+PAGES = {"good_ch": tg_page(ADS), "dead_ch": tg_page(ADS, hours_ago=24 * 30), "news_ch": tg_page(["Новости рынка", "Курс доллара", "Погода"] * 2),
+         "grp": '<meta property="og:title" content="Группа">'}
+class FakeTg:
+    def __init__(s, t): s.text, s.status_code = t, 200
+    def raise_for_status(s): pass
+fake_tme = lambda url, headers=None, timeout=None: FakeTg(PAGES[url.rstrip("/").split("/")[-1]])
+with mock.patch.object(SS.requests, "get", fake_tme):
+    v = SS.verify_channel("good_ch")
+    assert v["ok"] and v["deal"] == "rent" and v["subs"] == "2.1K" and v["ads"] == 4, v
+    assert "не живой" in SS.verify_channel("dead_ch")["reason"]
+    assert "объявлений" in SS.verify_channel("news_ch")["reason"]
+    assert "группа" in SS.verify_channel("grp")["reason"]
+cdb = Path("/tmp/test_channels.db"); cdb.unlink(missing_ok=True); cs = rr.Store(cdb)
+CT = []
+def ch_tg(cfg_, method, payload, timeout=20, quiet=False):
+    CT.append((method, payload)); return {"ok": True, "result": {}}
+broker = {"chat": {"id": 777, "first_name": "Азиз"}, "_channel": ["good_ch", "dead_ch", "arentash"]}
+with mock.patch.object(SS.requests, "get", fake_tme), mock.patch.object(rr, "tg_call", ch_tg):
+    assert rr.handle_channel_suggestion(cfg, cs, broker) == 1
+reply = next(pl["text"] for m, pl in CT if str(pl["chat_id"]) == "777")
+assert "✅ добавила в поиск: аренда" in reply and "не живой" in reply and "@arentash — уже отслеживаю" in reply
+note = next(pl for m, pl in CT if str(pl["chat_id"]) == str(cfg["telegram_chat_id"]))
+assert "Новый источник" in note["text"] and "Азиз" in note["text"] and "ch:rm:good_ch" in note["reply_markup"]
+assert rr.user_channels(cs, "rent") == ["good_ch"] and rr.user_channels(cs, "sale") == []
+assert "@good_ch" in rr.sources_text(cfg, cs)
+# повторно — «уже отслеживаю»; убрать — больше не добавляется
+CT.clear()
+with mock.patch.object(SS.requests, "get", fake_tme), mock.patch.object(rr, "tg_call", ch_tg):
+    rr.handle_channel_suggestion(cfg, cs, dict(broker, _channel=["GOOD_CH"]))
+    assert "уже отслеживаю" in CT[-1][1]["text"]
+    t, _ = rr.handle_callback("ch:rm:good_ch", rr.default_settings(), cs, cfg, 1)
+    assert "Убрала @good_ch" in t and rr.user_channels(cs) == []
+    rr.handle_channel_suggestion(cfg, cs, dict(broker, _channel=["good_ch"]))
+    assert "не подошёл" in CT[-1][1]["text"]
+# продажа: канал пользователя — в поиск покупки
+reg = cs.get_kv("user_channels"); reg["sale_ch"] = {"deal": "sale", "active": True}; cs.set_kv("user_channels", reg)
+cs.set_kv("anketa", {"ans": {"deal": "buy", "object": "flat", "budget": "50000", "rooms": ["2"]}})
+assert "sale_ch" in rr.effective_sale_cfg(cfg, cs)["sale_search"]["sale_channels"]
+assert "Kvartiritashkenta" in rr.effective_sale_cfg(cfg, cs)["sale_search"]["sale_channels"]
+# лимит: не больше 10 проверок в день от одного маклера
+cs.set_kv(f"ch_sugg:777:{datetime.now(rr.TASHKENT_TZ).date().isoformat()}", 10)
+CT.clear()
+with mock.patch.object(SS.requests, "get", fake_tme), mock.patch.object(rr, "tg_call", ch_tg):
+    rr.handle_channel_suggestion(cfg, cs, dict(broker, _channel=["news_ch"]))
+assert "на сегодня хватит" in CT[-1][1]["text"]
+cdb.unlink(missing_ok=True)
+print("OK — каналы от пользователей: проверка живости и объявлений, общая база, уведомление владельцу, «убрать», лимит")

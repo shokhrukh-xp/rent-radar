@@ -522,6 +522,7 @@ const MORE_MENU = { inline_keyboard: [
   [{ text: "💬 Маклер ответил мне в WhatsApp", callback_data: "cmd:/add" }],
   [{ text: "📋 Шортлист", callback_data: "cmd:/shortlist" }, { text: "📊 Цены рынка", callback_data: "cmd:/rynok" }],
   [{ text: "🏷 Поиск по сайтам", callback_data: "cmd:/rano" }, { text: "📝 Текст запроса", callback_data: "cmd:/request" }],
+  [{ text: "📡 Источники: добавить свой канал", callback_data: "cmd:/sources" }],
   [{ text: "🔄 Начать поиск заново", callback_data: "q:again" }],
   [{ text: "❓ Как это работает", callback_data: "cmd:/help" }],
 ] };
@@ -887,6 +888,19 @@ async function brokerAck(env, msg) {
   if (r && r.ok !== false) msg._acked = true;
   return true;
 }
+// предложили канал: ссылка t.me/имя (без номера поста) или @имя с пометкой «канал», или просто @имя
+const TG_CH_LINK = /(?:https?:\/\/)?(?:t\.me|telegram\.me)\/(?:s\/)?([A-Za-z][\w]{3,31})\/?(?=$|[\s?#,;!)])/gi;
+const TG_CH_AT = /(?:^|[\s(])@([A-Za-z][\w]{3,31})\b/g;
+export function suggestedChannels(text, botName = "rano_smart_bot") {
+  const t = String(text || "");
+  if (!t || t.length > 400) return [];
+  const names = [...t.matchAll(TG_CH_LINK)].map(m => m[1]);
+  const ats = [...t.matchAll(TG_CH_AT)].map(m => m[1]);
+  const rest = t.replace(TG_CH_AT, " ").replace(TG_CH_LINK, " ").trim();
+  if (ats.length && (/канал|kanal|группа|guruh|источник|manba|channel/i.test(t) || rest.length < 3)) names.push(...ats);
+  const bad = new Set([botName.toLowerCase(), "joinchat", "share", "addstickers", "proxy", "iv", "s"]);
+  return [...new Set(names.filter(n => !bad.has(n.toLowerCase())))].slice(0, 5);
+}
 const emptyIv = () => ({ ans: {}, hist: [], sent: "", mode: "" });
 
 export function summary(a) {
@@ -1227,6 +1241,13 @@ export async function handleUpdate(env, upd) {
   if (!msg) { await enqueue(env, upd); return "queued"; }
   const chat = String(msg.chat?.id ?? "");
   if (chat !== owner) {                         // маклер
+    const chans = !msg.photo ? suggestedChannels(msg.text) : [];
+    if (chans.length) {
+      await say(env, chat, `📡 Спасибо! Проверяю ${chans.map(c => "@" + c).join(", ")} — пару минут.`);
+      upd.message = { ...msg, _channel: chans };
+      await queueAndWake(env, upd);
+      return "channel";
+    }
     if (await brokerWelcome(env, msg, owner)) {
       if (String(msg.text || "").trim() === BTN.what) return "broker_info";   // кнопка — Python не нужен
       msg._welcomed = true;
@@ -1266,6 +1287,14 @@ export async function handleUpdate(env, upd) {
     return "owner_offer";
   }
 
+  // предложенный канал — проверить и добавить в общую базу источников
+  const chans = !forwarded && !text.startsWith("/") ? suggestedChannels(text) : [];
+  if (chans.length) {
+    await say(env, chat, `📡 Проверяю ${chans.map(c => "@" + c).join(", ")} — живой ли, есть ли объявления по Ташкенту…`);
+    upd.message = { ...msg, _channel: chans };
+    await queueAndWake(env, upd);
+    return "channel";
+  }
   // ссылка на объявление: открыть, разобрать, найти похожие — это делает Python
   const link = !forwarded && !text.startsWith("/") ? (text.match(/https?:\/\/[^\s<>"]+/i) || [])[0] : "";
   if (link) {

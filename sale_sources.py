@@ -592,6 +592,59 @@ def similar_rent(radar_store, sale_store, l, n=7, days=30):
     return sorted(out, key=lambda o: o["price_usd"])[:n]
 
 
+# ------------------------------------------------ каналы от пользователей --
+
+AD_WORDS = re.compile(r"\$|у\.?е\.?|y\.?e\.?|долл|сум|so'?m|млн|xona|хона|комн|кв\.?\s?м|m2|м²|этаж|qavat|қават|"
+                      r"sotiladi|сотилади|прода|сда[её]тся|аренд|ijara|ижара|нархи|narxi|цена", re.I)
+TASH_WORDS = re.compile(r"ташкент|тошкент|toshkent|tashkent|юнусаб|юнусоб|yunusob|чиланз|чилонз|chilonz|мираб|миробод|mirobod|"
+                        r"яккасар|yakkasar|шайхантах|shayxontoh|сергел|sergeli|мирзо|mirzo|алмазар|олмазор|olmazor|"
+                        r"яшнаб|yashnob|учтеп|uchtepa|бектемир|bektemir|янгиҳаёт|yangihayot", re.I)
+
+
+def verify_channel(name, now=None):
+    """Публичный канал с объявлениями о недвижимости в Ташкенте? Смотрим превью t.me/s:
+    живой (пост за последние 7 дней), объявления (цена, комнаты, «сотилади/ижара»), Ташкент.
+    → {ok, reason, title, subs, per_day, deal: sale|rent|both, ads, posts}"""
+    rr = _rr()
+    now = now or datetime.now(timezone.utc)
+    try:
+        r = requests.get(f"https://t.me/s/{name}", headers=rr.HEADERS, timeout=20)
+        r.raise_for_status()
+        page = r.text
+    except requests.RequestException as e:
+        return {"ok": False, "reason": f"Telegram не ответил ({str(e)[:40]})"}
+    tm = re.search(r'<meta property="og:title" content="([^"]*)"', page)
+    title = html_lib.unescape(tm.group(1)) if tm else name
+    times = []
+    for t in rr.TG_TIME_RE.findall(page):
+        try:
+            times.append(datetime.fromisoformat(t))
+        except ValueError:
+            pass
+    if not times:
+        return {"ok": False, "title": title,
+                "reason": "это группа, закрытый канал или канала нет — читать умею только открытые каналы"}
+    sm = re.search(r'<span class="counter_value">([^<]+)</span>\s*<span class="counter_type">(?:subscribers|subscriber)', page)
+    texts = [html_lib.unescape(re.sub(r"<[^>]+>", " ", m)) for m in rr.TG_TEXT_RE.findall(page)]
+    newest_days = (now - max(times)).total_seconds() / 86400
+    span_days = max((max(times) - min(times)).total_seconds() / 86400, 1 / 24)
+    ads = [t for t in texts if len(AD_WORDS.findall(t)) >= 3]
+    sale_n = sum(bool(rr._sale_post(t)) for t in ads)
+    rent_n = sum(any(w in t.lower() for w in rr.RENT_POST_WORDS) for t in ads)
+    tash = sum(bool(TASH_WORDS.search(t)) for t in ads) + (3 if TASH_WORDS.search(title) else 0)
+    out = {"title": title[:80], "subs": sm.group(1) if sm else "", "posts": len(texts), "ads": len(ads),
+           "per_day": round(len(times) / span_days, 1), "newest_days": round(newest_days, 1)}
+    deal = "both" if sale_n >= 2 and rent_n >= 2 else ("sale" if sale_n >= rent_n else "rent")
+    out["deal"] = deal
+    if newest_days > 7:
+        return {**out, "ok": False, "reason": f"последний пост {newest_days:.0f} дн. назад — канал не живой"}
+    if len(ads) < 3 or len(ads) < len(texts) * 0.3:
+        return {**out, "ok": False, "reason": "объявлений о недвижимости почти нет"}
+    if tash < 2:
+        return {**out, "ok": False, "reason": "не похоже на Ташкент"}
+    return {**out, "ok": True, "reason": ""}
+
+
 def photo_repair(cfg, l) -> bool:
     """Ремонт по фото объявления (модель через воркер). True — сделали новую оценку.
     Оценку храним в объявлении, повторно не зовём; воркер недоступен — попробуем в другой раз."""
