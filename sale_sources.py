@@ -10,7 +10,7 @@ import html as html_lib
 import json
 import re
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import requests
 
@@ -112,6 +112,35 @@ def _joymee_detail(rr, lid):
     return r.json()
 
 
+def _joymee_listing(rr, lid, det):
+    """Деталь объявления Joymee → наше объявление."""
+    key = f"sale:joymee:{lid}"
+    dt = det.get("detail") or {}
+    pr = det.get("pricing") or {}
+    cur = "USD" if str(pr.get("currency")) == "2" else "UZS"
+    dist = (det.get("district") or {}).get("name") if isinstance(det.get("district"), dict) else ""
+    photos = [((m.get("file") or {}).get("url")) for m in (det.get("media") or [])[:6]
+              if isinstance(m, dict) and (m.get("file") or {}).get("url")]
+    seller = det.get("seller") or {}
+    return _listing(
+        key=key, source="Joymee · продажа", site="Joymee", url=JOYMEE_URL.format(id=lid),
+        title=(det.get("title") or "")[:90], text=(det.get("description") or det.get("title") or "")[:900],
+        price_value=_num(pr.get("price")), price_currency=cur,
+        rooms=rr.as_int(dt.get("room_quantity")), area=rr.sane(_num(dt.get("area_m2")), 10, 500),
+        floor=rr.sane(rr.as_int(dt.get("floor_number")), 1, 60),
+        floors_total=rr.sane(rr.as_int(dt.get("floors_count")), 1, 60),
+        district=rr.canon_district(dist, det.get("address_line"), det.get("description")),
+        district_raw=det.get("address_line"),
+        phones=rr.extract_phones(str(det.get("phone_number") or "")),
+        created_at=det.get("ads_at"), seller=" ".join(v for v in (seller.get("first_name"),
+                                                                    seller.get("last_name")) if v),
+        seller_id=f"joymee:{seller.get('id') or (det.get('created_by') or {}).get('id')}",
+        seller_hint={1: "owner", 2: "agency"}.get(det.get("advertiser_type"), ""),
+        photo_urls=photos, repair=JOYMEE_REPAIR.get(dt.get("repair")),
+        new_building=dt.get("apartment_type") == 2 or "новостро" in (det.get("title") or "").lower(),
+        mortgage=bool(det.get("mortgage_available")))
+
+
 def fetch_joymee(ss, cfg, store):
     """Список — по районам, сразу с бюджетом и комнатами; детали (телефон, площадь, этаж) —
     только для новых объявлений."""
@@ -127,7 +156,9 @@ def fetch_joymee(ss, cfg, store):
         dists = [None]
     items = {}
     for did in dists:
-        for page in (1, 2):
+        # раз в минуту — только первая страница свежих; вторую — раз в 15 минут
+        full = time.time() - (store.get_kv("joymee_full_at") or 0) > 900
+        for page in ((1, 2) if full else (1,)):
             params = dict(base, page=page)
             if did:
                 params["district"] = did
@@ -139,6 +170,8 @@ def fetch_joymee(ss, cfg, store):
             if not d.get("next"):
                 break
             time.sleep(0.4)
+    if time.time() - (store.get_kv("joymee_full_at") or 0) > 900:
+        store.set_kv("joymee_full_at", time.time())
     out, details = [], 0
     for lid, x in items.items():
         key = f"sale:joymee:{lid}"
@@ -150,30 +183,7 @@ def fetch_joymee(ss, cfg, store):
         except (requests.RequestException, ValueError) as e:
             rr.log.info("[продажа] Joymee %s: %s", lid, e)
             continue
-        dt = det.get("detail") or {}
-        pr = det.get("pricing") or {}
-        cur = "USD" if str(pr.get("currency")) == "2" else "UZS"
-        dist = (det.get("district") or {}).get("name") if isinstance(det.get("district"), dict) else ""
-        photos = [((m.get("file") or {}).get("url")) for m in (det.get("media") or [])[:6]
-                  if isinstance(m, dict) and (m.get("file") or {}).get("url")]
-        seller = det.get("seller") or {}
-        out.append(_listing(
-            key=key, source="Joymee · продажа", site="Joymee", url=JOYMEE_URL.format(id=lid),
-            title=(det.get("title") or "")[:90], text=(det.get("description") or det.get("title") or "")[:900],
-            price_value=_num(pr.get("price")), price_currency=cur,
-            rooms=rr.as_int(dt.get("room_quantity")), area=rr.sane(_num(dt.get("area_m2")), 10, 500),
-            floor=rr.sane(rr.as_int(dt.get("floor_number")), 1, 60),
-            floors_total=rr.sane(rr.as_int(dt.get("floors_count")), 1, 60),
-            district=rr.canon_district(dist, det.get("address_line"), det.get("description")),
-            district_raw=det.get("address_line"),
-            phones=rr.extract_phones(str(det.get("phone_number") or "")),
-            created_at=det.get("ads_at"), seller=" ".join(v for v in (seller.get("first_name"),
-                                                                        seller.get("last_name")) if v),
-            seller_id=f"joymee:{seller.get('id') or (det.get('created_by') or {}).get('id')}",
-            seller_hint={1: "owner", 2: "agency"}.get(det.get("advertiser_type"), ""),
-            photo_urls=photos, repair=JOYMEE_REPAIR.get(dt.get("repair")),
-            new_building=dt.get("apartment_type") == 2 or "новостро" in (det.get("title") or "").lower(),
-            mortgage=bool(det.get("mortgage_available"))))
+        out.append(_joymee_listing(rr, lid, det))
         time.sleep(0.3)
     return out
 
@@ -344,8 +354,8 @@ def normalize(l, cfg):
 
 
 # как часто проверять (сек): сервер работает круглосуточно — свежее находим за ~5 минут
-SOURCES = {"realt24": (fetch_realt24, 300), "joymee": (fetch_joymee, 300),
-           "realting": (fetch_realting, 900), "telegram": (fetch_tg_sale, 300),
+SOURCES = {"realt24": (fetch_realt24, 300), "joymee": (fetch_joymee, 60),
+           "realting": (fetch_realting, 900), "telegram": (fetch_tg_sale, 120),
            "yangiuylar": (fetch_yangiuylar, 6 * 3600)}
 
 
@@ -375,6 +385,160 @@ def fetch_due(ss, cfg, store, force=False):
 
 
 # ============================================================ оценка и подача ==
+
+# ------------------------------------------------------- объявление по ссылке --
+
+UYBOR_ID_RE = re.compile(r"uybor\.uz/(?:[\w-]+/)*listings/(\d+)", re.I)
+JOYMEE_ID_RE = re.compile(r"joymee\.uz/(?:[\w-]+/)*announcements/(\d+)", re.I)
+SITE_NAMES = {"olx.uz": "OLX", "t.me": "Telegram", "realt24.uz": "Realt24", "realting.uz": "Realting",
+              "uysot.uz": "Uysot", "uybor.uz": "Uybor", "joymee.uz": "Joymee", "birbir.uz": "Birbir"}
+
+
+def _uybor_by_id(rr, uid):
+    """Uybor: объявление по id через список (в нём — фото, в детальной ручке их нет)."""
+    import market
+    r = requests.get(rr.UYBOR_API, params={"id__eq": uid, "limit": 1}, headers=rr.HEADERS, timeout=20)
+    r.raise_for_status()
+    res = r.json().get("results") or []
+    if not res:
+        return None, ""
+    o = res[0]
+    l = rr.uybor_listing(o)
+    l.update(key="sale:" + l["key"], source="Uybor · продажа", repair=o.get("repair"),
+             new_building=market.looks_new(o.get("isNewBuilding"), l.get("text")))
+    return l, o.get("operationType") or "sale"
+
+
+def refresh_listing(l) -> bool:
+    """Свежие фото и данные для показа позже: у Joymee ссылки на фото живут 10 минут."""
+    rr = _rr()
+    key = l.get("key") or ""
+    try:
+        if key.startswith("sale:joymee:"):
+            lid = key.rsplit(":", 1)[-1]
+            new = _joymee_listing(rr, lid, _joymee_detail(rr, lid))
+        elif key.startswith("sale:uybor:") and not l.get("photo_urls"):
+            new, _ = _uybor_by_id(rr, key.rsplit(":", 1)[-1])
+        else:
+            return False
+    except (requests.RequestException, ValueError, KeyError) as e:
+        rr.log.info("[продажа] не обновила %s: %s", key, e)
+        return False
+    if not new:
+        return False
+    for k in ("photo_urls", "text", "floor", "floors_total", "area", "phones"):
+        if new.get(k):
+            l[k] = new[k]
+    return True
+
+
+def listing_from_facts(url, f):
+    """Факты, которые модель прочла на странице, → наше объявление."""
+    rr = _rr()
+    import hashlib
+    from urllib.parse import urlparse
+    host = (urlparse(url).hostname or "").lower().removeprefix("www.").removeprefix("m.")
+    site = SITE_NAMES.get(host, host or "сайт")
+    text = " · ".join(x for x in (f.get("summary"), f.get("address"), f.get("landmark"), f.get("repair"),
+                                  f.get("building"), f.get("documents"), f.get("furniture")) if x)
+    return _listing(
+        key="sale:link:" + hashlib.md5(url.encode()).hexdigest()[:12], source=f"{site} · по ссылке", site=site,
+        url=url, title=(f.get("title") or f.get("summary") or f"Объявление на {site}")[:90], text=text[:900],
+        price_value=f.get("price"), price_currency=f.get("currency") or "USD", rooms=f.get("rooms"),
+        area=f.get("area"), floor=f.get("floor"), floors_total=f.get("floors_total"),
+        district=rr.canon_district(f.get("district") or "", f.get("address") or "", f.get("landmark") or ""),
+        district_raw=f.get("address"), phones=rr.extract_phones(f.get("phone") or ""),
+        seller_hint={"owner": "owner", "agency": "agency", "developer": "developer"}.get(f.get("seller_type") or "", ""),
+        repair=f.get("repair"), mortgage=True if re.search(r"да|есть|возможн|bor|yes", f.get("mortgage") or "", re.I) else None)
+
+
+def listing_from_url(cfg, url):
+    """(объявление, сделка) по ссылке. Uybor и Joymee — через их открытые API (с фото и продавцом),
+    остальное (OLX, Telegram, Realt24…) — страницу читает модель через воркер. (None, причина) — не вышло."""
+    rr = _rr()
+    m = UYBOR_ID_RE.search(url)
+    if m:
+        l, deal = _uybor_by_id(rr, m.group(1))
+        return (l, deal) if l else (None, "объявление снято или не найдено")
+    m = JOYMEE_ID_RE.search(url)
+    if m:
+        return _joymee_listing(rr, m.group(1), _joymee_detail(rr, m.group(1))), "sale"
+    if not cfg.get("worker_url"):
+        return None, "не могу открыть эту страницу"
+    r = rr.worker_post(cfg, "/svc/link", {"url": url}, timeout=120)
+    if not (r or {}).get("ok"):
+        return None, "сервис чтения страниц не ответил"
+    if not r.get("opened"):
+        return None, "страница не открылась"
+    f = r.get("facts") or {}
+    return listing_from_facts(url, f), {"rent": "rent", "daily": "daily"}.get(f.get("deal"), "sale")
+
+
+def seen_before(store, l, limit=3):
+    """Эта же квартира уже попадалась (на любом сайте, у любого продавца) — самые ранние сверху."""
+    if not (l.get("area") and l.get("price_usd")):
+        return []
+    rows = store.conn.execute(
+        "SELECT data, first_seen FROM listings WHERE price_usd BETWEEN ? AND ? AND key != ?",
+        (l["price_usd"] * 0.85, l["price_usd"] * 1.15, l["key"])).fetchall()
+    out = []
+    for data, first in rows:
+        try:
+            o = json.loads(data or "{}")
+        except ValueError:
+            continue
+        if same_flat(l, o):
+            out.append({**o, "_first_seen": first})
+    return sorted(out, key=lambda o: o["_first_seen"])[:limit]
+
+
+def similar(store, l, n=7, days=45):
+    """Похожие: те же комнаты и район, площадь ±25%, цена ±20%. Из собранного с сайтов и из
+    среза Uybor (весь Ташкент) — дешёвые за м² сверху; свои повторы и «мимо» — не показываем."""
+    import market
+    rr = _rr()
+    p, area = l.get("price_usd"), l.get("area")
+    if not p:
+        return []
+    since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    gone = set(store.get_kv("sale_dismissed") or [])
+
+    def fits(o):
+        if o.get("key") in gone or o.get("key") == l.get("key"):
+            return False
+        if l.get("rooms") and o.get("rooms") and int(o["rooms"]) != int(l["rooms"]):
+            return False
+        if l.get("district") and o.get("district") and o["district"] != l["district"]:
+            return False
+        if area and o.get("area") and not (0.75 * area <= o["area"] <= 1.25 * area):
+            return False
+        return bool(o.get("price_usd")) and 0.8 * p <= o["price_usd"] <= 1.2 * p
+
+    cand, keys = [], set()
+    for data, in store.conn.execute(
+            "SELECT data FROM listings WHERE dup_of IS NULL AND first_seen >= ? AND price_usd BETWEEN ? AND ?",
+            (since, p * 0.8, p * 1.2)):
+        try:
+            o = json.loads(data or "{}")
+        except ValueError:
+            continue
+        if fits(o):
+            cand.append(o); keys.add(o["key"])
+    market.ensure_tables(store.conn)
+    for key, d, rooms, ar, price in store.conn.execute(
+            "SELECT key, district, rooms, area, price_usd FROM market WHERE op='sale' AND removed_at IS NULL "
+            "AND price_usd BETWEEN ? AND ?", (p * 0.8, p * 1.2)):
+        o = {"key": key, "district": d, "rooms": rooms, "area": ar, "price_usd": price, "site": "Uybor",
+             "url": f"https://uybor.uz/listings/{key.rsplit(':', 1)[-1]}", "source": "Uybor · продажа",
+             "title": f"{rooms or '?'}-комн, {ar:g} м², {d or ''}", "text": "", "phones": []}
+        if key not in keys and fits(o):
+            cand.append(o); keys.add(key)
+    uniq = []
+    for o in sorted(cand, key=lambda o: o["price_usd"] / (o.get("area") or 1e9)):
+        if not any(same_flat(o, u) for u in uniq):
+            uniq.append(o)
+    return uniq[:n]
+
 
 def photo_repair(cfg, l) -> bool:
     """Ремонт по фото объявления (модель через воркер). True — сделали новую оценку.

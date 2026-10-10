@@ -2213,3 +2213,75 @@ qs.set_kv("anketa", {"ans": {"deal": "rent"}}); assert rr.rent_search_on(qs)
 qs.set_kv("fresh_start", True); assert not rr.rent_search_on(qs)                 # после сброса — ждём параметров
 qdb.unlink(missing_ok=True)
 print("OK — покупка: объявления аренды в чат не идут, только запоминаются")
+
+# ============ горячее от собственника: сразу, вне лимита, ночью — без звука ============
+assert rr.ago_text(1) == "только что" and rr.ago_text(42) == "42 мин назад" and rr.ago_text(135) == "2 ч 15 мин назад"
+assert rr.is_night(datetime(2026, 10, 10, 23, 30, tzinfo=rr.TASHKENT_TZ)) and not rr.is_night(datetime(2026, 10, 10, 12, tzinfo=rr.TASHKENT_TZ))
+assert rr.fresh_owner_minutes({"seller_kind": "owner", "created_at": _iso(0.03)}, {}) is not None
+assert rr.fresh_owner_minutes({"seller_kind": "agency", "created_at": _iso(0.03)}, {}) is None
+assert rr.fresh_owner_minutes({"seller_kind": "owner", "created_at": _iso(0.5)}, {}) is None          # 12 ч — уже не горячее
+HT = []
+def hot_tg(cfg_, method, payload, timeout=20, quiet=False):
+    HT.append((method, payload)); return {"ok": True, "result": {}}
+hdb = Path("/tmp/test_hot.db"); hdb.unlink(missing_ok=True); hs = rr.Store(hdb)
+UY_BY_DISTRICT.clear()
+with mock.patch.object(rr.requests, "get", fake_uy_get), mock.patch.object(rr, "tg_call", hot_tg), \
+        mock.patch.object(rr.time, "sleep"), mock.patch.object(SS, "fetch_due", lambda *a, **k: []), \
+        mock.patch.object(rr, "is_night", lambda now=None: True):
+    rr.run_sale_search(ss_all, hs, {"photos": False})                        # первый проход — пусто
+    hs.set_kv("sale_day", {"day": datetime.now(cg.TZ).date().isoformat(), "instant": 6})   # лимит «сразу» исчерпан
+    UY_BY_DISTRICT[205] = [uy(951, 1, 205, days=0.03), uy(952, 1, 205, days=2)]
+    HT.clear()
+    rr.run_sale_search(ss_all, hs, {"photos": False})
+hot = [pl for m, pl in HT if "listings/951" in (pl.get("text") or "")]
+assert hot and "🔥 <b>Только что от собственника</b>" in hot[0]["text"] and hot[0].get("disable_notification"), HT
+assert not any("listings/952" in (pl.get("text") or "") and "🔥" in (pl.get("text") or "") for m, pl in HT)   # старое — в подборку
+assert SS.day_stats(hs).get("hot") == 1 and SS.day_stats(hs).get("instant") == 6
+hdb.unlink(missing_ok=True)
+print("OK — горячее от собственника: сразу, вне дневного лимита, ночью без звука; старые — в подборку")
+
+# ============ ссылка на объявление: карточка, «уже видела», похожие, «искать такие» ============
+ldb = Path("/tmp/test_link_sale.db"); ldb.unlink(missing_ok=True); ls_ = rr.Store(ldb)
+lrd = Path("/tmp/test_link_radar.db"); lrd.unlink(missing_ok=True); lr_ = rr.Store(lrd)
+mk.ensure_tables(ls_.conn)
+seen_copy = dict(SS._listing(key="sale:uybor:777", site="Uybor", url="https://uybor.uz/listings/777", rooms=2, area=50,
+                             floor=3, floors_total=9, district="Юнусабад", price_value=47000), price_usd=47000, seller_kind="agency")
+ls_.save(seen_copy, notified=False)
+for i in range(4):
+    ls_.conn.execute("INSERT INTO market(key, op, district, rooms, area, price_usd, new_building, dorm, repair, first_seen, last_seen) "
+                     "VALUES(?,?,?,?,?,?,?,?,?,?,?)", (f"sale:uybor:{800 + i}", "sale", "Юнусабад", 2, 48 + i, 44000 + 1000 * i, 0, 0, "evro", "x", "x"))
+ls_.conn.execute("INSERT INTO market(key, op, district, rooms, area, price_usd, new_building, dorm, repair, first_seen, last_seen) "
+                 "VALUES('sale:uybor:899','sale','Чиланзар',2,50,45000,0,0,'evro','x','x')"); ls_.conn.commit()
+link_l = SS.listing_from_facts("https://www.olx.uz/d/obyavlenie/kv-ID1.html",
+                               {"price": 45000, "currency": "USD", "rooms": 2, "area": 50, "floor": 3, "floors_total": 9,
+                                "district": "Юнусабад", "seller_type": "owner", "title": "2-комн Юнусабад", "repair": "евроремонт"})
+assert link_l["site"] == "OLX" and link_l["seller_hint"] == "owner" and link_l["key"].startswith("sale:link:")
+LT = []
+def link_tg(cfg_, method, payload, timeout=20, quiet=False):
+    LT.append((method, payload)); return {"ok": True, "result": {"message_id": 5}}
+with mock.patch.object(rr, "SALE_DB_PATH", ldb), mock.patch.object(rr, "tg_call", link_tg), \
+        mock.patch.object(SS, "listing_from_url", lambda c, u: (dict(link_l), "sale")):
+    rr.handle_link(cfg, lr_, {"_link": "https://www.olx.uz/d/obyavlenie/kv-ID1.html", "text": "найди похожие https://www.olx.uz/d/obyavlenie/kv-ID1.html"})
+card = next(pl["text"] for m, pl in LT if "Эту квартиру я уже видела" in (pl.get("text") or ""))
+assert "uybor.uz/listings/777" in card and "маклер" in card
+assert any("L:sim:sale:link:" in (pl.get("reply_markup") or "") for m, pl in LT)
+simm = next(pl["text"] for m, pl in LT if "Похожие" in (pl.get("text") or "") and "±20%" in (pl.get("text") or ""))
+assert "uybor.uz/listings/800" in simm and "listings/899" not in simm                       # другой район — не похожее
+ls2 = rr.Store(ldb)
+assert ls2.known("sale:uybor:800") and [x["key"] for x in ls2.get_kv("last_pick")][0].startswith("sale:uybor:")
+ls2.conn.close()
+# не открылось
+LT.clear()
+with mock.patch.object(rr, "SALE_DB_PATH", ldb), mock.patch.object(rr, "tg_call", link_tg), \
+        mock.patch.object(SS, "listing_from_url", lambda c, u: (None, "страница не открылась")):
+    rr.handle_link(cfg, lr_, {"_link": "https://www.olx.uz/d/x.html", "text": "https://www.olx.uz/d/x.html"})
+assert "OLX закрыт для программ" in LT[-1][1]["text"] and "скриншот" in LT[-1][1]["text"]
+# «🎯 Искать такие» — условия из объявления
+LT.clear()
+with mock.patch.object(rr, "SALE_DB_PATH", ldb), mock.patch.object(rr, "tg_call", link_tg):
+    t, _ = rr.handle_callback(f"L:like:{link_l['key']}", rr.default_settings(), lr_, cfg, 1)
+a_ = cg.get_anketa(lr_)["ans"]
+assert a_["deal"] == "buy" and a_["rooms"] == ["2"] and rr.DISTRICT_LIST[int(a_["districts"][0])] == "Юнусабад" and a_["budget"] == "50000"
+assert any("Ищу такие же" in (pl.get("text") or "") for m, pl in LT)
+ldb.unlink(missing_ok=True); lrd.unlink(missing_ok=True)
+print("OK — ссылка: карточка с разбором, «уже видела у маклера», похожие (сайты + срез Uybor), «искать такие»")

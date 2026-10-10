@@ -332,11 +332,11 @@ export function parseNum(v) {
   return m ? +m[0] * mult : NaN;
 }
 
-function normOfferFacts(facts) {
+function normOfferFacts(facts, keys = OFFER_KEYS) {
   const o = {};
   for (const f of Array.isArray(facts) ? facts : []) {
     const k = String(f?.k || "").trim(), v = String(f?.v ?? "").trim();
-    if (!OFFER_KEYS.includes(k) || !v || /^(null|none|нет данных|-)$/i.test(v)) continue;
+    if (!keys.includes(k) || !v || /^(null|none|нет данных|-)$/i.test(v)) continue;
     if (["price", "area"].includes(k)) { const n = parseNum(v); if (n > 0) o[k] = Math.round(n * 100) / 100; continue; }
     if (["rooms", "floor", "floors_total"].includes(k)) { const n = parseInt(v, 10); if (n > 0 && n < 100) o[k] = n; continue; }
     if (k === "district") { const i = districtIdx(v); if (i && i !== "any") o.district = DISTRICTS[+i]; continue; }
@@ -371,6 +371,47 @@ export async function parseOffer(env, { text = "", photos = [], deal = "" }) {
   return normOfferFacts(out.facts);
 }
 
+// ───────────────────────────── объявление по ссылке ─────────────────────────────
+// Страницу открывает сама модель (инструмент url_context Gemini) — как превью ссылки:
+// одна страница, которую прислал пользователь. Не открылась — честно говорим и просим скриншот.
+export const LINK_KEYS = [...OFFER_KEYS, "seller_type", "phone", "posted", "title"];
+const LINK_SYSTEM = `Тебе дают ссылку на объявление о недвижимости (OLX, Uybor, Realt24, Telegram-канал и т. п.).
+Открой страницу и извлеки ТОЛЬКО то, что на ней написано. Ничего не выдумывай.
+Ответь строго JSON: {"opened": true|false, "facts": [{"k": "...", "v": "..."}]}.
+opened=false — если страница не открылась, требует входа, капчу или это не объявление.
+Ключи фактов: ${OFFER_KEYS.join(", ")}, а также:
+seller_type: owner (частное лицо, собственник, «без маклера») | agency (агентство, риелтор, маклер) | developer (застройщик)
+phone: телефон продавца, если виден; posted: дата публикации как написано; title: заголовок объявления.
+Остальные поля — как в объявлении: deal (sale | rent | daily), price (число), currency (USD | UZS), rooms, area, floor,
+floors_total, district (район Ташкента), address, landmark, repair, building, furniture, mortgage, documents, summary (1 строка).`;
+
+export async function linkFacts(env, url) {
+  if (!env.GEMINI_KEY) throw new Error("GEMINI_KEY не задан");
+  const first = env.AI_MODEL || "gemini-3.8-flash";
+  let last = "";
+  for (const model of [first, ...["gemini-3.6-flash", "gemini-3.5-flash"].filter(m => m !== first)]) {
+    const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
+      method: "POST", headers: { "content-type": "application/json", "x-goog-api-key": env.GEMINI_KEY },
+      body: JSON.stringify({ systemInstruction: { parts: [{ text: LINK_SYSTEM }] },
+        contents: [{ role: "user", parts: [{ text: `Ссылка на объявление: ${url}` }] }],
+        tools: [{ url_context: {} }], generationConfig: { temperature: 0.1, maxOutputTokens: 2048 } }),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) { last = `${model} ${r.status}: ${d?.error?.message || ""}`; if ([429, 500, 503, 404].includes(r.status)) continue; break; }
+    const c = d.candidates?.[0] || {};
+    const meta = (c.urlContextMetadata || c.url_context_metadata || {}).urlMetadata || [];
+    const fetched = meta.some(m => /SUCCESS/i.test(m.urlRetrievalStatus || m.url_retrieval_status || ""));
+    const raw = (c.content?.parts || []).filter(p => !p.thought).map(p => p.text || "").join("");
+    const a = raw.indexOf("{"), z = raw.lastIndexOf("}");
+    let o = {};
+    try { o = JSON.parse(raw.slice(a, z + 1)); } catch (e) { o = {}; }
+    const facts = normOfferFacts(o.facts, LINK_KEYS);
+    const opened = (fetched || !meta.length) && o.opened !== false && Object.keys(facts).length >= 2;
+    return { opened, facts: opened ? facts : {}, status: meta.map(m => m.urlRetrievalStatus || m.url_retrieval_status).join(",") };
+  }
+  throw new Error(last || "Gemini недоступен");
+}
+
 // ───────────────────────────── ремонт по фото ─────────────────────────────
 export const REPAIR_STATES = ["good", "average", "none", "box", "unknown"];
 const REPAIR_SCHEMA = {
@@ -385,8 +426,8 @@ const REPAIR_SCHEMA = {
 const REPAIR_SYSTEM = `Ты оцениваешь состояние ремонта квартиры в Ташкенте по фотографиям из объявления о продаже.
 Смотри только на то, что видно на фото, а не на слова продавца. Категории:
 good — свежий современный ремонт: ровные стены, современные пол и плитка, новая сантехника и двери, пластиковые окна; можно заезжать без вложений.
-average — жилое, но устаревшее или потёртое: старые обои, линолеум, советская плитка или кухня, потёртости; заехать можно, нужна косметика.
-none — нужен капитальный: облезлые стены и потолки, старые деревянные окна и трубы, убитый санузел, следы протечек, разруха.
+average — ремонт не новый, но из современных материалов: ламинат, пластиковые окна, кафель не советский, потёртости, немодные обои; заехать можно, хватит косметики.
+none — советский или очень старый ремонт, либо разруха: старые обои и ковры на стенах, советская плитка и сантехника, деревянные окна, старый линолеум или дощатый пол, облезлые стены, следы протечек; по-хорошему менять всё.
 box — коробка или черновая: голый бетон, стяжка, штукатурка без отделки.
 unknown — на фото нет интерьера квартиры (фасад, двор, план, схема, реклама, рендер) или по фото не понять.
 Если фото — рендеры или явно чужие картинки, ставь unknown. Мебель и вещи не путай с ремонтом.
@@ -1082,6 +1123,12 @@ export async function handleUpdate(env, upd) {
       await tg(env, "answerCallbackQuery", { callback_query_id: cb.id, text: "Уже отмечено" });
       return "noop";
     }
+    if (/^L:(sim|like):/.test(data)) {                     // похожие / искать такие же — Python
+      await tg(env, "answerCallbackQuery", { callback_query_id: cb.id, text: data[2] === "s" ? "🔎 Ищу похожие…" : "🎯 Настраиваю поиск…" });
+      upd.callback_query = { ...cb, _toast_done: true };
+      await queueAndWake(env, upd);
+      return "site";
+    }
     if (/^L:v:/.test(data) || data === "R:last") {          // фото и разбор / последняя подборка — Python
       await tg(env, "answerCallbackQuery", { callback_query_id: cb.id, text: data === "R:last" ? "Показываю 👇" : "📷 Открываю…" });
       upd.callback_query = { ...cb, _toast_done: true };
@@ -1219,6 +1266,15 @@ export async function handleUpdate(env, upd) {
     return "owner_offer";
   }
 
+  // ссылка на объявление: открыть, разобрать, найти похожие — это делает Python
+  const link = !forwarded && !text.startsWith("/") ? (text.match(/https?:\/\/[^\s<>"]+/i) || [])[0] : "";
+  if (link) {
+    upd.message = { ...msg, _link: link };
+    await say(env, chat, "🔗 Открываю объявление — минутку…");
+    await queueAndWake(env, upd);
+    return "link";
+  }
+
   if (text.startsWith("/")) {
     const [c0, ...rest] = text.split(/\s+/);
     const cmd = c0.toLowerCase().split("@")[0];
@@ -1338,6 +1394,11 @@ export default {
         catch (e) { return json({ ok: false, error: String(e.message || e) }, 502); }
       }
       if (p === "/svc/owner") return json({ chat: env.OWNER_CHAT || null });   // для .env сервера: не секрет
+      if (p === "/svc/link" && req.method === "POST") {    // Python: прочитать объявление по ссылке
+        const body = await req.json().catch(() => ({}));
+        try { return json({ ok: true, ...(await linkFacts(env, String(body.url || ""))) }); }
+        catch (e) { return json({ ok: false, error: String(e.message || e) }, 502); }
+      }
       if (p === "/svc/repair" && req.method === "POST") {  // Python: ремонт по фото объявления
         const body = await req.json().catch(() => ({}));
         try { return json({ ok: true, repair: await repairFromPhotos(env, body) }); }

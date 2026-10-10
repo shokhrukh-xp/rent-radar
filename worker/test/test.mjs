@@ -2,7 +2,7 @@
 // D1 эмулируется на node:sqlite, Telegram / Gemini / GitHub — подменой fetch.
 import { DatabaseSync } from "node:sqlite";
 import assert from "node:assert/strict";
-import worker, { repairFromPhotos, parseNum, applyPatch, essentialsOk, finalAns, handleUpdate, summary, pairsToSet, OWNER_KB, BROKER_KB, BTN, parseWhen, PROFILE, interviewCore } from "../src/index.js";
+import worker, { repairFromPhotos, linkFacts, parseNum, applyPatch, essentialsOk, finalAns, handleUpdate, summary, pairsToSet, OWNER_KB, BROKER_KB, BTN, parseWhen, PROFILE, interviewCore } from "../src/index.js";
 
 function d1() {
   const s = new DatabaseSync(":memory:");
@@ -508,3 +508,18 @@ geminiCalls.length = 0;
 assert.equal((await repairFromPhotos(env, { urls: ["https://img.test/404.jpg"] })).photos, 0);     // нет фото — модель не зовём
 assert.equal(geminiCalls.length, 0);
 console.log("OK — ремонт по фото: картинки в модель, нормализация, без фото — без вызова");
+
+// ── ссылка от владельца → Python; объявление по ссылке читает модель
+sent.length = 0;
+let lr = await handleUpdate(env, msg("найди похожие https://www.olx.uz/d/obyavlenie/kvartira-ID3XyZ.html"));
+assert.equal(lr, "link");
+assert.ok(texts().some(t => /Открываю объявление/.test(t)));
+geminiQueue.push({ opened: true, facts: [{ k: "price", v: "52 000" }, { k: "currency", v: "у.е." }, { k: "rooms", v: "2" },
+  { k: "seller_type", v: "owner" }, { k: "district", v: "Юнусабад" }, { k: "foo", v: "x" }] });
+let lf = await linkFacts(env, "https://www.olx.uz/d/x.html");
+assert.equal(lf.opened, true); assert.equal(lf.facts.price, 52000); assert.equal(lf.facts.seller_type, "owner");
+assert.equal(lf.facts.district, "Юнусабад"); assert.equal(lf.facts.foo, undefined);
+assert.ok(geminiCalls.at(-1).includes("url_context"));
+geminiQueue.push({ opened: false, facts: [] });
+assert.equal((await linkFacts(env, "https://www.olx.uz/d/y.html")).opened, false);
+console.log("OK — ссылки: владелец прислал ссылку → Python; модель читает объявление, не открылось — так и говорим");

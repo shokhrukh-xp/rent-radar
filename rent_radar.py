@@ -96,7 +96,7 @@ DEFAULT_CONFIG = {
         "max_owner_ads": 2,          # у собственника 1–2 объявления, у агентства — десятки
         "first_run_limit": 25,       # не больше стольких уведомлений за один проход
         "uybor": {
-            "enabled": True, "interval_seconds": 180,
+            "enabled": True, "interval_seconds": 60,
             "region_id": 13, "category_id": 7, "limit": 100,   # 100 — максимум API
         },
     },
@@ -1143,18 +1143,20 @@ def _msg_ids(resp) -> list:
     return [m["message_id"] for m in items if isinstance(m, dict) and m.get("message_id")]
 
 
-def send_listing(cfg, settings: dict, l: dict, likely_makler: bool, text: str = None):
+def send_listing(cfg, settings: dict, l: dict, likely_makler: bool, text: str = None, silent=False):
     """Уведомление об объявлении: альбом с фото, если они есть и включены.
-    Возвращает id отправленных сообщений (или True, если id неизвестны); False — не ушло."""
+    Возвращает id отправленных сообщений (или True, если id неизвестны); False — не ушло.
+    silent — без звука (ночью)."""
     text = text or format_message(l, cfg, likely_makler)
     photos = (l.get("photo_urls") or []) if settings.get("photos", True) else []
+    quiet = {"disable_notification": True} if silent else {}
     if photos:
         media = [{"type": "photo", "media": u} for u in photos[:4]]
         media[0]["caption"] = text[:1000]
         media[0]["parse_mode"] = "HTML"
         r = tg_call(cfg, "sendMediaGroup", {
             "chat_id": cfg["telegram_chat_id"],
-            "media": json.dumps(media),
+            "media": json.dumps(media), **quiet,
         })
         if r is not None:
             return _msg_ids(r) or True
@@ -1162,8 +1164,14 @@ def send_listing(cfg, settings: dict, l: dict, likely_makler: bool, text: str = 
         if up:
             return up
         log.info("Фото не отправились, шлю текстом: %s", l["title"][:50])
-    r = tg_call(cfg, "sendMessage", {"chat_id": cfg["telegram_chat_id"], "text": text, "parse_mode": "HTML"})
+    r = tg_call(cfg, "sendMessage", {"chat_id": cfg["telegram_chat_id"], "text": text, "parse_mode": "HTML", **quiet})
     return False if r is None else (_msg_ids(r) or True)
+
+
+def is_night(now=None) -> bool:
+    """23:00–08:00 по Ташкенту: срочное присылаем, но без звука."""
+    h = (now or datetime.now(timezone.utc)).astimezone(TASHKENT_TZ).hour
+    return h >= 23 or h < 8
 
 
 # ------------------------------------------------- настройки через бота ----
@@ -2022,7 +2030,8 @@ def show_site_listing(cfg, key) -> str:
         if not row:
             return "Объявление не найдено"
         l = json.loads(row[0] or "{}")
-        if sale_sources.photo_repair(cfg, l):
+        fresh = sale_sources.refresh_listing(l)      # у Joymee ссылки на фото живут 10 минут
+        if sale_sources.photo_repair(cfg, l) or fresh:
             sst.conn.execute("UPDATE listings SET data=? WHERE key=?", (sst.pack(l), l["key"]))
             sst.conn.commit()
         ids = send_listing(cfg, {"photos": True}, l, False, text=format_sale_message(l, cfg))
@@ -2032,6 +2041,112 @@ def show_site_listing(cfg, key) -> str:
     finally:
         sst.conn.close()
     return "" if l.get("photo_urls") else "Фото у этого объявления нет — только описание"
+
+
+LIKE_WORDS = re.compile(r"похож|такие же|такую же|подобн|аналог|o'?xshash|ўхшаш|shunga o", re.I)
+
+
+def link_kb(key, ids):
+    kb = sale_kb(key, ids)
+    kb["inline_keyboard"].append([{"text": "🔎 Похожие", "callback_data": f"L:sim:{key}"[:64]},
+                                  {"text": "🎯 Искать такие", "callback_data": f"L:like:{key}"[:64]}])
+    return kb
+
+
+def handle_link(cfg, store, msg):
+    """Владелец прислал ссылку на объявление: открыть, разобрать как карточку с анализом,
+    сказать, видели ли эту квартиру раньше (и у кого), по просьбе — показать похожие."""
+    url = msg["_link"]
+    note = (msg.get("text") or "").replace(url, " ").strip()
+    sst = Store(SALE_DB_PATH)
+    try:
+        try:
+            l, deal = sale_sources.listing_from_url(cfg, url)
+        except Exception as e:
+            log.warning("ссылка %s: %s", url[:80], e)
+            l, deal = None, "сайт не ответил"
+        if not l:
+            olx = "olx.uz" in url.lower()
+            send_telegram(cfg, f"🙈 Не получилось открыть объявление — {escape_html(deal)}."
+                          + (" OLX закрыт для программ, даже для меня." if olx else "")
+                          + "\nПришлите, пожалуйста, скриншот объявления (цена, параметры, фото) — разберу по нему.")
+            return
+        if deal in ("rent", "daily"):
+            send_telegram(cfg, "🔑 Это объявление об аренде. Разбор цены я делаю для покупки — "
+                               "а сам вариант сохранила, если нужен — пришлите скриншот, оформлю карточкой.")
+            return
+        sale_sources.normalize(l, cfg)
+        l["price_usd"] = to_usd(l.get("price_value"), l.get("price_currency"), cfg)
+        ss = effective_sale_cfg(cfg, store).get("sale_search") or {}
+        try:
+            classify_sale_seller(l, ss, sst, cfg)
+        except Exception as e:
+            log.info("продавец по ссылке не определён: %s", e)
+        sale_sources.photo_repair(cfg, l)
+        sc, why, _, _ = sale_sources.score(sst, l, cfg, ss)
+        l["score"], l["why"] = sc, why
+        before = sale_sources.seen_before(sst, l)
+        if sst.known(l["key"]):
+            sst.conn.execute("UPDATE listings SET data=?, notified=1 WHERE key=?", (sst.pack(l), l["key"]))
+            sst.conn.commit()
+        else:
+            sst.save(l, notified=True)
+        text = format_sale_message(l, cfg)
+        if before:
+            kinds = {"owner": "собственник", "agency": "маклер"}
+            first = before[0]
+            when = parse_iso(first.get("_first_seen") or "")
+            text += ("\n\n👀 <b>Эту квартиру я уже видела</b>: " + ", ".join(
+                f'<a href="{o.get("url")}">{escape_html(o.get("site") or "Uybor")}</a> — ${_money(o.get("price_usd") or 0)}'
+                + (f' ({kinds[o["seller_kind"]]})' if o.get("seller_kind") in kinds else "") for o in before)
+                + (f'. Впервые — {when.astimezone(TASHKENT_TZ).strftime("%d.%m %H:%M")}' if when else ""))
+        if not l.get("price_usd"):
+            text += "\n\n⚠️ Цену на странице не нашла — разбор неполный."
+        ids = send_listing(cfg, {"photos": True}, l, False, text=text)
+        send_sale_analysis(cfg, sst, l, kb=link_kb(l["key"], ids))
+        if LIKE_WORDS.search(note):
+            send_similar(cfg, sst, l)
+    finally:
+        sst.conn.close()
+
+
+def send_similar(cfg, sst, l) -> int:
+    found = sale_sources.similar(sst, l)
+    if not found:
+        send_telegram(cfg, "🔎 Похожих за последние полтора месяца не нашла. Нажмите «🎯 Искать такие» — "
+                           "буду ловить новые и пришлю, как только появятся.")
+        return 0
+    for o in found:                       # чтобы 📷/👍 по номеру работали и для объявлений из среза Uybor
+        if not sst.known(o["key"]):
+            sst.save({**o, "text": o.get("text") or ""}, notified=True)
+    top = [{"key": o["key"], "line": sale_sources.pick_line(o, o.get("why") or [])} for o in found]
+    where = ", ".join(x for x in (f'{l["rooms"]}-комн' if l.get("rooms") else "", l.get("district") or "") if x)
+    text, kb = sale_sources._pick_message(
+        top, f"🔎 <b>Похожие</b>{' · ' + escape_html(where) if where else ''} · ±20% к цене — {len(top)} шт., "
+             "дешёвые за м² сверху")
+    tg_call(cfg, "sendMessage", {"chat_id": cfg["telegram_chat_id"], "text": text, "parse_mode": "HTML",
+                                 "disable_web_page_preview": True, "reply_markup": json.dumps(kb, ensure_ascii=False)})
+    sst.set_kv("last_pick", top)
+    return len(top)
+
+
+def search_like(cfg, store, l) -> str:
+    """«🎯 Искать такие»: условия поиска — по этому объявлению (комнаты, район, цена +10%)."""
+    ans = dict((concierge.get_anketa(store).get("ans") or {}))
+    ans.update(deal="buy", object="flat", city="tashkent")
+    if l.get("rooms"):
+        ans["rooms"] = [str(l["rooms"])]
+    if l.get("district") in DISTRICT_LIST:
+        ans["districts"] = [str(DISTRICT_LIST.index(l["district"]))]
+        ans.pop("districts_any", None)
+    if l.get("price_usd"):
+        ans["budget"] = str(int(round(l["price_usd"] * 1.1, -3)))
+    concierge.apply_webapp_data(cfg, store, json.dumps({"v": 3, "replace": True, "src": "link", "ans": ans}))
+    bits = [f'{l["rooms"]}-комн' if l.get("rooms") else "", l.get("district") or "",
+            f'до ${_money(int(ans["budget"]))}' if ans.get("budget") else ""]
+    send_telegram(cfg, "🎯 <b>Ищу такие же</b>: " + escape_html(" · ".join(b for b in bits if b))
+                  + "\nУже пробегаюсь по сайтам — свежие от собственников пришлю сразу 🔄")
+    return ""
 
 
 def _plain(html_text) -> str:
@@ -2308,6 +2423,23 @@ def handle_callback(data: str, settings: dict, store, cfg: dict, message_id=None
         finally:
             sst.conn.close()
         return ("" if n else "Подборок ещё не было — скоро будет 🙂"), None
+    if d.startswith(("L:sim:", "L:like:")):    # похожие / искать такие же
+        key = d.split(":", 2)[2]
+        if not SALE_DB_PATH.exists():
+            return "Объявление не найдено", None
+        sst = Store(SALE_DB_PATH)
+        try:
+            row = sst.conn.execute("SELECT data FROM listings WHERE key LIKE ?",
+                                   (key.replace("%", "") + "%",)).fetchone()
+            if not row:
+                return "Объявление не найдено", None
+            l = json.loads(row[0] or "{}")
+            if d.startswith("L:sim:"):
+                send_similar(cfg, sst, l)
+                return "", None
+        finally:
+            sst.conn.close()
+        return search_like(cfg, store, l), None
     if d.startswith("L:v:"):                   # фото и разбор объявления из подборки
         return show_site_listing(cfg, d[4:].split("|")[0]), None
     if d.startswith("L:"):                     # объявление с сайта: в шортлист / мимо
@@ -2711,6 +2843,9 @@ def process_commands(cfg: dict, store, long_poll: int = 0) -> dict:
             handle_broker_message(cfg, store, msg)   # это маклер прислал вариант
             continue
 
+        if msg.get("_link"):                 # воркер: владелец прислал ссылку на объявление
+            handle_link(cfg, store, msg)
+            continue
         if msg.get("_owner_offer"):          # воркер: владелец переслал/вставил вариант
             handle_owner_offer(cfg, store, msg)
             changed = True
@@ -3193,7 +3328,7 @@ def run_sale_search(cfg: dict, store, settings: dict, force: bool = False) -> in
     day = sale_sources.day_stats(store)
     cap = ss.get("instant_per_day", 6)         # сразу — не больше стольких в день, остальное подборкой
     photo_budget = [ss.get("photo_checks_per_run", 25)]   # ремонт по фото — модель, не больше стольких за проход
-    sent = queued = 0
+    sent = queued = capped = 0                 # capped — в счёт дневного лимита «сразу»
     for l in unique[:ss.get("first_run_limit", 25) * 4]:
         dup = find_sale_dup(l, store, cfg) or sale_sources.structural_dup(store, l)
         if dup:
@@ -3205,27 +3340,56 @@ def run_sale_search(cfg: dict, store, settings: dict, force: bool = False) -> in
             photo_budget[0] -= 1
         sc, why, strong, _ = sale_sources.score(store, l, cfg, ss)
         l["score"], l["why"] = sc, why
-        if strong and day.get("instant", 0) + sent < cap:
-            ids = send_listing(cfg, settings, l, False, text=format_sale_message(l, cfg))
+        mins = fresh_owner_minutes(l, ss) if not first else None     # первый проход — без «горячих»
+        if mins is not None or (strong and day.get("instant", 0) + capped < cap):
+            silent = is_night()
+            text = format_sale_message(l, cfg)
+            if mins is not None:
+                text = (f"🔥 <b>Только что от собственника</b> · выложено {ago_text(mins)}\n"
+                        "Позвоните первым — такие варианты маклеры перехватывают за пару часов.\n\n" + text)
+            ids = send_listing(cfg, settings, l, False, text=text, silent=silent)
             if not ids:
                 log.info("[продажа] не отправилось, повторю позже: %s", l["title"][:45])
                 break     # не сохраняем — объявление придёт в следующий проход
             store.save(l, notified=True)
             sent += 1
-            log.info("[продажа] сразу (%s): %s", sc, l["title"][:60])
-            send_sale_analysis(cfg, store, l, kb=sale_kb(l["key"], ids))
+            capped += mins is None
+            log.info("[продажа] %s (%s): %s", "горячее от собственника" if mins is not None else "сразу", sc, l["title"][:60])
+            send_sale_analysis(cfg, store, l, kb=sale_kb(l["key"], ids), silent=silent)
             sale_sources.remember_shown(store, l, why)
             time.sleep(1)
         else:
             store.save(l, notified=False)
             sale_sources.queue_pick(store, l, sc, why)
             queued += 1
-    sale_sources.day_stats(store, {"seen": seen, "fit": len(unique), "instant": sent, "queued": queued})
+    sale_sources.day_stats(store, {"seen": seen, "fit": len(unique), "instant": capped,
+                                   "hot": sent - capped, "queued": queued})
     if first:                                  # первый проход по новым условиям — для «на сайтах пусто → маклеры»
         store.set_kv("first_pass", {"at": datetime.now(timezone.utc).isoformat(), "fit": len(unique)})
     if first and queued:
         sale_sources.send_pick(cfg, store, reason="Что нашлось сейчас")
     return sent
+
+
+def fresh_owner_minutes(l: dict, ss: dict):
+    """Сколько минут назад собственник выложил объявление — если недавно (по умолчанию ≤ 3 ч), иначе None.
+    Такое присылаем сразу и вне дневного лимита: успеть раньше маклеров."""
+    if l.get("seller_kind") != "owner":
+        return None
+    a = age_days(l.get("created_at") or "")
+    if a is None:
+        return None
+    mins = max(0, a * 1440)
+    return mins if mins <= ss.get("fresh_owner_minutes", 180) else None
+
+
+def ago_text(mins: float) -> str:
+    if mins < 2:
+        return "только что"
+    if mins < 60:
+        return f"{mins:.0f} мин назад"
+    h, m = divmod(int(mins), 60)
+    return f"{h} ч {m:02d} мин назад"
 
 
 def sale_district_ids(ss: dict) -> list:
@@ -3243,7 +3407,7 @@ def sale_kb(key, card_ids=None):
                                  {"text": "👎 Мимо", "callback_data": no[:64]}]]}
 
 
-def send_sale_analysis(cfg: dict, store, l: dict, kb=None) -> bool:
+def send_sale_analysis(cfg: dict, store, l: dict, kb=None, silent=False) -> bool:
     """Анализ варианта — отдельным сообщением: в подпись к фото (1024 символа) не влезает.
     С кнопками «В шортлист / Мимо», если передали kb."""
     try:
@@ -3255,7 +3419,7 @@ def send_sale_analysis(cfg: dict, store, l: dict, kb=None) -> bool:
         return bool(text) and send_telegram(cfg, text)
     return tg_call(cfg, "sendMessage", {
         "chat_id": cfg["telegram_chat_id"], "text": text or "Что делаем с этим вариантом?",
-        "parse_mode": "HTML", "disable_web_page_preview": True,
+        "parse_mode": "HTML", "disable_web_page_preview": True, **({"disable_notification": True} if silent else {}),
         "reply_markup": json.dumps(kb, ensure_ascii=False)}) is not None
 
 
@@ -3485,7 +3649,7 @@ def run():
         force_sale = bool(force_flag)
         fresh = bool(store.get_kv("fresh_start"))              # после сброса — ждём новых параметров из чата
         if sale_store is not None and not fresh and (once or now >= next_sale or force_sale):
-            next_sale = now + (sale_cfg.get("uybor") or {}).get("interval_seconds", 180)
+            next_sale = now + (sale_cfg.get("uybor") or {}).get("interval_seconds", 60)
             if force_sale:
                 store.set_kv("sale_force", False)
             try:
