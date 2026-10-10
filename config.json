@@ -28,11 +28,12 @@
   },
   "sources": {
     "olx": {
-      "enabled": true,
+      "enabled": false,
       "interval_seconds": 60,
       "category_id": 1147,
       "city_id": 4,
-      "owner_type": "private"
+      "owner_type": "private",
+      "note": "с 10.2026 OLX закрыт для программ (403) — не стучимся; объявления OLX — ссылкой или скриншотом"
     },
     "uybor": {
       "enabled": true,
@@ -41,9 +42,10 @@
       "category_id": 7
     },
     "birbir": {
-      "enabled": true,
+      "enabled": false,
       "interval_seconds": 300,
-      "list_url": "https://birbir.uz/ru/tashkent/cat/nedvizhimost/arenda/kvartiry"
+      "list_url": "https://birbir.uz/ru/tashkent/cat/nedvizhimost/arenda/kvartiry",
+      "note": "с 10.2026 отвечает 403 — выключен"
     },
     "telegram": {
       "enabled": true,
