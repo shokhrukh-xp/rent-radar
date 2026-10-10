@@ -626,6 +626,19 @@ def verify_channel(name, now=None):
                 "reason": "это группа, закрытый канал или канала нет — читать умею только открытые каналы"}
     sm = re.search(r'<span class="counter_value">([^<]+)</span>\s*<span class="counter_type">(?:subscribers|subscriber)', page)
     texts = [html_lib.unescape(re.sub(r"<[^>]+>", " ", m)) for m in rr.TG_TEXT_RE.findall(page)]
+    ids = [int(i) for _, i in rr.TG_POST_RE.findall(page)]
+    if len(texts) < 6 and ids:                    # альбомы: на странице 2–3 поста — берём ещё одну, постарше
+        try:
+            r2 = requests.get(f"https://t.me/s/{name}?before={min(ids)}", headers=rr.HEADERS, timeout=20)
+            if r2.ok:
+                texts += [html_lib.unescape(re.sub(r"<[^>]+>", " ", m)) for m in rr.TG_TEXT_RE.findall(r2.text)]
+                for t in rr.TG_TIME_RE.findall(r2.text):
+                    try:
+                        times.append(datetime.fromisoformat(t))
+                    except ValueError:
+                        pass
+        except requests.RequestException:
+            pass
     newest_days = (now - max(times)).total_seconds() / 86400
     span_days = max((max(times) - min(times)).total_seconds() / 86400, 1 / 24)
     ads = [t for t in texts if len(AD_WORDS.findall(t)) >= 3]
@@ -638,7 +651,7 @@ def verify_channel(name, now=None):
     out["deal"] = deal
     if newest_days > 7:
         return {**out, "ok": False, "reason": f"последний пост {newest_days:.0f} дн. назад — канал не живой"}
-    if len(ads) < 3 or len(ads) < len(texts) * 0.3:
+    if len(ads) < min(3, max(1, len(texts))) or len(ads) < len(texts) * 0.3:
         return {**out, "ok": False, "reason": "объявлений о недвижимости почти нет"}
     if tash < 2:
         return {**out, "ok": False, "reason": "не похоже на Ташкент"}
