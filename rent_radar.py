@@ -96,7 +96,7 @@ DEFAULT_CONFIG = {
         "max_owner_ads": 2,          # у собственника 1–2 объявления, у агентства — десятки
         "first_run_limit": 25,       # не больше стольких уведомлений за один проход
         "uybor": {
-            "enabled": True, "interval_seconds": 600,
+            "enabled": True, "interval_seconds": 180,
             "region_id": 13, "category_id": 7, "limit": 100,   # 100 — максимум API
         },
     },
