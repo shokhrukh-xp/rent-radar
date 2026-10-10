@@ -3537,7 +3537,7 @@ def run():
 
     sale_cfg = effective_sale_cfg(cfg, store).get("sale_search") or {}   # покупка из чата включает поиск
     sale_store, next_sale = None, 0.0
-    next_sale_brokers = 0.0
+    next_sale_brokers = time.time() + 120     # сначала — поиск по сайтам, сбор маклеров потом
     if sale_cfg.get("enabled") and (sale_cfg.get("uybor") or {}).get("enabled", True):
         sale_store = Store(SALE_DB_PATH)
         sale_store.prune()
