@@ -2414,10 +2414,11 @@ with mock.patch.object(SS, "verify_channel", fake_verify), mock.patch.object(SS,
     assert rr.live_channels(hs2, ["alive_a", "quiet_b", "gone_c", "sale_d"]) == ["alive_a", "quiet_b", "sale_d"]
     assert "Отключила @gone_c" in HT2[-1]["text"]
     assert rr.recheck_channels(ccfg, hs2) == {}                                 # раньше недели — не проверяем
-    r2 = rr.recheck_channels(ccfg, hs2, force=True)
+    assert rr.recheck_channels(ccfg, hs2, force=True)["off"] == []             # повтор в тот же день — не «вторая неделя»
+    r2 = rr.recheck_channels(ccfg, hs2, force=True, now=datetime.now(timezone.utc) + timedelta(days=7))
     assert r2["off"] == ["quiet_b"]                                             # вторую неделю подряд — отключаем
     VERD["gone_c"] = {"ok": True}
-    r3 = rr.recheck_channels(ccfg, hs2, force=True)
+    r3 = rr.recheck_channels(ccfg, hs2, force=True, now=datetime.now(timezone.utc) + timedelta(days=14))
     assert r3["back"] == ["gone_c"] and "Вернула @gone_c" in HT2[-1]["text"]
     assert not rr.channel_paused(hs2, "sale_d")                                 # сбой сети — не в счёт
     hs2.set_kv("anketa", {"ans": {"deal": "buy", "object": "flat", "budget": "50000"}})

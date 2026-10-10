@@ -2202,7 +2202,9 @@ def recheck_channels(cfg, store, now=None, force=False) -> dict:
                 back.append(n)
             h = {"ok": True, "fails": 0, "paused": False}
         else:
-            fails = h.get("fails", 0) + 1
+            prev = parse_iso(h.get("checked") or "")
+            recent = prev is not None and (now - prev).total_seconds() < 5 * 86400
+            fails = h.get("fails", 0) + (0 if recent and not h.get("ok", True) else 1)   # «две недели подряд» — не две проверки за день
             hard = (v.get("newest_days") or 0) > 30 or "группа" in (v.get("reason") or "")
             if not h.get("paused") and (hard or fails >= 2):
                 off.append((n, v.get("reason")))
