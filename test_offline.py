@@ -2285,3 +2285,57 @@ assert a_["deal"] == "buy" and a_["rooms"] == ["2"] and rr.DISTRICT_LIST[int(a_[
 assert any("Ищу такие же" in (pl.get("text") or "") for m, pl in LT)
 ldb.unlink(missing_ok=True); lrd.unlink(missing_ok=True)
 print("OK — ссылка: карточка с разбором, «уже видела у маклера», похожие (сайты + срез Uybor), «искать такие»")
+
+# ============ аренда: Joymee и Realt24 источниками, каналы, ссылки на аренду ============
+assert rr._sale_post("🏢 Квартира сотилади 📐 67 м² 3 хона") and not rr._sale_post("Квартира ижарага берилади, ойига 500$")
+assert any(w in "ҳовли уй сотилади 4 сотих" for w in rr.SALE_NOT_FLAT_WORDS)
+assert "uybozor_toshkent_uybor" in SS.SALE_CHANNELS
+assert "kvartira_bez_posrednika" in json.load(open(Path(rr.__file__).parent / "config.json"))["sources"]["telegram"]["channels"]
+it24 = {"id": 5, "name": {"ru": "2-комнатная квартира − 54 м², 3/9 этаж"}, "description": {"ru": "Сдаётся, Мирабад"},
+        "address": {"fullAddress": {"ru": "Ташкент, Мирабадский район"}}, "price": {"usd": 650}, "phone": "+998 90 123 45 67",
+        "user": {"id": 7, "role": {"key": "owner"}}, "publishedAt": _iso(0.01)}
+lr24 = SS._realt24_listing(rr, it24, "rent")
+assert lr24["key"] == "realt24:5" and lr24["rooms"] == 2 and lr24["area"] == 54 and lr24["is_business"] is False and lr24["price_value"] == 650
+assert SS._realt24_listing(rr, dict(it24, address={"fullAddress": {"ru": "Самарканд"}}), "rent") is None
+JR = {"results": [{"id": 31}, {"id": 32}]}
+JD = {31: {"title": "Ижарага 2 хона Юнусобод", "pricing": {"currency": 2, "price": "600"}, "advertiser_type": 1,
+           "detail": {"room_quantity": 2, "area_m2": 50}, "district": {"name": "Yunusobod"}, "ads_at": _iso(0.01)},
+      32: {"title": "Аренда", "pricing": {"currency": 2, "price": "700"}, "advertiser_type": 2, "detail": {"room_quantity": 2}}}
+def fake_jm(url, params=None, headers=None, timeout=None):
+    if url.rstrip("/").split("/")[-1].isdigit():
+        return FakeUy(JD[int(url.rstrip("/").split("/")[-1])])
+    return FakeUy(JR)
+jdb = Path("/tmp/test_jrent.db"); jdb.unlink(missing_ok=True)
+with mock.patch.object(rr, "DB_PATH", jdb), mock.patch.object(rr.requests, "get", fake_jm), mock.patch.object(SS.requests, "get", fake_jm), \
+        mock.patch.object(rr.time, "sleep"):
+    rr.Store(jdb).conn.close()
+    got = rr.fetch_joymee_rent({"details_per_pass": 8}, cfg)
+assert [l["key"] for l in got] == ["joymee:31", "joymee:32"] and got[0]["is_business"] is False and got[1]["is_business"] is True
+assert got[0]["rooms"] == 2 and got[0]["district"] == "Юнусабад"
+jdb.unlink(missing_ok=True)
+# ссылка на аренду: карточка, сравнение с похожими, «искать такие» → аренда
+rdb2 = Path("/tmp/test_rlink_radar.db"); rdb2.unlink(missing_ok=True); rs2 = rr.Store(rdb2)
+sdb2 = Path("/tmp/test_rlink_sale.db"); sdb2.unlink(missing_ok=True); ss2 = rr.Store(sdb2); mk.ensure_tables(ss2.conn)
+for i, pr in enumerate([560, 600, 640]):
+    ss2.conn.execute("INSERT INTO market(key, op, district, rooms, area, price_usd, new_building, dorm, repair, first_seen, last_seen) "
+                     "VALUES(?,?,?,?,?,?,?,?,?,?,?)", (f"rent:uybor:{600 + i}", "rent", "Юнусабад", 2, 50, pr, 0, 0, "evro", "x", "x"))
+ss2.conn.commit(); ss2.conn.close()
+rent_l = SS.listing_from_facts("https://www.olx.uz/d/obyavlenie/arenda-ID9.html",
+                               {"deal": "rent", "price": 700, "currency": "USD", "rooms": 2, "area": 50, "district": "Юнусабад",
+                                "seller_type": "owner", "title": "Сдаётся 2-комн Юнусабад"})
+RT = []
+def rent_tg(cfg_, method, payload, timeout=20, quiet=False):
+    RT.append((method, payload)); return {"ok": True, "result": {"message_id": 9}}
+with mock.patch.object(rr, "SALE_DB_PATH", sdb2), mock.patch.object(rr, "tg_call", rent_tg), \
+        mock.patch.object(SS, "listing_from_url", lambda c, u: (dict(rent_l), "rent")):
+    rr.handle_link(cfg, rs2, {"_link": rent_l["url"], "text": rent_l["url"] + " похожие есть?"})
+card = next(pl.get("text") or pl.get("caption") or "" for m, pl in RT if "Похожие (3)" in (pl.get("text") or ""))
+assert "~$600/мес" in card and "на 17% дороже" in card, card
+assert any("Похожая аренда" in (pl.get("text") or "") for m, pl in RT)
+assert rs2.known("link:" + rent_l["key"].split(":")[-1])
+with mock.patch.object(rr, "SALE_DB_PATH", sdb2), mock.patch.object(rr, "tg_call", rent_tg):
+    rr.handle_callback("L:like:link:" + rent_l["key"].split(":")[-1], rr.default_settings(), rs2, cfg, 1)
+a2 = cg.get_anketa(rs2)["ans"]
+assert a2["deal"] == "rent" and a2["budget"] == "770" and rs2.get_kv("settings")["max_price_usd"] == 770
+rdb2.unlink(missing_ok=True); sdb2.unlink(missing_ok=True)
+print("OK — аренда: Realt24 и Joymee источниками, узбекская кириллица в каналах, ссылка на аренду — сравнение, похожие, «искать такие»")

@@ -31,8 +31,9 @@ REALTING_LIST = "https://realting.uz/apartments"
 REALTING_ROOMS = {1: "1-bedroom", 2: "2-bedrooms", 3: "3-bedrooms", 4: "4-bedrooms"}
 YU_API = "https://yangiuylar.uz/api"
 YU_TASHKENT = 12                       # region_id «г. Ташкент» в справочнике Yangiuylar
-SALE_CHANNELS = ["Kvartiritashkenta", "kvartiry_tashkent", "tashkent_nedvizhimost",
-                 "toshkent_kvartira", "uybor", "uybozor"]
+# проверены 10.10.2026: публичное превью t.me/s работает, свежие объявления о продаже в Ташкенте
+SALE_CHANNELS = ["Kvartiritashkenta", "kvartiry_tashkent", "uybozor_toshkent_uybor", "tashkent_nedvizhimost",
+                 "uybozor", "domtutuzb", "kivartirauz"]
 
 # имя источника для карточки и ссылки «Открыть на …»
 SITE = {"realt24": "Realt24", "joymee": "Joymee", "realting": "Realting",
@@ -63,6 +64,38 @@ FLOOR_RE = re.compile(r"(\d{1,2})\s*/\s*(\d{1,2})")
 
 # ------------------------------------------------------------------ Realt24 --
 
+def _realt24_listing(rr, it, deal="sale"):
+    """Объявление Realt24 из API → наше (продажа или аренда); не Ташкент — None."""
+    addr = (((it.get("address") or {}).get("fullAddress") or {}).get("ru") or "")
+    if not addr.startswith("Ташкент"):
+        return None
+    name = ((it.get("name") or {}).get("ru") or "")
+    desc = ((it.get("description") or {}).get("ru") or "")
+    rooms = 6 if name.startswith("Более 5") else rr.as_int((ROOMS_RE.search(name) or [None, None])[1])
+    area = _num((AREA_RE.search(name) or [None, None])[1])
+    fl = FLOOR_RE.search(name)
+    role = (((it.get("user") or {}).get("role") or {}).get("key") or "")
+    hint = "agency" if it.get("isCommissioned") or role in ("agent", "agency", "realtor") or it.get("company") \
+        else ("owner" if role == "owner" else "")
+    photos = [x.get("w600") or x.get("original") for x in (it.get("imageSets") or [])[:6]
+              if isinstance(x, dict) and (x.get("w600") or x.get("original"))]
+    sale = deal == "sale"
+    return _listing(
+        key=f"sale:realt24:{it.get('id')}" if sale else f"realt24:{it.get('id')}",
+        source="Realt24 · продажа" if sale else "Realt24", site="Realt24",
+        url=REALT24_URL.format(id=it.get("id")), title=name[:90], text=(desc or name)[:900],
+        price_value=((it.get("price") or {}).get("usd")), price_currency="USD",
+        rooms=rooms, area=rr.sane(area, 10, 500),
+        floor=rr.sane(rr.as_int(fl.group(1)), 1, 60) if fl else None,
+        floors_total=rr.sane(rr.as_int(fl.group(2)), 1, 60) if fl else None,
+        district=rr.canon_district(addr, desc), district_raw=addr,
+        phones=rr.extract_phones(str(it.get("phone") or "")),
+        created_at=it.get("publishedAt") or it.get("createdAt"),
+        seller_id=f"realt24:{(it.get('user') or {}).get('id')}", seller_hint=hint,
+        is_business=None if not hint else hint != "owner",
+        photo_urls=photos, new_building=bool(it.get("residence")))
+
+
 def fetch_realt24(ss, cfg, store):
     rr = _rr()
     out = []
@@ -73,31 +106,9 @@ def fetch_realt24(ss, cfg, store):
         r.raise_for_status()
         d = r.json()
         for it in d.get("data") or []:
-            addr = (((it.get("address") or {}).get("fullAddress") or {}).get("ru") or "")
-            if not addr.startswith("Ташкент"):
-                continue
-            name = ((it.get("name") or {}).get("ru") or "")
-            desc = ((it.get("description") or {}).get("ru") or "")
-            rooms = 6 if name.startswith("Более 5") else rr.as_int((ROOMS_RE.search(name) or [None, None])[1])
-            area = _num((AREA_RE.search(name) or [None, None])[1])
-            fl = FLOOR_RE.search(name)
-            role = (((it.get("user") or {}).get("role") or {}).get("key") or "")
-            hint = "agency" if it.get("isCommissioned") or role in ("agent", "agency", "realtor") or it.get("company") \
-                else ("owner" if role == "owner" else "")
-            photos = [x.get("w600") or x.get("original") for x in (it.get("imageSets") or [])[:6]
-                      if isinstance(x, dict) and (x.get("w600") or x.get("original"))]
-            out.append(_listing(
-                key=f"sale:realt24:{it.get('id')}", source="Realt24 · продажа", site="Realt24",
-                url=REALT24_URL.format(id=it.get("id")), title=name[:90], text=(desc or name)[:900],
-                price_value=((it.get("price") or {}).get("usd")), price_currency="USD",
-                rooms=rooms, area=rr.sane(area, 10, 500),
-                floor=rr.sane(rr.as_int(fl.group(1)), 1, 60) if fl else None,
-                floors_total=rr.sane(rr.as_int(fl.group(2)), 1, 60) if fl else None,
-                district=rr.canon_district(addr, desc), district_raw=addr,
-                phones=rr.extract_phones(str(it.get("phone") or "")),
-                created_at=it.get("publishedAt") or it.get("createdAt"),
-                seller_id=f"realt24:{(it.get('user') or {}).get('id')}", seller_hint=hint,
-                photo_urls=photos, new_building=bool(it.get("residence"))))
+            l = _realt24_listing(rr, it, "sale")
+            if l:
+                out.append(l)
         if not (d.get("meta") or {}).get("hasNext"):
             break
         time.sleep(0.5)
@@ -538,6 +549,47 @@ def similar(store, l, n=7, days=45):
         if not any(same_flat(o, u) for u in uniq):
             uniq.append(o)
     return uniq[:n]
+
+
+def similar_rent(radar_store, sale_store, l, n=7, days=30):
+    """Похожая аренда: собранное радаром (все сайты и каналы) + срез Uybor; те же комнаты и район, цена ±20%."""
+    import market
+    rr = _rr()
+    p = l.get("price_usd") or rr.to_usd(l.get("price_value"), l.get("price_currency"), {"uzs_per_usd": 12000})
+    if not p:
+        return []
+    since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+
+    def fits(o):
+        if o.get("key") == l.get("key"):
+            return False
+        if l.get("rooms") and o.get("rooms") and int(o["rooms"]) != int(l["rooms"]):
+            return False
+        if l.get("district") and o.get("district") and o["district"] != l["district"]:
+            return False
+        return bool(o.get("price_usd")) and 0.8 * p <= o["price_usd"] <= 1.2 * p
+
+    out, seen = [], set()
+    for data, in radar_store.conn.execute(
+            "SELECT data FROM listings WHERE first_seen >= ? AND dup_of IS NULL AND price_usd BETWEEN ? AND ?",
+            (since, p * 0.8, p * 1.2)):
+        try:
+            o = json.loads(data or "{}")
+        except ValueError:
+            continue
+        o["price_usd"] = o.get("price_usd") or rr.to_usd(o.get("price_value"), o.get("price_currency"), {"uzs_per_usd": 12000})
+        if fits(o) and o.get("url") not in seen:
+            out.append(o); seen.add(o.get("url"))
+    if sale_store is not None:
+        market.ensure_tables(sale_store.conn)
+        for key, d, rooms, ar, price in sale_store.conn.execute(
+                "SELECT key, district, rooms, area, price_usd FROM market WHERE op='rent' AND removed_at IS NULL "
+                "AND price_usd BETWEEN ? AND ?", (p * 0.8, p * 1.2)):
+            url = f"https://uybor.uz/listings/{key.rsplit(':', 1)[-1]}"
+            o = {"key": key, "district": d, "rooms": rooms, "area": ar, "price_usd": price, "url": url, "site": "Uybor"}
+            if fits(o) and url not in seen:
+                out.append(o); seen.add(url)
+    return sorted(out, key=lambda o: o["price_usd"])[:n]
 
 
 def photo_repair(cfg, l) -> bool:

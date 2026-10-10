@@ -49,13 +49,18 @@
     },
     "telegram": {
       "enabled": true,
-      "interval_seconds": 180,
+      "interval_seconds": 120,
       "channels": [
         "arentash",
-        "arendtashkent",
-        "arendatashkent_uz",
+        "arenda_kvartira_v_tashkente",
         "arendakvartir_uz",
-        "arenda_kvartira_v_tashkente"
+        "arendatashkent_uz",
+        "kvartira_bez_posrednika",
+        "bez_makler_kvartira_arenda_ijara",
+        "bezmakler_uz",
+        "toshkent_uylari_arenda_ijaraga",
+        "Iqtisodchi_kvartira",
+        "kivartirauz"
       ],
       "include_keywords": [
         "сда",
@@ -74,6 +79,16 @@
         "kerak",
         "izlayapman"
       ]
+    },
+    "joymee": {
+      "enabled": true,
+      "interval_seconds": 60,
+      "details_per_pass": 8
+    },
+    "realt24": {
+      "enabled": true,
+      "interval_seconds": 120,
+      "limit": 50
     }
   },
   "bot_username": "rano_smart_bot",

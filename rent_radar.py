@@ -668,11 +668,49 @@ def fetch_telegram(scfg: dict, cfg: dict) -> list:
     return out
 
 
+def fetch_realt24_rent(scfg: dict, cfg: dict) -> list:
+    """Аренда на Realt24: открытый API, телефон и признак посредника — сразу в списке."""
+    import sale_sources
+    r = requests.get(f"{REALT24_API}?{REALT24_Q['rent']}&currency=usd&sortBy=dateDesc&page=1"
+                     f"&perPage={scfg.get('limit', 50)}", headers=HEADERS, timeout=25)
+    r.raise_for_status()
+    me = sys.modules[__name__]
+    return [l for l in (sale_sources._realt24_listing(me, it, "rent") for it in r.json().get("data") or []) if l]
+
+
+def fetch_joymee_rent(scfg: dict, cfg: dict) -> list:
+    """Аренда на Joymee: список свежих (без комнат и телефона) + карточка только для новых."""
+    import sale_sources
+    params = dict(JOYMEE_Q["rent"], region=JOYMEE_TASHKENT, ordering="newest", page=1)
+    r = requests.get(JOYMEE_API, params=params, headers=HEADERS, timeout=25)
+    r.raise_for_status()
+    st = Store(DB_PATH)
+    try:
+        new = [x for x in r.json().get("results") or [] if not st.known(f"joymee:{x.get('id')}")]
+    finally:
+        st.conn.close()
+    me, out = sys.modules[__name__], []
+    for x in new[:scfg.get("details_per_pass", 8)]:
+        try:
+            det = sale_sources._joymee_detail(me, x["id"])
+        except (requests.RequestException, ValueError) as e:
+            log.info("[joymee] %s: %s", x.get("id"), e)
+            continue
+        l = sale_sources._joymee_listing(me, x["id"], det)
+        l.update(key=f"joymee:{x['id']}", source="Joymee",
+                 is_business={1: False, 2: True}.get(det.get("advertiser_type")))
+        out.append(l)
+        time.sleep(0.3)
+    return out
+
+
 SOURCE_FETCHERS = {
     "olx": fetch_olx,
     "uybor": fetch_uybor,
     "birbir": fetch_birbir,
     "telegram": fetch_telegram,
+    "realt24": fetch_realt24_rent,
+    "joymee": fetch_joymee_rent,
 }
 
 
@@ -1569,8 +1607,9 @@ SALE_BROKER_CHANNELS = [
     # арендные каналы тоже публикуют продажу — с них берём только объявления о продаже
     "arentash", "arendakvartir_uz", "arendatashkent_uz", "arenda_kvartira_v_tashkente",
 ]
-SALE_POST_WORDS = ("прода", "sotiladi", "sotuvda", "sotaman", "sotuv", "купить", "ипотек", "ipoteka")
-RENT_POST_WORDS = ("аренд", "сдает", "сдаёт", "сдается", "сдаётся", "ijara", "/мес", "oyiga",
+SALE_POST_WORDS = ("прода", "sotiladi", "sotuvda", "sotaman", "sotuv", "купить", "ипотек", "ipoteka",
+                   "сотилади", "сотувда", "сотаман")
+RENT_POST_WORDS = ("аренд", "сдает", "сдаёт", "сдается", "сдаётся", "ijara", "/мес", "oyiga", "ижара", "ойига",
                    "в месяц", "посуточ", "kunlik", "сниму", "ищу", "kerak")
 BROKER_POST_WORDS = ("агентств", "риелт", "риэлт", "маклер", "makler", "rieltor", "agentlik",
                      "комисси", "vositachi", "услуг", "xizmat", "realty", "estate")
@@ -2072,8 +2111,7 @@ def handle_link(cfg, store, msg):
                           + "\nПришлите, пожалуйста, скриншот объявления (цена, параметры, фото) — разберу по нему.")
             return
         if deal in ("rent", "daily"):
-            send_telegram(cfg, "🔑 Это объявление об аренде. Разбор цены я делаю для покупки — "
-                               "а сам вариант сохранила, если нужен — пришлите скриншот, оформлю карточкой.")
+            handle_rent_link(cfg, store, sst, l, note)
             return
         sale_sources.normalize(l, cfg)
         l["price_usd"] = to_usd(l.get("price_value"), l.get("price_currency"), cfg)
@@ -2110,6 +2148,57 @@ def handle_link(cfg, store, msg):
         sst.conn.close()
 
 
+def rent_key(l):
+    k = l.get("key") or ""
+    return k[5:] if k.startswith("sale:") else k                # аренда хранится в radar.db без «sale:»
+
+
+def handle_rent_link(cfg, store, sst, l, note=""):
+    """Ссылка на аренду: карточка с оценкой цены против похожих в аренде, «уже видела», похожие, «искать такие»."""
+    l = dict(l, key=rent_key(l), source=l.get("site") or "по ссылке")
+    l["price_usd"] = to_usd(l.get("price_value"), l.get("price_currency"), cfg)
+    try:
+        analyst.score_listing(l, store, cfg, analyst.market_stats(store), store.get_kv("settings") or {})
+    except Exception as e:
+        log.info("оценка аренды по ссылке: %s", e)
+    if store.known(l["key"]):
+        store.conn.execute("UPDATE listings SET data=?, notified=1 WHERE key=?", (store.pack(l), l["key"]))
+        store.conn.commit()
+    else:
+        store.save(l, notified=True)
+    text = format_message(l, cfg, l.get("is_business") is True)
+    sim = sale_sources.similar_rent(store, sst, l)
+    if sim:
+        med = sorted(o["price_usd"] for o in sim)[len(sim) // 2]
+        if l.get("price_usd"):
+            gap = l["price_usd"] / med - 1
+            text += (f"\n\n📊 Похожие ({len(sim)}) сдают в среднем за ~${_money(med)}/мес — "
+                     + (f"эта на {abs(gap) * 100:.0f}% {'дешевле' if gap < 0 else 'дороже'}" if abs(gap) >= 0.03 else "эта в рынке"))
+    ids = send_listing(cfg, {"photos": True}, l, False, text=text)
+    kb = {"inline_keyboard": [[{"text": "🔎 Похожие", "callback_data": f"L:sim:{l['key']}"[:64]},
+                               {"text": "🎯 Искать такие", "callback_data": f"L:like:{l['key']}"[:64]}]]}
+    tg_call(cfg, "sendMessage", {"chat_id": cfg["telegram_chat_id"], "text": "Что делаем с этой арендой?",
+                                 "reply_markup": json.dumps(kb, ensure_ascii=False)})
+    if LIKE_WORDS.search(note or ""):
+        send_similar_rent(cfg, store, sst, l)
+
+
+def send_similar_rent(cfg, store, sst, l) -> int:
+    found = sale_sources.similar_rent(store, sst, l)
+    if not found:
+        send_telegram(cfg, "🔎 Похожей аренды за последний месяц не нашла. Нажмите «🎯 Искать такие» — буду ловить новые.")
+        return 0
+    lines = [f"🔎 <b>Похожая аренда</b> · ±20% к цене — {len(found)} шт., дешёвые сверху", ""]
+    for i, o in enumerate(found, 1):
+        bits = [f"{o['rooms']}к" if o.get("rooms") else "", f"{o['area']:g} м²" if o.get("area") else "",
+                o.get("district") or ""]
+        lines.append(f'{i}. <b>${_money(o["price_usd"])}</b>/мес · ' + " · ".join(b for b in bits if b)
+                     + f' · <a href="{o["url"]}">{escape_html(o.get("site") or o.get("source") or "")}</a>')
+    tg_call(cfg, "sendMessage", {"chat_id": cfg["telegram_chat_id"], "text": "\n".join(lines)[:4000],
+                                 "parse_mode": "HTML", "disable_web_page_preview": True})
+    return len(found)
+
+
 def send_similar(cfg, sst, l) -> int:
     found = sale_sources.similar(sst, l)
     if not found:
@@ -2133,15 +2222,18 @@ def send_similar(cfg, sst, l) -> int:
 def search_like(cfg, store, l) -> str:
     """«🎯 Искать такие»: условия поиска — по этому объявлению (комнаты, район, цена +10%)."""
     ans = dict((concierge.get_anketa(store).get("ans") or {}))
-    ans.update(deal="buy", object="flat", city="tashkent")
+    rent = not str(l.get("key") or "").startswith("sale:")
+    ans.update(deal="rent" if rent else "buy", object="flat", city="tashkent")
     if l.get("rooms"):
         ans["rooms"] = [str(l["rooms"])]
     if l.get("district") in DISTRICT_LIST:
         ans["districts"] = [str(DISTRICT_LIST.index(l["district"]))]
         ans.pop("districts_any", None)
     if l.get("price_usd"):
-        ans["budget"] = str(int(round(l["price_usd"] * 1.1, -3)))
+        ans["budget"] = str(int(round(l["price_usd"] * 1.1, -1 if rent else -3)))
     concierge.apply_webapp_data(cfg, store, json.dumps({"v": 3, "replace": True, "src": "link", "ans": ans}))
+    if rent:                                   # фильтры радара аренды — по тем же условиям
+        store.set_kv("settings", concierge.rent_settings(ans, store.get_kv("settings") or default_settings()))
     bits = [f'{l["rooms"]}-комн' if l.get("rooms") else "", l.get("district") or "",
             f'до ${_money(int(ans["budget"]))}' if ans.get("budget") else ""]
     send_telegram(cfg, "🎯 <b>Ищу такие же</b>: " + escape_html(" · ".join(b for b in bits if b))
@@ -2429,13 +2521,17 @@ def handle_callback(data: str, settings: dict, store, cfg: dict, message_id=None
             return "Объявление не найдено", None
         sst = Store(SALE_DB_PATH)
         try:
-            row = sst.conn.execute("SELECT data FROM listings WHERE key LIKE ?",
+            rent = not key.startswith("sale:")
+            src = store if rent else sst
+            row = src.conn.execute("SELECT data FROM listings WHERE key LIKE ?",
                                    (key.replace("%", "") + "%",)).fetchone()
             if not row:
                 return "Объявление не найдено", None
             l = json.loads(row[0] or "{}")
+            if not l.get("price_usd"):
+                l["price_usd"] = to_usd(l.get("price_value"), l.get("price_currency"), cfg)
             if d.startswith("L:sim:"):
-                send_similar(cfg, sst, l)
+                (send_similar_rent(cfg, store, sst, l) if rent else send_similar(cfg, sst, l))
                 return "", None
         finally:
             sst.conn.close()
@@ -2977,6 +3073,7 @@ SALE_OWNER_WORDS = [
 SALE_NOT_FLAT_WORDS = [
     "продается комната", "продаётся комната", "продам комнату",
     "комната в общежитии", "доля в квартире", "долю в квартире",
+    "ҳовли уй", "hovli uy", "ер жой сотилади", "yer sotiladi", "участок", "дача сотилади", "сотих", "sotix",
 ]
 # значения Uybor (собраны по живым объявлениям); неизвестное показываем как есть
 REPAIR_RU = {
@@ -3569,6 +3666,7 @@ def run():
                 continue
 
             fresh = 0
+            warm = not store.get_kv(f"src_warm:{name}")     # новый источник: текущее — запомнить молча
             for l in listings:
               # одно битое объявление не должно ронять весь радар
               try:
@@ -3578,7 +3676,7 @@ def run():
                     continue
                 seller_cnt = store.bump_seller(l.get("seller_id", ""))
 
-                if first_run:
+                if first_run or warm:
                     store.save(l, notified=False)
                     continue
 
@@ -3619,7 +3717,7 @@ def run():
                     analyst.score_listing(l, store, cfg, market, settings)
                 except Exception as e:
                     log.warning("анализ %s не удался: %s", l.get("key"), e)
-                ok = send_listing(cfg, settings, l, likely_makler)
+                ok = send_listing(cfg, settings, l, likely_makler, silent=is_night())
                 store.save(l, notified=ok)
                 if ok:
                     fresh += 1
@@ -3633,6 +3731,8 @@ def run():
                 except Exception:
                     pass
 
+            if warm and listings:
+                store.set_kv(f"src_warm:{name}", True)
             if fresh:
                 log.info("[%s] новых: %d", name, fresh)
 
