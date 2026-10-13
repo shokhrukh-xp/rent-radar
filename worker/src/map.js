@@ -64,7 +64,7 @@ function draw(){
     const r=L.rectangle([[c.b[0],c.b[1]],[c.b[2],c.b[3]]],{weight:0,fillColor:color(v),fillOpacity:dark?.55:.5}).addTo(layer);
     r.bindPopup('<div class="pp"><b>'+fmt(v)+'/м²</b> · '+(seg==="all"?c.n:seg==="new"?c.nn:c.no)+' объявл.<br>'+
       (c.old?'Вторичка '+fmt(c.old)+' ('+c.no+')<br>':'')+(c.new?'Новостройки '+fmt(c.new)+' ('+c.nn+')<br>':'')+
-      (c.d?'<span class="m">'+c.d+(diff!==null?': '+(diff>0?'+':'')+diff+'% к медиане района ('+fmt(dm)+')':'')+'</span>':'')+'</div>');}
+      (c.d?'<span class="m">'+c.d+(diff!==null?': '+(diff>0?'+':diff<0?'−':'')+Math.abs(diff)+'% к медиане района ('+fmt(dm)+')':'')+'</span>':'')+'</div>');}
   for(const m of D.metro||[])L.circleMarker([m[1],m[2]],{radius:3,color:dark?"#ddd":"#333",weight:1,fillOpacity:1}).addTo(layer).bindTooltip("м. "+m[0]);
 }
 document.querySelectorAll(".seg button").forEach(b=>b.onclick=()=>{document.querySelectorAll(".seg button").forEach(x=>x.classList.toggle("on",x===b));seg=b.dataset.k;draw();});
