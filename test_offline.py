@@ -1253,7 +1253,8 @@ sstore = rr.Store(sdb)
 sent_msgs = []
 shown = lambda i: any(f"listings/{i}" in m[1] for m in sent_msgs)
 def fake_sale_tg(cfg_, method, payload, timeout=20, quiet=False):
-    sent_msgs.append((method, payload.get("text") or payload.get("media") or ""))
+    sent_msgs.append((method, payload.get("text") or payload.get("caption") or payload.get("media") or "",
+                      payload.get("reply_markup") or ""))
     return {"ok": True, "result": {}}
 
 ss_tg = dict(ss, telegram_bot_token="T", telegram_chat_id="1")
@@ -1533,9 +1534,10 @@ with mock.patch.object(rr.requests, "get", fake_both), mock.patch.object(mk.requ
     rr.run_sale_search(ss_all, sstore, {"photos": False})
 texts = [m[1] for m in sent_msgs]
 i_card = next(i for i, t in enumerate(texts) if "listings/701" in t)
-assert "📊 <b>Анализ</b>" in texts[i_card + 1], texts
-n_cards = sum(t.startswith("🏷 <b>Продажа") for t in texts)
-assert n_cards >= 1 and sum("📊 <b>Анализ</b>" in t for t in texts) == n_cards   # по анализу на карточку
+card1 = texts[i_card]                                                       # карточка и разбор — одно сообщение
+assert "<b>Ипотека</b>" in card1 and "<b>Торг</b>" in card1 and "<blockquote expandable>" in card1, card1
+assert rr.tg_len(card1) <= rr.CAPTION_MAX and not any("📊 <b>Анализ</b>" in t for t in texts), texts
+assert sent_msgs[i_card][2] and "L:n:" in sent_msgs[i_card][2] and "|0.0" in sent_msgs[i_card][2]
 assert sstore.get_kv("sale_analysis_backfill") is True
 sent_msgs.clear()
 sstore.set_kv("sale_analysis_backfill", False)                              # как после обновления бота
@@ -2262,7 +2264,8 @@ def link_tg(cfg_, method, payload, timeout=20, quiet=False):
 with mock.patch.object(rr, "SALE_DB_PATH", ldb), mock.patch.object(rr, "tg_call", link_tg), \
         mock.patch.object(SS, "listing_from_url", lambda c, u: (dict(link_l), "sale")):
     rr.handle_link(cfg, lr_, {"_link": "https://www.olx.uz/d/obyavlenie/kv-ID1.html", "text": "найди похожие https://www.olx.uz/d/obyavlenie/kv-ID1.html"})
-card = next(pl["text"] for m, pl in LT if "Эту квартиру я уже видела" in (pl.get("text") or ""))
+card = next(pl["text"] for m, pl in LT if "Уже видела" in (pl.get("text") or ""))
+assert "<b>Ипотека</b>" in card and rr.tg_len(card) <= rr.CAPTION_MAX and sum("Ипотека" in (pl.get("text") or "") for m, pl in LT) == 1
 assert "uybor.uz/listings/777" in card and "маклер" in card
 assert any("L:sim:sale:link:" in (pl.get("reply_markup") or "") for m, pl in LT)
 simm = next(pl["text"] for m, pl in LT if "Похожие" in (pl.get("text") or "") and "±20%" in (pl.get("text") or ""))
@@ -2426,3 +2429,34 @@ with mock.patch.object(SS, "verify_channel", fake_verify), mock.patch.object(SS,
 assert "Отключены проверкой" in rr.sources_text(ccfg, hs2) and "@quiet_b" in rr.sources_text(ccfg, hs2)
 hdb2.unlink(missing_ok=True)
 print("OK — каналы раз в неделю: замолчал >30 дн. — сразу, не прошёл 2 недели — отключаем, ожил — возвращаем, сбой сети не в счёт")
+
+# ============ карточка покупки одним сообщением: коллаж + разбор, ≤1024 символов ============
+from io import BytesIO
+from PIL import Image
+def fake_img(url, headers=None, timeout=None):
+    w, h = (1200, 900) if "big" in url else (400, 300)
+    b = BytesIO(); Image.new("RGB", (w, h), (120, 80, 40)).save(b, "JPEG"); return R(_content=b.getvalue())
+class R:
+    def __init__(self, _content=b"", status=200): self.content, self.status_code = _content, status
+with mock.patch.object(rr.requests, "get", fake_img):
+    col = rr.make_collage(["http://x/s1", "http://x/big", "http://x/s2", "http://x/s3"], more=3)
+im = Image.open(BytesIO(col))
+assert im.width == 1200 and im.height > 900, im.size                        # 1 крупно + 3 снизу, не растянуто
+long_l = dict(SS._listing(key="sale:uybor:5", site="Uybor", url="https://uybor.uz/listings/5", rooms=3, area=42, floor=3,
+                          floors_total=6, district="Яшнабад", price_value=64000, text="#яшнабад #3ком Квартира " * 80 +
+                          " +998 77 101-00-15"), price_usd=64000, seller_kind="agency", phones=["771010015"],
+              alts=[{"price_usd": 66000 + i, "url": f"https://uybor.uz/listings/{9 + i}", "site": "Uybor", "kind": "agency"} for i in range(5)])
+ct = rr.format_sale_card(mst, long_l, ss_all, head="🔥 <b>Только что от собственника</b> · выложено 3 мин назад")
+assert rr.tg_len(ct) <= rr.CAPTION_MAX, rr.tg_len(ct)
+assert ct.startswith("🔥") and "<b>3-комн · 42 м² · этаж 3/6</b>" in ct and "#яшнабад" not in ct and "Открыть на Uybor" in ct
+assert ct.count("101-00-15") == 1                                           # телефон — строкой, не в описании
+assert rr.sale_kb("sale:uybor:5", "self")["inline_keyboard"][0][1]["callback_data"] == "L:n:sale:uybor:5|0.0"
+SP = []
+with mock.patch.object(rr.requests, "get", fake_img), \
+        mock.patch.object(rr.requests, "post", lambda url, data=None, files=None, timeout=None:
+                          SP.append((url, data, files)) or mock.Mock(status_code=200, json=lambda: {"result": {"message_id": 42}})):
+    assert rr.send_card(ss_tg, dict(long_l, photo_urls=["http://x/big", "http://x/s1"]), ct,
+                        kb=rr.sale_kb("sale:uybor:5", "self"), silent=True) == [42]
+assert SP[0][0].endswith("/sendPhoto") and SP[0][1]["caption"] == ct and SP[0][1]["disable_notification"] and "L:n:" in SP[0][1]["reply_markup"]
+print("OK — покупка: карточка и разбор одним сообщением — коллаж из фото, вывод сверху, детали свёрнуты, ≤1024 символов")
+

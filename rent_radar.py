@@ -2081,10 +2081,9 @@ def show_site_listing(cfg, key) -> str:
         if sale_sources.photo_repair(cfg, l) or fresh:
             sst.conn.execute("UPDATE listings SET data=? WHERE key=?", (sst.pack(l), l["key"]))
             sst.conn.commit()
-        ids = send_listing(cfg, {"photos": True}, l, False, text=format_sale_message(l, cfg))
+        ids = send_card(cfg, l, format_sale_card(sst, l, cfg), kb=sale_kb(l["key"], "self"))
         if not ids:
             return "Не получилось отправить 🙈"
-        send_sale_analysis(cfg, sst, l, kb=sale_kb(l["key"], ids))
     finally:
         sst.conn.close()
     return "" if l.get("photo_urls") else "Фото у этого объявления нет — только описание"
@@ -2297,19 +2296,18 @@ def handle_link(cfg, store, msg):
             sst.conn.commit()
         else:
             sst.save(l, notified=True)
-        text = format_sale_message(l, cfg)
+        seen = ""
         if before:
             kinds = {"owner": "собственник", "agency": "маклер"}
             first = before[0]
             when = parse_iso(first.get("_first_seen") or "")
-            text += ("\n\n👀 <b>Эту квартиру я уже видела</b>: " + ", ".join(
+            seen = ("👀 <b>Уже видела</b>: " + ", ".join(
                 f'<a href="{o.get("url")}">{escape_html(o.get("site") or "Uybor")}</a> — ${_money(o.get("price_usd") or 0)}'
                 + (f' ({kinds[o["seller_kind"]]})' if o.get("seller_kind") in kinds else "") for o in before)
                 + (f'. Впервые — {when.astimezone(TASHKENT_TZ).strftime("%d.%m %H:%M")}' if when else ""))
         if not l.get("price_usd"):
-            text += "\n\n⚠️ Цену на странице не нашла — разбор неполный."
-        ids = send_listing(cfg, {"photos": True}, l, False, text=text)
-        send_sale_analysis(cfg, sst, l, kb=link_kb(l["key"], ids))
+            seen = (seen + "\n" if seen else "") + "⚠️ Цену на странице не нашла — разбор неполный."
+        send_card(cfg, l, format_sale_card(sst, l, cfg, note=seen), kb=link_kb(l["key"], "self"))
         if LIKE_WORDS.search(note):
             send_similar(cfg, sst, l)
     finally:
@@ -3439,6 +3437,327 @@ def format_sale_message(l: dict, cfg: dict) -> str:
     return "\n".join(lines)
 
 
+# ------------------------------------------- карточка покупки: одно сообщение --
+# Коллаж из фото + подпись (≤1024 символа у Telegram) + кнопки. Вывод сверху, факты
+# короткими строками без эмодзи в начале, экономика тремя строками, остальное — в «Подробнее».
+
+CAPTION_MAX = 1000          # лимит Telegram — 1024 видимых символа (UTF-16); держим запас
+
+
+def tg_len(s: str) -> int:
+    """Сколько символов Telegram насчитает в подписи: без тегов, с раскрытыми &amp;, в UTF-16."""
+    t = html_lib.unescape(re.sub(r"<[^>]+>", "", s or ""))
+    return len(t.encode("utf-16-le")) // 2
+
+
+def _cut(s: str, n: int) -> str:
+    s = " ".join((s or "").split())
+    return s if len(s) <= n else s[:max(0, n - 1)].rsplit(" ", 1)[0].rstrip(",.;:—- ") + "…"
+
+
+def _desc_clean(text: str) -> str:
+    """Описание продавца без хэштегов и телефонов (телефон — отдельной строкой)."""
+    t = re.sub(r"#\S+", " ", text or "")
+    t = re.sub(r"(?:\+?998[\s\-()]*)?\d{2}[\s\-)]*\d{3}[\s\-]*\d{2}[\s\-]*\d{2}", " ", t)
+    return " ".join(t.split())
+
+
+def format_sale_card(store, l: dict, cfg: dict, head: str = "", note: str = "") -> str:
+    """Карточка + разбор цены одним текстом для подписи к коллажу."""
+    try:
+        x = market.analyze(store, l, cfg) if l.get("price_usd") else {}
+    except Exception as e:
+        log.info("[продажа] анализ %s не удался: %s", l.get("key"), e)
+        x = {}
+    if x and not x.get("price"):
+        x = {}
+    top = []
+    if head:
+        top += [head, ""]
+    if x.get("verdict"):
+        em, title, why = x["verdict"]
+        top += [f"{em} <b>{escape_html(title)}</b> — {escape_html(why)}", ""]
+
+    # факты
+    spec = []
+    if l.get("rooms"):
+        spec.append(f'{l["rooms"]}-комн')
+    if l.get("area"):
+        spec.append(f'{fmt_area(l["area"])} м²')
+    if l.get("floor"):
+        spec.append(f'этаж {l["floor"]}' + (f'/{l["floors_total"]}' if l.get("floors_total") else ""))
+    if spec:
+        top.append("<b>" + " · ".join(spec) + "</b>")
+    place = [l.get("district") or "район не указан", "новостройка" if l.get("new_building") else "вторичка",
+             FOUNDATION_RU.get(l.get("house_type") or "", l.get("house_type") or "")]
+    top.append(escape_html(" · ".join(p for p in place if p)))
+    p = l.get("price_usd")
+    if p:
+        price = f"<b>${_money(p)}</b>"
+        if (l.get("price_currency") or "").upper() == "UZS" and l.get("price_value"):
+            price = f'<b>{market._mln(l["price_value"])} млн сум</b> (~${_money(p)})'
+        if l.get("area"):
+            price += f' · ${_money(p / l["area"])}/м²'
+        if x.get("fair") and x.get("gap") is not None:
+            price += f' · рынок ≈ ${_money(market._r500(x["fair"]))}'
+        top.append(price)
+
+    # ремонт
+    short = {"good": "хороший", "average": "средний", "none": "без ремонта", "box": "коробка"}
+    cls, rsrc, claimed = x.get("repair"), x.get("repair_src"), x.get("repair_claimed")
+    by = {"фото": "по фото", "описание": "по описанию", "пометка сайта": "по пометке сайта"}.get(rsrc, "")
+    if cls:
+        r = f"Ремонт {short[cls]}" + (f" ({by})" if by else "")
+        if cls == "good":
+            r += " — можно заезжать"
+        elif x.get("reno"):
+            r += f' — {"освежить" if cls == "average" else "ремонт"} ~${_money(x["reno"])}'
+        if rsrc == "фото" and claimed and claimed != cls:
+            r += f'; в объявлении «{short[claimed]}»'
+        top.append(r)
+    elif x:
+        top.append("Ремонт не понять — уточните у продавца")
+    elif l.get("repair"):
+        top.append("Ремонт: " + escape_html(REPAIR_RU.get(l["repair"], l["repair"])))
+
+    # продавец и время
+    who = {"owner": "Собственник", "agency": "Маклер / агентство"}.get(l.get("seller_kind"), "Продавец не проверен")
+    if l.get("seller_hint") == "developer":
+        who = "Застройщик"
+    if l.get("phones"):
+        who += " · " + fmt_phone(l["phones"][0])
+    top.append(who)
+    dt = parse_iso(l.get("created_at") or "")
+    since = parse_iso(l.get("listed_since") or "")
+    when = []
+    if dt:
+        when.append(f'выложено {dt.astimezone(TASHKENT_TZ).strftime("%d.%m в %H:%M")}')
+    if since:
+        days = age_days(l["listed_since"])
+        when.append("перевыложено" + (f", на рынке ~{days:.0f} дн." if days else ""))
+    if when:
+        top.append(when[0][0].upper() + ", ".join(when)[1:])
+    alts = [a for a in (l.get("alts") or []) if a.get("price_usd") and a.get("url")]
+    if alts:
+        kinds = {"owner": ", собств.", "agency": ", маклер"}
+        refs = [f'<a href="{a["url"]}">${_money(a["price_usd"])}</a> ({escape_html(a.get("site") or "Uybor")}'
+                f'{kinds.get(a.get("kind"), "")})' for a in alts[:2]]
+        top.append("Эту же продают ещё: " + ", ".join(refs) + (f" и ещё {len(alts) - 2}" if len(alts) > 2 else ""))
+    if "dorm" in (x.get("flags") or []):
+        top.append("⚠️ Бывшее общежитие — проверьте кадастр; ипотеку без него не дают")
+
+    # экономика — три строки
+    econ = []
+    m = x.get("mortgage")
+    if m:
+        econ.append(f'<b>Ипотека</b> — взнос ${_money(m["down"])}, ≈ {market._mln(m["pay_uzs"])} млн сум/мес '
+                    f'на {m["years"]} лет')
+    bg = x.get("bargain")
+    if bg:
+        econ.append(f'<b>Торг</b> — просите ~${_money(bg["offer"])}, цена уже ниже рынка' if bg["calm"] else
+                    f'<b>Торг</b> — начните с ~${_money(bg["offer"])}, потолок ~${_money(bg["ceiling"])}')
+    if x.get("rent"):
+        y = f'{x["net_yield"] * 100:.1f}'.replace(".", ",")
+        econ.append(f'<b>Сдавать</b> — ~${_money(x["rent"])}/мес, {y}% в год чистыми')
+
+    # подробнее — сколько влезет
+    det = []
+    if x.get("repair_signs"):
+        det.append("На фото: " + escape_html(x["repair_signs"]))
+    if m and x.get("rent"):
+        diff = m["pay_usd"] - x["rent"]
+        det.append(f'Ипотека ~${_money(m["pay_usd"])}/мес против аренды такой же ~${_money(x["rent"])}'
+                   + (f' — дороже на ${_money(diff)}, зато квартира ваша' if diff > 30 else " — выгоднее брать"))
+    if bg and bg.get("args"):
+        det.append("Аргументы в торге: " + escape_html(", ".join(bg["args"])))
+    if x.get("rent"):
+        dep = x["assumptions"]["usd_deposit"]
+        pb = x.get("payback_years")
+        det.append(f'Вклад в $ даёт {dep * 100:.0f}%' + (f'; окупится за ~{pb:.0f} лет' if pb else ""))
+    v = x.get("values")
+    if v:
+        det.append(f'Через 5 лет — скорее ~${_money(market._r500(v["base"][5]))} '
+                   f'(${_money(market._r500(v["pess"][5]))}–${_money(market._r500(v["opt"][5]))})')
+    c = x.get("comp")
+    if c:
+        det.append(f'Сравнивала с {c["n"]} объявл.: {escape_html(c["label"])}, медиана ${_money(c["median_m2"])}/м²')
+    if x.get("days_on_market") is not None and x.get("price_change"):
+        pc = x["price_change"]
+        det.append(f'Цена менялась: ${_money(pc[0])} → ${_money(pc[1])}')
+    flags = hot_flags(l.get("text") or "", cfg)
+    if flags:
+        det.append(f"В тексте: «{escape_html(flags[0])}»")
+    desc = _desc_clean(l.get("text") or "")
+
+    foot = f'<a href="{l["url"]}">Открыть на {escape_html(l.get("site") or "Uybor")}</a>' if l.get("url") else ""
+    if x:
+        foot += (" · " if foot else "") + f'<a href="{market.REPORT_URL}">как считаю</a>'
+
+    def build(top_, econ_, det_, desc_):
+        parts = ["\n".join(top_).strip()]
+        if econ_:
+            parts.append("\n".join(econ_))
+        if note:
+            parts.append(note.strip())
+        body = ["• " + d for d in det_]
+        if desc_:
+            body.append("Из объявления: «" + escape_html(desc_) + "»")
+        if body:
+            parts.append("<blockquote expandable><b>Подробнее</b>\n" + "\n".join(body) + "</blockquote>")
+        text_ = "\n\n".join(parts)
+        return text_ + ("\n" + foot if body else "\n\n" + foot) if foot else text_
+
+    # сначала всё обязательное, потом добираем детали и описание, пока влезает
+    text = build(top, econ, [], "")
+    while tg_len(text) > CAPTION_MAX and econ:
+        econ = econ[:-1]
+        text = build(top, econ, [], "")
+    while tg_len(text) > CAPTION_MAX and len(top) > 3:
+        top = top[:-1]
+        text = build(top, econ, [], "")
+    keep = []
+    for d in det:
+        t = build(top, econ, keep + [d], "")
+        if tg_len(t) <= CAPTION_MAX:
+            keep.append(d)
+            text = t
+    if desc:
+        room = CAPTION_MAX - tg_len(build(top, econ, keep, "")) - 24
+        if room >= 60:
+            text = build(top, econ, keep, _cut(desc, min(room, 320)))
+    return text
+
+
+def _fit(img, w, h):
+    """Вписать с обрезкой по центру (как обложка)."""
+    from PIL import Image
+    k = max(w / img.width, h / img.height)
+    img = img.resize((max(w, round(img.width * k)), max(h, round(img.height * k))), Image.LANCZOS)
+    left, top = (img.width - w) // 2, (img.height - h) // 2
+    return img.crop((left, top, left + w, top + h))
+
+
+_PIL_TRIED = [False]
+
+
+def _pil():
+    """Pillow для коллажа. На сервере старый образ мог собраться без него — доставим один раз."""
+    try:
+        import PIL.Image  # noqa: F401
+        return True
+    except ImportError:
+        pass
+    if _PIL_TRIED[0]:
+        return False
+    _PIL_TRIED[0] = True
+    try:
+        import subprocess
+        subprocess.run([sys.executable, "-m", "pip", "install", "-q", "--no-cache-dir", "Pillow"],
+                       timeout=120, check=True, capture_output=True)
+        import importlib
+        importlib.invalidate_caches()
+        import PIL.Image  # noqa: F401,F811
+        return True
+    except Exception as e:
+        log.warning("Pillow не поставился — коллажа не будет, пришлю одно фото: %s", e)
+        return False
+
+
+def make_collage(urls, more: int = 0, width: int = 1280):
+    """До 4 фото в одну картинку, как альбом Telegram: 1 крупно сверху + до 3 снизу.
+    more — сколько фото не влезло (подпишем «+N» на последнем). Возвращает JPEG или None."""
+    if not urls or not _pil():
+        return None
+    from io import BytesIO
+    from PIL import Image, ImageDraw, ImageFont
+    imgs = []
+    for u in urls[:4]:
+        try:
+            r = requests.get(u, headers=HEADERS, timeout=15)
+            if r.status_code == 200 and len(r.content) > 1000:
+                im = Image.open(BytesIO(r.content))
+                im.load()
+                imgs.append(im.convert("RGB"))
+        except Exception as e:
+            log.info("фото для коллажа не скачалось: %s", e)
+    if not imgs:
+        return None
+    big = max(range(len(imgs)), key=lambda i: imgs[i].width * imgs[i].height)
+    imgs.insert(0, imgs.pop(big))          # крупно — самое чёткое фото, мелкие не растягиваем
+    width = max(640, min(width, imgs[0].width))
+    gap, W = 6, width
+    n = len(imgs)
+    if n == 1:
+        im = imgs[0]
+        h = min(round(W * im.height / im.width), round(W * 1.25))
+        canvas = _fit(im, W, h)
+    elif n == 2:
+        w2, h = (W - gap) // 2, round(W * 0.62)
+        canvas = Image.new("RGB", (W, h), (24, 24, 24))
+        canvas.paste(_fit(imgs[0], w2, h), (0, 0))
+        canvas.paste(_fit(imgs[1], W - w2 - gap, h), (w2 + gap, 0))
+    else:
+        top_h = round(W * 0.56)
+        k = n - 1
+        bw = (W - gap * (k - 1)) // k
+        bh = round(W * (0.40 if k == 2 else 0.30))
+        canvas = Image.new("RGB", (W, top_h + gap + bh), (24, 24, 24))
+        canvas.paste(_fit(imgs[0], W, top_h), (0, 0))
+        x0 = 0
+        for i, im in enumerate(imgs[1:]):
+            w_i = bw if i < k - 1 else W - x0
+            canvas.paste(_fit(im, w_i, bh), (x0, top_h + gap))
+            x0 += w_i + gap
+    if more > 0:
+        d = ImageDraw.Draw(canvas, "RGBA")
+        label = f"+{more}"          # в шрифте по умолчанию нет кириллицы
+        try:
+            font = ImageFont.load_default(size=40)
+        except TypeError:
+            font = ImageFont.load_default()
+        tw, th = d.textbbox((0, 0), label, font=font)[2:]
+        x1, y1 = canvas.width - tw - 44, canvas.height - th - 40
+        d.rounded_rectangle((x1 - 16, y1 - 12, canvas.width - 28, canvas.height - 24), 14, fill=(0, 0, 0, 150))
+        d.text((x1, y1), label, font=font, fill=(255, 255, 255, 255))
+    out = BytesIO()
+    canvas.save(out, "JPEG", quality=85, optimize=True)
+    return out.getvalue()
+
+
+def send_card(cfg, l: dict, text: str, kb: dict = None, silent: bool = False):
+    """Одно сообщение на вариант: коллаж (или одно фото) с подписью и кнопками.
+    Нет фото или они не грузятся — тем же текстом. Возвращает id сообщения списком; False — не ушло."""
+    photos = l.get("photo_urls") or []
+    extra = {"parse_mode": "HTML"}
+    if kb:
+        extra["reply_markup"] = json.dumps(kb, ensure_ascii=False)
+    if silent:
+        extra["disable_notification"] = True
+    if photos:
+        try:
+            img = make_collage(photos[:4], more=len(photos) - 4)
+        except Exception as e:
+            log.warning("коллаж не собрался: %s", e)
+            img = None
+        if img:
+            try:
+                api = f'https://api.telegram.org/bot{cfg["telegram_bot_token"]}/sendPhoto'
+                r = requests.post(api, data={"chat_id": cfg["telegram_chat_id"], "caption": text, **extra},
+                                  files={"photo": ("rano.jpg", img, "image/jpeg")}, timeout=40)
+                if r.status_code == 200:
+                    return _msg_ids(r.json()) or True
+                log.warning("коллаж не принят Telegram: %s %s", r.status_code, r.text[:200])
+            except requests.RequestException as e:
+                log.warning("коллаж не отправился: %s", e)
+        r = tg_call(cfg, "sendPhoto", {"chat_id": cfg["telegram_chat_id"], "photo": photos[0],
+                                       "caption": text, **extra}, quiet=True)
+        if r is not None:
+            return _msg_ids(r) or True
+    r = tg_call(cfg, "sendMessage", {"chat_id": cfg["telegram_chat_id"], "text": text,
+                                     "disable_web_page_preview": True, **extra})
+    return False if r is None else (_msg_ids(r) or True)
+
+
 def sale_criteria_text(ss: dict) -> str:
     rooms = "–".join(str(r) for r in (ss.get("rooms") or []))
     rooms = f"{rooms} комн" if rooms else "любая комнатность"
@@ -3615,11 +3934,11 @@ def run_sale_search(cfg: dict, store, settings: dict, force: bool = False) -> in
         mins = fresh_owner_minutes(l, ss) if not first else None     # первый проход — без «горячих»
         if mins is not None or (strong and day.get("instant", 0) + capped < cap):
             silent = is_night()
-            text = format_sale_message(l, cfg)
-            if mins is not None:
-                text = (f"🔥 <b>Только что от собственника</b> · выложено {ago_text(mins)}\n"
-                        "Позвоните первым — такие варианты маклеры перехватывают за пару часов.\n\n" + text)
-            ids = send_listing(cfg, settings, l, False, text=text, silent=silent)
+            head = (f"🔥 <b>Только что от собственника</b> · выложено {ago_text(mins)}\n"
+                    "Позвоните первым — маклеры перехватывают такие за пару часов") if mins is not None else ""
+            ids = send_card(cfg, l if settings.get("photos", True) else dict(l, photo_urls=[]),
+                            format_sale_card(store, l, cfg, head=head),
+                            kb=sale_kb(l["key"], "self"), silent=silent)
             if not ids:
                 log.info("[продажа] не отправилось, повторю позже: %s", l["title"][:45])
                 break     # не сохраняем — объявление придёт в следующий проход
@@ -3627,7 +3946,6 @@ def run_sale_search(cfg: dict, store, settings: dict, force: bool = False) -> in
             sent += 1
             capped += mins is None
             log.info("[продажа] %s (%s): %s", "горячее от собственника" if mins is not None else "сразу", sc, l["title"][:60])
-            send_sale_analysis(cfg, store, l, kb=sale_kb(l["key"], ids), silent=silent)
             sale_sources.remember_shown(store, l, why)
             time.sleep(1)
         else:
@@ -3671,6 +3989,9 @@ def sale_district_ids(ss: dict) -> list:
 def sale_kb(key, card_ids=None):
     """«Мимо» несёт id карточки над анализом — воркер удалит из чата и её, и анализ."""
     no = f"L:n:{key}"
+    if card_ids == "self":                 # карточка и анализ — одно сообщение: удалить только его
+        ref = f"{no}|0.0"
+        no = ref if len(ref) <= 64 else no
     ids = sorted(card_ids) if isinstance(card_ids, list) else []
     if ids and ids == list(range(ids[0], ids[0] + len(ids))):
         ref = f"{no}|{ids[0]}.{len(ids)}"
