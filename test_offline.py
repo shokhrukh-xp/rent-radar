@@ -1251,7 +1251,8 @@ _fd = mock.patch.object(sale_sources, "fetch_due", lambda *a, **k: []); _fd.star
 sdb = Path("/tmp/test_sale.db"); sdb.unlink(missing_ok=True)
 sstore = rr.Store(sdb)
 sent_msgs = []
-shown = lambda i: any(f"listings/{i}" in m[1] for m in sent_msgs)
+inmsg = lambda m, i: f"listings/{i}" in m[1] or f':{i}"' in (m[2] if len(m) > 2 else "")
+shown = lambda i: any(inmsg(m, i) for m in sent_msgs)
 def fake_sale_tg(cfg_, method, payload, timeout=20, quiet=False):
     sent_msgs.append((method, payload.get("text") or payload.get("caption") or payload.get("media") or "",
                       payload.get("reply_markup") or ""))
@@ -1371,7 +1372,8 @@ with mock.patch.object(rr.requests, "get", fake_uy_get), mock.patch.object(rr, "
 assert all(shown(i) for i in (102, 201, 301)), [m[1][:60] for m in sent_msgs]   # 102, 201 и 3-комнатная 301
 assert "Условия поиска обновлены" in sent_msgs[0][1] and "нашлось подходящих: 3" in sent_msgs[0][1]
 assert sent_msgs[-1][1].count("агентство/маклер") == 2                  # 102 и 201
-assert any("3к" in ln and "собственник" in ln and "listings/301" in ln for ln in sent_msgs[-1][1].split("\n"))
+assert any("3-комн" in blk and "собственник" in blk for blk in sent_msgs[-1][1].split("\n\n")) and \
+    "sale:uybor:301" in sent_msgs[-1][2]                                  # подборка: блок на вариант, номер — кнопкой
 assert not shown(101)                                                   # не повторили
 sent_msgs.clear()
 with mock.patch.object(rr.requests, "get", fake_uy_get), mock.patch.object(rr, "tg_call", fake_sale_tg), \
@@ -1388,11 +1390,11 @@ sdb.unlink(missing_ok=True); sstore = rr.Store(sdb); sent_msgs.clear()
 with mock.patch.object(rr.requests, "get", fake_uy_get), mock.patch.object(rr, "tg_call", fake_sale_tg), \
         mock.patch.object(rr.time, "sleep"):
     rr.run_sale_search(ss_all, sstore, {"photos": False})
-assert sum("listings/401" in m[1] or "listings/402" in m[1] for m in sent_msgs) == 1, sent_msgs
+assert sum(inmsg(m, 401) or inmsg(m, 402) for m in sent_msgs) == 1, sent_msgs
 with mock.patch.object(rr.requests, "get", fake_uy_get), mock.patch.object(rr, "tg_call", fake_sale_tg), \
         mock.patch.object(rr.time, "sleep"):
     rr.run_sale_search(ss_all, sstore, {"photos": False})
-assert sum("listings/401" in m[1] or "listings/402" in m[1] for m in sent_msgs) == 1   # дубль сохранён как дубль
+assert sum(inmsg(m, 401) or inmsg(m, 402) for m in sent_msgs) == 1   # дубль сохранён как дубль
 assert sstore.known("sale:uybor:402") or sstore.known("sale:uybor:401")
 sdb.unlink(missing_ok=True)
 # у агентства один телефон на разные квартиры — это не дубли
@@ -1406,7 +1408,8 @@ sdb.unlink(missing_ok=True); sstore = rr.Store(sdb); sent_msgs.clear()
 with mock.patch.object(rr.requests, "get", fake_uy_get), mock.patch.object(rr, "tg_call", fake_sale_tg), \
         mock.patch.object(rr.time, "sleep"):
     rr.run_sale_search(ss_all, sstore, {"photos": False})
-assert shown(501) and shown(502), sent_msgs
+waiting = {x["key"] for x in sstore.get_kv("sale_pick") or []}            # подборка — 5 штук, остальные ждут
+assert all(shown(i) or f"sale:uybor:{i}" in waiting for i in (501, 502)), sent_msgs
 sdb.unlink(missing_ok=True)
 # перевыкладка: старое объявление отсеяли по возрасту, свежая копия — присылаем с датой
 OLD = "Продаётся 1-комн квартира, Юнусабад, бывшее общежитие, кухня и санузел внутри, 2 этаж из 4"
@@ -1417,9 +1420,10 @@ sdb.unlink(missing_ok=True); sstore = rr.Store(sdb); sent_msgs.clear()
 with mock.patch.object(rr.requests, "get", fake_uy_get), mock.patch.object(rr, "tg_call", fake_sale_tg), \
         mock.patch.object(rr.time, "sleep"):
     rr.run_sale_search(ss_all, sstore, {"photos": False})
-m602 = [ln for m in sent_msgs for ln in m[1].split("\n") if "listings/602" in ln]
+m602 = [blk for m in sent_msgs for blk in m[1].split("\n\n") if "listings/602" in blk or
+        ("Что нашлось" in m[1] and ":602\"" in m[2] and "136 дн." in blk)]
 assert len(m602) == 1 and "перевыложено" in m602[0] and "на рынке ~136 дн." in m602[0], sent_msgs
-assert not any("listings/601" in m[1] for m in sent_msgs)
+assert not any(inmsg(m, 601) for m in sent_msgs)
 sdb.unlink(missing_ok=True)
 _fd.stop()
 print("OK — покупка с маклерами: пометка продавца, пересмотр при смене условий, дубли")
@@ -1981,9 +1985,10 @@ SS.queue_pick(xs, lj, 70, why_j); SS.queue_pick(xs, lr, 55, [])
 with mock.patch.object(rr, "tg_call", xtg):
     assert SS.send_pick(cfg, xs) == 2
 pk = XT[-1][1]
-assert pk["text"].index("joymee.uz/announcements/77") < pk["text"].index("realting.uz/property/555")
-assert "L:s:sale:joymee:77" in pk["reply_markup"] and SS.pick_pending(xs) == []
-assert "L:v:sale:joymee:77" in pk["reply_markup"]                                 # 📷 — фото и разбор
+kb_ = json.loads(pk["reply_markup"])["inline_keyboard"]
+assert [b["text"] for b in kb_[0]] == ["1", "2"] and len(kb_) == 1                # один ряд номеров, без 📷/👍
+assert kb_[0][0]["callback_data"] == "L:v:sale:joymee:77" and kb_[0][1]["callback_data"] == "L:v:sale:realting:555"
+assert "L:s:" not in pk["reply_markup"] and SS.pick_pending(xs) == [] and "<a href" not in pk["text"]
 assert [x["key"] for x in xs.get_kv("last_pick")] == ["sale:joymee:77", "sale:realting:555"]
 XT.clear()
 with mock.patch.object(rr, "tg_call", xtg):
@@ -2123,7 +2128,7 @@ with mock.patch.object(rr, "tg_call", dtg):
     assert o["alts"][0]["key"] == "sale:joymee:2" and o["alts"][0]["kind"] == "agency"
     card = rr.format_sale_message(o, cfg)
     assert "👥 Эту же квартиру продают ещё" in card and "$47 000" in card and "маклер" in card
-    assert "👥 ещё у 1: $47 000" in SS.pick_line(o, [])
+    assert "ещё у 1: $47 000" in SS.pick_line(o, [])
     # дешевле, а прежнюю уже присылали — короткое «та же квартира дешевле»
     cheap = dict(own, key="sale:uybor:3", site="Uybor", seller="Нигора", price_usd=41000, url="https://uybor.uz/3")
     assert SS.attach_dup(cfg, ds, cheap, "sale:joymee:1", {}) == "cheaper"
@@ -2137,7 +2142,7 @@ with mock.patch.object(rr, "tg_call", dtg):
     q2 = dict(q1, key="sale:joymee:11", url="https://joymee.uz/announcements/11", seller="Другой", price_usd=45000)
     assert SS.attach_dup(cfg, ds, q2, "sale:joymee:10", {}) == "queued"
     pk = ds.get_kv("sale_pick")
-    assert [x["key"] for x in pk] == ["sale:joymee:11"] and "👥 ещё у 1: $48 000" in pk[0]["line"]
+    assert [x["key"] for x in pk] == ["sale:joymee:11"] and "ещё у 1: $48 000" in pk[0]["line"]
 ddb.unlink(missing_ok=True)
 print("OK — дубли от разных маклеров: одна карточка, «👥 ещё у N», «та же квартира дешевле»")
 assert SS.merge_alts([], [dict(own, key="sale:joymee:99", price_usd=43500)], own) == []          # перевыкладка того же продавца — не «ещё у 1»
@@ -2268,8 +2273,8 @@ card = next(pl["text"] for m, pl in LT if "Уже видела" in (pl.get("text
 assert "<b>Ипотека</b>" in card and rr.tg_len(card) <= rr.CAPTION_MAX and sum("Ипотека" in (pl.get("text") or "") for m, pl in LT) == 1
 assert "uybor.uz/listings/777" in card and "маклер" in card
 assert any("L:sim:sale:link:" in (pl.get("reply_markup") or "") for m, pl in LT)
-simm = next(pl["text"] for m, pl in LT if "Похожие" in (pl.get("text") or "") and "±20%" in (pl.get("text") or ""))
-assert "uybor.uz/listings/800" in simm and "listings/899" not in simm                       # другой район — не похожее
+simm = next(pl.get("reply_markup") or "" for m, pl in LT if "Похожие" in (pl.get("text") or "") and "±20%" in (pl.get("text") or ""))
+assert "sale:uybor:800" in simm and "sale:uybor:899" not in simm                           # другой район — не похожее
 ls2 = rr.Store(ldb)
 assert ls2.known("sale:uybor:800") and [x["key"] for x in ls2.get_kv("last_pick")][0].startswith("sale:uybor:")
 ls2.conn.close()

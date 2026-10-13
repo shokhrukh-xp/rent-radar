@@ -731,27 +731,29 @@ def score(store, l, cfg, ss):
 
 
 def pick_line(l, why):
+    """Две строки на вариант: цена и квартира, потом место и чем интересен. Без ссылок —
+    фото, разбор и ссылка на сайт открываются по номеру одной карточкой."""
     rr = _rr()
     bits = []
     if l.get("rooms"):
-        bits.append(f"{l['rooms']}к")
+        bits.append(f"{l['rooms']}-комн")
     if l.get("area"):
-        bits.append(f"{round(l['area'], 1):g} м²")
+        bits.append(f"{round(l['area']):g} м²")
     if l.get("floor"):
-        bits.append(f"{l['floor']}/{l['floors_total']}" if l.get("floors_total") else f"эт. {l['floor']}")
-    if l.get("district"):
-        bits.append(l["district"])
+        bits.append(f"{l['floor']}/{l['floors_total']} эт." if l.get("floors_total") else f"{l['floor']} эт.")
     p = l.get("price_usd") or 0
-    price = f"<b>${p:,.0f}</b>".replace(",", " ")
-    if l.get("area") and p:
-        price += f" (${p / l['area']:,.0f}/м²)".replace(",", " ")
-    tail = (" — " + ", ".join(why)) if why else ""
+    first = " · ".join([f"<b>${p:,.0f}</b>".replace(",", " ")] + bits)
+    g = l.get("geo") or {}
+    place = l.get("district") or ""
+    if g.get("label") and not g["label"].startswith("м. "):
+        place += (", " if place else "") + g["label"]
+    more = [w.replace("-", "−", 1) if w[:1] == "-" else w for w in (why or [])]
     ps = sorted(a["price_usd"] for a in (l.get("alts") or []) if a.get("price_usd"))
     if ps:
         rng = f"${ps[0]:,.0f}" if len(ps) == 1 or ps[0] == ps[-1] else f"${ps[0]:,.0f}–{ps[-1]:,.0f}"
-        tail += f" · 👥 ещё у {len(ps)}: {rng}".replace(",", " ")
-    return (f"{price} · {' · '.join(bits)}{tail} · "
-            f"<a href=\"{l.get('url')}\">{rr.escape_html(l.get('site') or 'Uybor')}</a>")
+        more.append(f"ещё у {len(ps)}: {rng}".replace(",", " "))
+    second = " · ".join(rr.escape_html(x) for x in [place] + more if x)
+    return first + ("\n" + second if second else "")
 
 
 def queue_pick(store, l, sc, why):
@@ -772,27 +774,20 @@ def pick_pending(store):
 
 
 def _pick_message(top, header, rest=0):
-    """Текст и кнопки подборки: номер — строка; 📷 N — фото и разбор, 👍 N — в шортлист."""
-    lines = [header, ""]
+    """Подборка: варианты списком, под ним один ряд номеров. Номер открывает карточку
+    (фото, разбор, «В шортлист / Мимо») — больше кнопок здесь не нужно."""
+    lines = [header]
     for i, x in enumerate(top, 1):
-        lines.append(f"{i}. {x['line']}")
-    lines += ["", "📷 + номер — фото и разбор цены, 👍 + номер — заберу в шортлист. "
-                  "Можно и словами: «покажи 2 и 4», «есть фото у первой?»"]
-    rows = []
-    for icon, act in (("📷", "v"), ("👍", "s")):
-        row = []
-        for i, x in enumerate(top, 1):
-            row.append({"text": f"{icon} {i}", "callback_data": f"L:{act}:{x['key']}"[:64]})
-            if len(row) == 5:
-                rows.append(row); row = []
-        if row:
-            rows.append(row)
+        lines += ["", f"<b>{i}.</b> {x['line']}"]
+    lines += ["", "Нажмите номер — пришлю фото и разбор цены."]
+    nums = [{"text": str(i), "callback_data": f"L:v:{x['key']}"[:64]} for i, x in enumerate(top, 1)]
+    rows = [nums[i:i + 5] for i in range(0, len(nums), 5)] if len(nums) != 6 else [nums[:3], nums[3:]]
     if rest:
-        rows.append([{"text": f"Показать ещё ({rest})", "callback_data": "R:pick"}])
+        rows.append([{"text": f"Ещё варианты ({rest})", "callback_data": "R:pick"}])
     return "\n".join(lines)[:4000], {"inline_keyboard": rows}
 
 
-def send_pick(cfg, store, limit=7, reason="Подборка дня"):
+def send_pick(cfg, store, limit=5, reason="Подборка дня"):
     """Лучшие из накопленного одним сообщением; присланное помечаем, остальное ждёт.
     Показанное запоминаем как «последнюю подборку» — на неё ссылаются «покажи 2 и 4»."""
     rr = _rr()
@@ -800,7 +795,7 @@ def send_pick(cfg, store, limit=7, reason="Подборка дня"):
     if not q:
         return 0
     top, rest = q[:limit], q[limit:]
-    text, kb = _pick_message(top, f"🔎 <b>{reason}</b> — {len(top)} из {len(q)} новых, самые интересные сверху ✨",
+    text, kb = _pick_message(top, f"🔎 <b>{reason}</b> — {len(top)} из {len(q)} новых, лучшие сверху",
                              len(rest))
     ok = rr.tg_call(cfg, "sendMessage", {
         "chat_id": cfg["telegram_chat_id"], "text": text, "parse_mode": "HTML",
@@ -903,11 +898,10 @@ def attach_dup(cfg, store, l, dup, ss=None):
         store.conn.commit()
         queue_pick(store, l, sc, why)
         return "queued"
-    text = (f"💸 <b>Та же квартира — дешевле на ${op - lp:,.0f}</b>\n{pick_line(l, why)}\n"
+    text = (f"💸 <b>Та же квартира — дешевле на ${op - lp:,.0f}</b>\n\n{pick_line(l, why)}\n\n"
             f"Раньше присылала её за ${op:,.0f} ({rr.escape_html(o.get('site') or 'Uybor')}"
             f"{', ' + KIND_RU[o['seller_kind']] if o.get('seller_kind') in KIND_RU else ''}).").replace(",", " ")
-    kb = {"inline_keyboard": [[{"text": "📷 Фото и разбор", "callback_data": f"L:v:{l['key']}"[:64]},
-                               {"text": "👍 В шортлист", "callback_data": f"L:s:{l['key']}"[:64]}]]}
+    kb = {"inline_keyboard": [[{"text": "Открыть: фото и разбор", "callback_data": f"L:v:{l['key']}"[:64]}]]}
     ok = rr.tg_call(cfg, "sendMessage", {
         "chat_id": cfg["telegram_chat_id"], "text": text, "parse_mode": "HTML",
         "disable_web_page_preview": True, "reply_markup": json.dumps(kb, ensure_ascii=False)})
