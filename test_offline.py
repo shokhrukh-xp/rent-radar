@@ -2460,3 +2460,83 @@ with mock.patch.object(rr.requests, "get", fake_img), \
 assert SP[0][0].endswith("/sendPhoto") and SP[0][1]["caption"] == ct and SP[0][1]["disable_notification"] and "L:n:" in SP[0][1]["reply_markup"]
 print("OK — покупка: карточка и разбор одним сообщением — коллаж из фото, вывод сверху, детали свёрнуты, ≤1024 символов")
 
+
+# ============ место внутри района: ориентиры из объявлений, соседи в радиусе, карта, поиск у ориентира ============
+import geo as G
+gdb = Path("/tmp/test_geo.db"); gdb.unlink(missing_ok=True); gs = rr.Store(gdb); mk.ensure_tables(gs.conn)
+import random
+random.seed(7)
+def ins(key, d, la, lo, m2, nb=0, area=50, lm=None, addr=None, uid=None, rep="evro"):
+    gs.conn.execute("INSERT INTO market(key, op, district, rooms, area, price_usd, new_building, dorm, repair, user_id, "
+                    "first_seen, last_seen, lat, lng, landmark, addr) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (key, "sale", d, 2, area, m2 * area, nb, 0, rep, uid or key, "x", "x", la, lo, lm, addr))
+# Мирабад: дорогая часть у «Ойбека» (41.298, 69.274) и недорогая на юге (41.270, 69.290)
+for i in range(14):
+    ins(f"sale:uybor:a{i}", "Мирабад", 41.298 + random.uniform(-.004, .004), 69.274 + random.uniform(-.004, .004),
+        2400 + i * 10, lm="Ориентир: Мирабадский рынок" if i < 5 else None)
+for i in range(14):
+    ins(f"sale:uybor:b{i}", "Мирабад", 41.270 + random.uniform(-.004, .004), 69.290 + random.uniform(-.004, .004),
+        1500 + i * 10, lm="Госпитальный рынок" if i < 4 else None)
+# «Корзинка» — по всему городу: не ориентир
+for i, (la, lo) in enumerate([(41.35, 69.20), (41.25, 69.33), (41.32, 69.35), (41.28, 69.21)]):
+    ins(f"sale:uybor:k{i}", "Юнусабад", la, lo, 1700, lm="рядом Корзинка")
+gs.conn.commit()
+gaz = G.build(gs.conn)
+assert "*|mirabadskiy rinak" in gaz or "*|mirabadskiy" in gaz, sorted(gaz)[:20]
+assert not any("karzinka" in k for k in gaz)                                  # разброс по городу — не точка
+G.load(gs, rebuild=True)
+assert G.district_at(41.298, 69.274) == "Мирабад"
+# объявление из Telegram без координат — точка по ориентиру из текста
+tl = {"key": "sale:tg:x:1", "text": "Продаётся 2-комн. Ориентир: Мирабадский рынок, 3/9", "district": "Мирабад"}
+g = G.locate(tl)
+assert g["src"] == "ориентир" and G.km(g["lat"], g["lon"], 41.298, 69.274) < 0.6 and g["label"] == "Мирабадский рынок", g
+# метро — по названию станции; точка в чужом районе — не берём
+assert G.locate({"text": "5 минут до метро Ойбек", "district": "Мирабад"})["label"] == "м. Айбек"
+assert not G.locate({"text": "x", "lat": 41.298, "lon": 69.274, "district": "Сергели"})          # пин в другом районе
+assert G.locate({"text": "x", "lat": 41.298, "lon": 69.274, "district": "Мирабад"})["src"] == "сайт"
+# соседи в радиусе: одна и та же цена — дорого на юге, нормально у Ойбека
+south = dict(SS._listing(key="sale:tg:x:2", rooms=2, area=50, district="Мирабад", text="Ориентир: Госпитальный рынок"),
+             price_usd=2100 * 50, repair="evro", lat=41.270, lon=69.290)
+north = dict(south, key="sale:tg:x:3", lat=41.298, lon=69.274, text="Ориентир: Мирабадский рынок")
+xs, xn = mk.analyze(gs, dict(south), ss_all), mk.analyze(gs, dict(north), ss_all)
+assert xs["comp"]["near_km"] and "в радиусе" in xs["comp"]["label"] and xs["gap"] > 0.3, xs["comp"]
+assert -0.20 < xn["gap"] < -0.05 and "рядом" in xs["verdict"][2], (xn["gap"], xs["verdict"])
+assert xs["place"]["diff"] < -0.10 and xn["place"]["diff"] > 0.10                # дешёвая и дорогая части района
+card_s = rr.format_sale_card(gs, dict(south), dict(ss_all, worker_url="https://w.example"))
+assert "недорогая часть района" in card_s and "/map?p=41.27000,69.29000" in card_s and rr.tg_len(card_s) <= rr.CAPTION_MAX
+assert "Рядом (1 км)" in card_s
+# поиск у ориентира: радиус вместо района
+near = {"lat": 41.298, "lon": 69.274, "km": 1.0, "label": "м. Айбек", "districts": ["Мирабад"]}
+assert G.too_far(dict(north), near) == ""
+assert "км от «м. Айбек»" in G.too_far(dict(south), near)
+assert G.too_far({"text": "", "district": "Сергели"}, near).startswith("район Сергели")
+ssn = dict(ss_all["sale_search"], near=near, max_price_usd=500000, owner_only=False, rooms=[2])
+with mock.patch.object(rr, "classify_sale_seller", lambda *a: ""):
+    assert rr.sale_reject(dict(south, price_value=105000), ssn, gs, ss_all)[0].endswith("км от «м. Айбек»")
+    assert rr.sale_reject(dict(north, price_value=105000), ssn, gs, ss_all) == ("", False)
+pt = G.point_for("метро Ойбек")
+assert pt["src"] == "метро" and pt["label"] == "м. Айбек"
+assert G.point_for("Мирабадский рынок")["src"] == "ориентир"
+rd = Path("/tmp/test_geo_radar.db"); rd.unlink(missing_ok=True); rs__ = rr.Store(rd)
+with mock.patch.object(rr, "SALE_DB_PATH", gdb), mock.patch.object(rr, "tg_call", fake_sale_tg):
+    p1 = rr.near_point(ss_tg, rs__, "метро Ойбек", "1,5")
+    assert p1["km"] == 1.5 and "Мирабад" in p1["districts"]
+    cg.save_anketa(rs__, {"ans": {"deal": "buy", "object": "flat", "budget": "90000", "rooms": ["2"], "near": "метро Ойбек"}})
+    ess = rr.effective_sale_cfg(ss_tg, rs__)["sale_search"]
+    assert ess["near"]["label"] == "м. Айбек" and ess["districts"] == p1["districts"]
+    assert "от «м. Айбек»" in rr.sale_criteria_text(ess)
+    sent_msgs.clear()
+    assert rr.near_point(ss_tg, rs__, "Абракадабра 77") is None and "Не нашла на карте" in sent_msgs[-1][1]
+# маклерам — ориентир в тексте запроса
+assert "рядом с «метро Ойбек», до 2 км" in cg.compose_request(ss_tg, rs__)
+# карта цен
+grid = G.price_grid(gs.conn)
+assert grid["cells"] and all(c["n"] >= 3 for c in grid["cells"]) and grid["districts"]["Мирабад"]["n"] == 28
+gs.set_kv("price_grid_dirty", True)
+PM = []
+with mock.patch.object(rr, "worker_post", lambda c, path, payload, timeout=60: PM.append((path, payload)) or {"ok": True}):
+    assert rr.push_price_map(dict(ss_all, worker_url="https://w.example"), gs) is True
+assert PM[0][0] == "/svc/pricemap" and PM[0][1]["metro"] and gs.get_kv("price_grid_dirty") is False
+G.GAZ.update(gaz={}, pts=[], at=0, db=None)
+gdb.unlink(missing_ok=True); rd.unlink(missing_ok=True)
+print("OK — место: ориентиры из объявлений (без «Корзинок»), соседи в радиусе, дорогая/дешёвая часть района, поиск у ориентира, карта цен")

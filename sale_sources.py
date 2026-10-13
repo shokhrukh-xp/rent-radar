@@ -80,7 +80,12 @@ def _realt24_listing(rr, it, deal="sale"):
     photos = [x.get("w600") or x.get("original") for x in (it.get("imageSets") or [])[:6]
               if isinstance(x, dict) and (x.get("w600") or x.get("original"))]
     sale = deal == "sale"
+    adr = it.get("address") or {}
+    gl = adr.get("geoLocation") or {}
+    street = " ".join(str(((adr.get(k) or {}).get("ru")) or "") for k in ("area", "house")).strip()
     return _listing(
+        lat=gl.get("latitude"), lon=gl.get("longitude"),
+        text_place=street[:60],
         key=f"sale:realt24:{it.get('id')}" if sale else f"realt24:{it.get('id')}",
         source="Realt24 · продажа" if sale else "Realt24", site="Realt24",
         url=REALT24_URL.format(id=it.get("id")), title=name[:90], text=(desc or name)[:900],
@@ -133,7 +138,9 @@ def _joymee_listing(rr, lid, det):
     photos = [((m.get("file") or {}).get("url")) for m in (det.get("media") or [])[:6]
               if isinstance(m, dict) and (m.get("file") or {}).get("url")]
     seller = det.get("seller") or {}
+    loc = det.get("location") or {}
     return _listing(
+        lat=loc.get("latitude"), lon=loc.get("longitude"),
         key=key, source="Joymee · продажа", site="Joymee", url=JOYMEE_URL.format(id=lid),
         title=(det.get("title") or "")[:90], text=(det.get("description") or det.get("title") or "")[:900],
         price_value=_num(pr.get("price")), price_currency=cur,
@@ -312,6 +319,8 @@ def fetch_yangiuylar(ss, cfg, store):
                 if o.get("completion_date"):
                     bits.append(f"сдача {str(o['completion_date'])[:7]}")
                 out.append(_listing(
+                    lat=_num(o.get("latitude")), lon=_num(o.get("longitude")),
+                    text_place=f"ЖК «{o.get('name')}»" if o.get("name") else "",
                     key=f"sale:yu:{p['id']}", source="Yangiuylar · новостройка", site="Yangiuylar",
                     url=f"https://yangiuylar.uz/object/{o['id']}/apartment-details/{p['id']}",
                     title=f"ЖК {o.get('name')}: {rooms}-комн, {area:g} м²",

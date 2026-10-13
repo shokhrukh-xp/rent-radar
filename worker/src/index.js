@@ -1,3 +1,4 @@
+import { MAP_HTML } from "./map.js";
 /* Ra'no — «лицо» бота на Cloudflare Worker.
  *
  * Зачем: Python-бот живёт на GitHub Actions и онлайн лишь ~50 минут из 4–7 часов.
@@ -30,7 +31,7 @@ const E = {
 const M = { rooms: ["1", "2", "3", "4", "any"], floor_pref: ["nf", "nl", "mid", "any"] };
 const DATES = ["movein_date", "date_from", "date_to"];
 const ALL_KEYS = [...Object.keys(E), ...Object.keys(M), "districts", "city_other", "note",
-  "budget", "floor_min", "floor_max", ...DATES];
+  "budget", "floor_min", "floor_max", "near", "near_km", ...DATES];
 const START_CMDS = ["/start", "/new", "/app", "/mini", "/anketa", "/steps", "/search",
   "/start_search", "/profile", "/params"];
 
@@ -71,6 +72,12 @@ export function applyPatch(ans, set, clear) {
     if (DATES.includes(k)) { if (isoOk(v)) out[k] = String(v); continue; }
     if (k === "city_other") { out.city_other = String(v).trim().slice(0, 40); continue; }
     if (k === "note") { out.note = String(v).replace(/\s+/g, " ").trim().slice(0, 150); continue; }
+    if (k === "near") {                          // ориентир: «метро Ойбек», «Ц-1», «Госпитальный рынок»
+      const t = String(v).replace(/\s+/g, " ").trim().slice(0, 60);
+      if (t.length >= 2 && !/^(any|нет|неважно)$/i.test(t)) out.near = t;
+      continue;
+    }
+    if (k === "near_km") { const n = parseFloat(String(v).replace(",", ".")); if (n >= 0.3 && n <= 10) out.near_km = String(Math.round(n * 10) / 10); continue; }
   }
   const md = String((set || {}).movein_date || "").toLowerCase();
   if (["now", "month", "flex"].includes(md)) out.movein = md;
@@ -93,7 +100,7 @@ export function finalAns(a) {
   if (out.deal === "rent" && /^d/.test(out.term || "")) delete out.term;
   if (out.deal === "daily" && out.term && !/^d/.test(out.term)) delete out.term;
   if (out.deal === "buy") { delete out.term; delete out.who; delete out.pets; delete out.furniture; }
-  if (out.city !== "tashkent") { out.districts = []; delete out.districts_any; }
+  if (out.city !== "tashkent") { out.districts = []; delete out.districts_any; delete out.near; delete out.near_km; }
   if (out.city !== "other") delete out.city_other;
   return out;
 }
@@ -168,6 +175,10 @@ who: single | couple | family_kids | family (без детей) | big (боль�
 pets: no | cat | dog | pet_other
 parking: yes (нужна) | any
 contact: bot (маклеры пишут ассистенту — по умолчанию) | me (лично клиенту) | both
+near: ориентир, рядом с которым искать, — как назвал клиент: «метро Ойбек», «Ц-1», «Госпитальный рынок»,
+  «Мегапланет», «улица Бабура». Только конкретное место; «центр» — не near (в note).
+near_km: радиус в км, если клиент назвал («не дальше 2 км», «пешком до метро» → 1); иначе не ставь.
+  Ориентир и районы можно вместе: районы тогда не нужны, ищу по радиусу.
 note: короткая фраза для маклеров о том, для чего нет своего поля: «нужна ипотека»,
   «рассрочка», «ближе к центру», «рядом со школой». Пиши её целиком заново (с прежним содержимым),
   на языке письма маклерам (русский, для lang=uz — узбекский).
@@ -198,7 +209,8 @@ intent — что клиент хочет сделать этим сообщен
   Фото есть у объявлений с сайтов: их показывает show_item. Ты сама картинки не видишь.
 
 Честность: если ты ничего не записал в set — не пиши «учла», «обновила запрос».
-«Центр» без названий районов — не выдумывай districts, а положи «ближе к центру» в note.`;
+«Центр» без названий районов — не выдумывай districts, а положи «ближе к центру» в note.
+Ориентир («рядом с метро Ойбек», «у Ц-1», «в 2 км от Мегапланета») — в near (и near_km, если назван радиус).`;
 
 // Перечисления в схеме Gemini воспринимает как «заполнять только если уверен» и молча
 // пропускает поля — поэтому в схеме просто строки, а допустимые значения проверяет applyPatch.
@@ -206,7 +218,7 @@ intent — что клиент хочет сделать этим сообщен
 // молча пропускает часть (проверено вживую: who/pets/term/movein терялись),
 // а список фактов перечисляет полно. Значения проверяет applyPatch.
 const KEYS = [...Object.keys(E), "districts", "rooms", "floor_pref", "budget", "floor_min", "floor_max",
-  "movein_date", "date_from", "date_to", "city_other", "note"];
+  "movein_date", "date_from", "date_to", "city_other", "note", "near", "near_km"];
 export const SCHEMA = {
   type: "object",
   properties: {
@@ -517,15 +529,17 @@ export const OWNER_KB = { keyboard: [[{ text: BTN.rano }, { text: BTN.via }], [{
   input_field_placeholder: "Напишите, что ищете, или перешлите вариант" };
 export const BROKER_KB = { keyboard: [[{ text: BTN.what }]], resize_keyboard: true, is_persistent: true,
   input_field_placeholder: "Пришлите вариант: фото, адрес, этаж, цена" };
-const MORE_MENU = { inline_keyboard: [
+let ORIGIN = "";                         // адрес воркера — для ссылки на карту цен
+const MORE_MENU_ROWS = () => [
   [{ text: "✏️ Что ищем — посмотреть и поменять", callback_data: "cmd:/mysearch" }],
   [{ text: "💬 Маклер ответил мне в WhatsApp", callback_data: "cmd:/add" }],
   [{ text: "📋 Шортлист", callback_data: "cmd:/shortlist" }, { text: "📊 Цены рынка", callback_data: "cmd:/rynok" }],
   [{ text: "🏷 Поиск по сайтам", callback_data: "cmd:/rano" }, { text: "📝 Текст запроса", callback_data: "cmd:/request" }],
   [{ text: "📡 Источники: добавить свой канал", callback_data: "cmd:/sources" }],
   [{ text: "🔄 Начать поиск заново", callback_data: "q:again" }],
+  ...(ORIGIN ? [[{ text: "🗺 Карта цен по городу", url: ORIGIN + "/map" }]] : []),
   [{ text: "❓ Как это работает", callback_data: "cmd:/help" }],
-] };
+];
 // намерения из обычных фраз → что делает Python
 const INTENT_CMD = { show_offers: "/offers", shortlist: "/shortlist", brokers: "/brokers",
   market: "/rynok", help: "/help", request_text: "/request", sale_search: "/rano" };
@@ -907,7 +921,8 @@ export function summary(a) {
   const deal = { rent: "аренда", daily: "посуточно", buy: "покупка" }[a.deal] || "";
   const obj = { flat: "квартира", house: "дом", dacha: "дача", land: "участок" }[a.object] || "";
   const rooms = (a.rooms || []).length ? a.rooms.map(r => r === "4" ? "4+" : r).join("/") + "-комн." : "";
-  const ds = (a.districts || []).map(i => DISTRICTS[+i]).filter(Boolean).join(", ");
+  const ds = a.near ? `до ${(a.near_km || "2").replace(".", ",")} км от «${a.near}»`
+    : (a.districts || []).map(i => DISTRICTS[+i]).filter(Boolean).join(", ");
   const b = a.budget ? `до $${a.budget}${a.deal === "daily" ? "/сутки" : a.deal === "buy" ? "" : "/мес"}` : "";
   return [deal, obj, rooms, ds || (a.city === "tashkent" ? "Ташкент" : a.city_other || ""), b].filter(Boolean).join(" · ");
 }
@@ -1272,7 +1287,7 @@ export async function handleUpdate(env, upd) {
   if (text === BTN.offers || /^\/(offers|varianty)(@\w+)?$/i.test(text)) return (await showOffers(env, chat), "ui");
   if (text === BTN.brokers || /^\/(brokers|makler|outreach)(@\w+)?$/i.test(text)) return (await startOutreach(env, chat), "ui");
   if (text === BTN.more) {
-    await say(env, chat, "Что ещё умею:", { reply_markup: MORE_MENU });
+    await say(env, chat, "Что ещё умею:", { reply_markup: { inline_keyboard: MORE_MENU_ROWS() } });
     return "more";
   }
 
@@ -1385,6 +1400,15 @@ export default {
   async fetch(req, env, ctx) {
     const url = new URL(req.url);
     const p = url.pathname;
+    if (url.origin.startsWith("https://")) ORIGIN = url.origin;
+    if (p === "/map" || p === "/map/") {
+      return new Response(MAP_HTML, { headers: { "content-type": "text/html; charset=utf-8", "cache-control": "public, max-age=600" } });
+    }
+    if (p === "/map.json") {
+      const d = await kvGet(env, "pricemap", null);
+      return new Response(JSON.stringify(d || {}), { headers: { "content-type": "application/json",
+        "cache-control": "public, max-age=600", "access-control-allow-origin": "*" } });
+    }
     if (p === "/tg" && req.method === "POST") {
       if (env.TG_SECRET && req.headers.get("x-telegram-bot-api-secret-token") !== env.TG_SECRET)
         return new Response("forbidden", { status: 403 });
@@ -1439,6 +1463,12 @@ export default {
         snap.at = Date.now();
         await kvSet(env, "ui", snap);
         return json({ ok: true });
+      }
+      if (p === "/svc/pricemap" && req.method === "POST") {   // Python: сетка цен после среза рынка
+        const d = await req.json().catch(() => null);
+        if (!d || !Array.isArray(d.cells)) return json({ ok: false }, 400);
+        await kvSet(env, "pricemap", d);
+        return json({ ok: true, cells: d.cells.length });
       }
       if (p === "/svc/bye") { await kvSet(env, "py_alive", null); return json({ ok: true }); }
       if (p === "/svc/setup") {

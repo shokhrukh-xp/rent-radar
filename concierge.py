@@ -446,6 +446,10 @@ def compose_request(cfg, store, username=None):
             if uz:
                 names = [DISTRICT_UZ.get(n, n) for n in names]
             req.append(("tumanlar: " if uz else "районы: ") + ", ".join(names))
+        if ans.get("near"):                        # ориентир клиента — маклерам понятнее района
+            km_ = str(ans.get("near_km") or "2").replace(".0", "").replace(".", ",")
+            req.append((f"{ans['near']} atrofida, {km_} km gacha" if uz else
+                        f"рядом с «{ans['near']}», до {km_} км"))
     fb = _fmt_budget(ans, uz)
     if fb:
         req.append(fb)
@@ -589,8 +593,9 @@ def finish_anketa(cfg, store):
                                   "быстрее всего её находят маклеры.")
 
 
-def rent_settings(ans, settings):
-    """Аренда из разговора → фильтры радара аренды (бюджет, комнаты, районы), чтобы «ищу сама» шло по ним."""
+def rent_settings(ans, settings, cfg=None, store=None):
+    """Аренда из разговора → фильтры радара аренды (бюджет, комнаты, районы, ориентир),
+    чтобы «ищу сама» шло по ним."""
     rr = _rr()
     s = dict(settings)
     b = str(ans.get("budget") or "")
@@ -604,6 +609,8 @@ def rent_settings(ans, settings):
     ds = [rr.DISTRICT_LIST[int(i)] for i in (ans.get("districts") or [])
           if str(i).isdigit() and int(i) < len(rr.DISTRICT_LIST)]
     s["districts"] = ds
+    s["near"] = rr.near_point(cfg, store, ans.get("near"), ans.get("near_km")) \
+        if ans.get("near") and cfg is not None and store is not None else None
     return s
 
 
@@ -1621,7 +1628,7 @@ def send_app_button(cfg, store, text=None):
 
 ALLOWED = {f["k"] for f in STEPS} | {
     "budget_max", "floor_min", "floor_max", "city_other", "lang",
-    "date_from", "date_to", "movein_date", "note", "districts_any"}
+    "date_from", "date_to", "movein_date", "note", "districts_any", "near", "near_km"}
 
 
 # ---- компактный код параметров для deep link /start p<код> ---------------
@@ -1727,6 +1734,13 @@ def apply_webapp_data(cfg, store, raw):
         ans["city_other"] = str(ans["city_other"])[:40].strip()
     if "note" in ans:
         ans["note"] = " ".join(str(ans["note"]).split())[:150]
+    if ans.get("near"):
+        ans["near"] = " ".join(str(ans["near"]).split())[:60]
+    if ans.get("near_km"):
+        try:
+            ans["near_km"] = str(min(max(float(str(ans["near_km"]).replace(",", ".")), 0.3), 10.0))
+        except ValueError:
+            ans.pop("near_km")
     for k in ("date_from", "date_to", "movein_date"):   # только валидные yyyy-mm-dd
         if k in ans and not _DATE_RE.match(str(ans.get(k) or "")):
             ans.pop(k, None)

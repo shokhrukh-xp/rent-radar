@@ -32,6 +32,7 @@ import concierge
 import followup
 import sale_sources
 import market
+import geo
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "config.json"
@@ -930,7 +931,8 @@ class Store:
             "seller", "seller_id", "is_business", "photo_urls", "lat", "lon", "area",
             "floor", "floors_total", "furnished", "house_type", "commission",
             "seller_ads", "premium", "seller_kind", "listed_since", "new_building", "repair",
-            "site", "seller_hint", "mortgage", "price_note", "score", "why", "alts", "repair_photo")
+            "site", "seller_hint", "mortgage", "price_note", "score", "why", "alts", "repair_photo",
+            "geo", "text_place", "near_km")
 
     def pack(self, listing: dict) -> str:
         d = {k: listing.get(k) for k in self.KEEP}
@@ -1624,6 +1626,44 @@ def _sale_post(text: str) -> bool:
     return any(w in low for w in SALE_POST_WORDS) and not any(w in low for w in RENT_POST_WORDS)
 
 
+def near_point(cfg, store, text, km_=None):
+    """Ориентир клиента («метро Ойбек», «Ц-1») → точка и радиус для поиска. Кэш в kv радара;
+    не нашли на карте — один раз скажем клиенту и ищем по районам."""
+    text = " ".join(str(text or "").split())[:60]
+    if not text:
+        return None
+    try:
+        km_ = min(max(float(str(km_ or 2).replace(",", ".")), 0.3), 10.0)
+    except (TypeError, ValueError):
+        km_ = 2.0
+    key = f"{geo.skel(text)}|{km_:g}"
+    c = store.get_kv("near_point") or {}
+    if c.get("key") == key:
+        return c.get("pt")
+    pt = None
+    try:
+        sst = Store(SALE_DB_PATH)
+        try:
+            market.ensure_tables(sst.conn)
+            geo.ensure(sst)
+            pt = geo.point_for(text, sst, requests)
+        finally:
+            sst.conn.close()
+    except Exception as e:
+        log.warning("[место] «%s» не нашла: %s", text, e)
+    if pt:
+        pt["km"] = km_
+        pt["districts"] = geo.districts_within(pt["lat"], pt["lon"], km_ + 0.5) or \
+            [d for d in [geo.district_at(pt["lat"], pt["lon"], 1.5)] if d]
+        log.info("[место] «%s» → %.5f, %.5f (%s), районы: %s", text, pt["lat"], pt["lon"], pt["src"],
+                 ", ".join(pt["districts"]))
+    else:
+        send_telegram(cfg, f"📍 Не нашла на карте «{escape_html(text)}» — пока ищу по районам. "
+                           "Напишите ориентир иначе (например, «метро Ойбек», «Госпитальный рынок», «Ц-1»).")
+    store.set_kv("near_point", {"key": key, "pt": pt})
+    return pt
+
+
 def effective_sale_cfg(cfg, store):
     """Покупка из чата-интервью → поиск Uybor по тем же параметрам.
     Без районов в запросе — районы из настроек (по умолчанию центр)."""
@@ -1645,6 +1685,9 @@ def effective_sale_cfg(cfg, store):
     elif ans.get("districts_any"):              # клиент сказал «любой район» — весь Ташкент
         ss["districts"] = list(DISTRICT_LIST)
     ss["mortgage"] = "ипотек" in str(ans.get("note") or "").lower() or ans.get("payment") == "mortgage"
+    ss["near"] = near_point(cfg, store, ans.get("near"), ans.get("near_km")) if ans.get("near") else None
+    if ss["near"] and ss["near"].get("districts"):
+        ss["districts"] = ss["near"]["districts"]      # сайты спрашиваем по районам круга, отсев — по радиусу
     ss["enabled"] = True
     import sale_sources                          # каналы, которые добавили пользователи
     base = list(ss.get("sale_channels") or sale_sources.SALE_CHANNELS)
@@ -2399,7 +2442,7 @@ def search_like(cfg, store, l) -> str:
         ans["budget"] = str(int(round(l["price_usd"] * 1.1, -1 if rent else -3)))
     concierge.apply_webapp_data(cfg, store, json.dumps({"v": 3, "replace": True, "src": "link", "ans": ans}))
     if rent:                                   # фильтры радара аренды — по тем же условиям
-        store.set_kv("settings", concierge.rent_settings(ans, store.get_kv("settings") or default_settings()))
+        store.set_kv("settings", concierge.rent_settings(ans, store.get_kv("settings") or default_settings(), cfg, store))
     bits = [f'{l["rooms"]}-комн' if l.get("rooms") else "", l.get("district") or "",
             f'до ${_money(int(ans["budget"]))}' if ans.get("budget") else ""]
     send_telegram(cfg, "🎯 <b>Ищу такие же</b>: " + escape_html(" · ".join(b for b in bits if b))
@@ -3137,7 +3180,7 @@ def process_commands(cfg: dict, store, long_poll: int = 0) -> dict:
                 changed = True
                 ans = (store.get_kv("anketa") or {}).get("ans") or {}
                 if ans.get("deal") == "rent":     # «ищу сама» по аренде — по параметрам из разговора
-                    settings.update(concierge.rent_settings(ans, settings))
+                    settings.update(concierge.rent_settings(ans, settings, cfg, store))
                 push_snapshot(cfg, store, settings, force=True)   # новый текст запроса — в ссылки маклерам
             continue
 
@@ -3216,6 +3259,13 @@ def passes_user_filters(l: dict, settings: dict) -> bool:
     if rmin is not None and rooms is not None:
         if not rmin <= rooms <= (rmax if rmax is not None else rmin):
             return False
+    near = settings.get("near") or {}
+    if near.get("lat") is not None:          # аренда у ориентира — по радиусу
+        try:
+            geo.locate(l)
+        except Exception:
+            pass
+        return not geo.too_far(l, near)
     if settings.get("districts"):
         d = l.get("district")
         if d is None:
@@ -3302,7 +3352,17 @@ def sale_reject(l: dict, ss: dict, store, cfg) -> tuple:
     rooms = as_int(l.get("rooms"))
     if ss.get("rooms") and rooms is not None and rooms not in ss["rooms"]:
         return f"{rooms}-комн", False
-    if ss.get("districts") and l.get("district") not in ss["districts"]:
+    try:                                     # где квартира: координаты сайта или ориентир из текста
+        geo.ensure(store)
+        geo.locate(l)
+    except Exception as e:
+        log.info("[место] %s: %s", l.get("key"), e)
+    near = ss.get("near") or {}
+    if near.get("lat") is not None:          # клиент ищет у ориентира — радиус вместо района
+        far = geo.too_far(l, near)
+        if far:
+            return far, False
+    elif ss.get("districts") and l.get("district") not in ss["districts"]:
         return f"район {l.get('district') or 'не указан'}", False
     a = age_days(l.get("created_at") or "")
     if a is not None and a > ss.get("notify_max_age_days", 14):
@@ -3488,9 +3548,17 @@ def format_sale_card(store, l: dict, cfg: dict, head: str = "", note: str = "") 
         spec.append(f'этаж {l["floor"]}' + (f'/{l["floors_total"]}' if l.get("floors_total") else ""))
     if spec:
         top.append("<b>" + " · ".join(spec) + "</b>")
-    place = [l.get("district") or "район не указан", "новостройка" if l.get("new_building") else "вторичка",
+    g = l.get("geo") or {}
+    where = l.get("district") or "район не указан"
+    if g.get("label") and not g["label"].startswith("м. "):
+        where += f', у «{g["label"]}»' if g.get("src") == "сайт" else f', {g["label"]}'
+    nb = l["_nb"] if "_nb" in l else l.get("new_building")
+    place = [where, "новостройка" if nb else "вторичка",
              FOUNDATION_RU.get(l.get("house_type") or "", l.get("house_type") or "")]
     top.append(escape_html(" · ".join(p for p in place if p)))
+    pline, pdet = market.place_lines(x, l) if x else ("", "")
+    if pline:
+        top.append(escape_html(pline))
     p = l.get("price_usd")
     if p:
         price = f"<b>${_money(p)}</b>"
@@ -3574,6 +3642,8 @@ def format_sale_card(store, l: dict, cfg: dict, head: str = "", note: str = "") 
         dep = x["assumptions"]["usd_deposit"]
         pb = x.get("payback_years")
         det.append(f'Вклад в $ даёт {dep * 100:.0f}%' + (f'; окупится за ~{pb:.0f} лет' if pb else ""))
+    if pdet:
+        det.append(escape_html(pdet))
     v = x.get("values")
     if v:
         det.append(f'Через 5 лет — скорее ~${_money(market._r500(v["base"][5]))} '
@@ -3590,6 +3660,8 @@ def format_sale_card(store, l: dict, cfg: dict, head: str = "", note: str = "") 
     desc = _desc_clean(l.get("text") or "")
 
     foot = f'<a href="{l["url"]}">Открыть на {escape_html(l.get("site") or "Uybor")}</a>' if l.get("url") else ""
+    if g and cfg.get("worker_url"):
+        foot += (" · " if foot else "") + f'<a href="{map_url(cfg, g["lat"], g["lon"])}">карта цен</a>'
     if x:
         foot += (" · " if foot else "") + f'<a href="{market.REPORT_URL}">как считаю</a>'
 
@@ -3762,6 +3834,9 @@ def sale_criteria_text(ss: dict) -> str:
     rooms = "–".join(str(r) for r in (ss.get("rooms") or []))
     rooms = f"{rooms} комн" if rooms else "любая комнатность"
     districts = ", ".join(ss.get("districts") or []) or "любые районы"
+    nr = ss.get("near") or {}
+    if nr.get("lat") is not None:
+        districts = f'до {str(round(nr["km"], 1)).replace(".0", "").replace(".", ",")} км от «{nr["label"]}»'
     if ss.get("owner_only", True):
         sellers = (f'Только собственники: у продавца не больше {ss.get("max_owner_ads", 2)} '
                    f'объявлений и нет признаков агентства.')
@@ -3774,7 +3849,7 @@ def sale_criteria_text(ss: dict) -> str:
 def sale_fingerprint(ss: dict) -> str:
     """Условия поиска одной строкой: изменились — пересматриваем отсеянное."""
     keys = ("max_price_usd", "min_price_usd", "rooms", "districts", "owner_only",
-            "max_owner_ads", "notify_max_age_days")
+            "max_owner_ads", "notify_max_age_days", "near")
     return json.dumps({k: ss.get(k) for k in keys}, ensure_ascii=False, sort_keys=True)
 
 
@@ -3842,6 +3917,7 @@ def run_sale_search(cfg: dict, store, settings: dict, force: bool = False) -> in
         log.warning("[продажа] другие источники: %s", e)
     # раз в сутки — срез рынка для анализа (сам ловит свои ошибки)
     market.maybe_scan(store, cfg, sale_district_ids(ss))
+    push_price_map(cfg, store)
 
     # Условия поиска поменялись — всё, что раньше отсеяли, пересматриваем заново.
     # Уже присланное не трогаем, чтобы не было повторов.
@@ -3980,6 +4056,33 @@ def ago_text(mins: float) -> str:
         return f"{mins:.0f} мин назад"
     h, m = divmod(int(mins), 60)
     return f"{h} ч {m:02d} мин назад"
+
+
+def push_price_map(cfg, store) -> bool:
+    """После среза — сетка цен на страницу «Карта цен» (воркер /map)."""
+    if not store.get_kv("price_grid_dirty") or not cfg.get("worker_url"):
+        return False
+    try:
+        grid = geo.price_grid(store.conn)
+    except Exception as e:
+        log.warning("[карта] сетка не собралась: %s", e)
+        return False
+    if not grid["cells"]:
+        return False
+    grid["at"] = store.get_kv("market_scan_at")
+    grid["metro"] = [[n.split(" (")[0], la, lo] for n, (la, lo) in analyst.METRO.items()]
+    if worker_post(cfg, "/svc/pricemap", grid):
+        store.set_kv("price_grid_dirty", False)
+        log.info("[карта] обновила карту цен: %d клеток", len(grid["cells"]))
+        return True
+    return False
+
+
+def map_url(cfg, lat=None, lon=None) -> str:
+    base = (cfg.get("worker_url") or "").rstrip("/")
+    if not base:
+        return ""
+    return f"{base}/map" + (f"?p={lat:.5f},{lon:.5f}" if lat is not None else "")
 
 
 def sale_district_ids(ss: dict) -> list:
@@ -4128,6 +4231,14 @@ def run():
     log.info("Rent Radar запущен%s. Источники: %s. Лимит: $%s",
              mode, ", ".join(enabled) or "нет", cfg["max_price_usd"])
 
+    try:                                       # справочник ориентиров — для «где квартира» и поиска у ориентира
+        if SALE_DB_PATH.exists():
+            _gs = Store(SALE_DB_PATH)
+            market.ensure_tables(_gs.conn)
+            geo.load(_gs)
+            _gs.conn.close()
+    except Exception as e:
+        log.warning("[место] справочник не загрузился: %s", e)
     sale_cfg = effective_sale_cfg(cfg, store).get("sale_search") or {}   # покупка из чата включает поиск
     sale_store, next_sale = None, 0.0
     next_sale_brokers = time.time() + 120     # сначала — поиск по сайтам, сбор маклеров потом

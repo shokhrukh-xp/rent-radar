@@ -538,3 +538,21 @@ sent.length = 0;
 assert.equal(await handleUpdate(env, msg("канал @kvartira_bez_posrednika", "555001")), "channel");   // маклер тоже может
 assert.ok(texts().some(t => /Спасибо! Проверяю/.test(t)));
 console.log("OK — каналы от пользователей: ссылка или @имя → проверка в Python; посты и упоминания людей — не каналы");
+
+// ── ориентир клиента и карта цен
+{ const a = applyPatch({}, { near: "метро Ойбек", near_km: "1,5" }, []);
+  assert.equal(a.near, "метро Ойбек"); assert.equal(a.near_km, "1.5");
+  assert.equal(applyPatch({}, { near: "неважно", near_km: "50" }, []).near, undefined);
+  assert.match(summary({ deal: "buy", near: "Ц-1", near_km: "2", budget: "80000" }), /до 2 км от «Ц-1»/);
+  assert.equal(finalAns({ city: "region", near: "x" }).near, undefined); }
+{ let r = await worker.fetch(new Request("https://w.example/map.json"), env, { waitUntil() {} });
+  assert.deepEqual(await r.json(), {});                                   // до первого среза — пусто
+  r = await post("/svc/pricemap", { cells: [{ b: [41.3, 69.2, 41.31, 69.21], all: 1500, n: 4 }], districts: {}, at: "2026-10-13" });
+  assert.equal((await r.json()).cells, 1);
+  r = await worker.fetch(new Request("https://w.example/map.json"), env, { waitUntil() {} });
+  assert.equal((await r.json()).cells[0].all, 1500);
+  r = await worker.fetch(new Request("https://w.example/map?p=41.3,69.2"), env, { waitUntil() {} });
+  assert.match(r.headers.get("content-type"), /text\/html/); assert.match(await r.text(), /Сколько стоит м²/);
+  r = await worker.fetch(new Request("https://w.example/svc/pricemap", { method: "POST", body: "{}" }), env, { waitUntil() {} });
+  assert.equal(r.status, 401); }                                          // писать карту — только с ключом
+console.log("OK — ориентир клиента (near) и карта цен: /map, /map.json, запись только с ключом");

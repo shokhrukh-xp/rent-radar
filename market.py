@@ -22,6 +22,8 @@ from datetime import datetime, timezone
 
 import requests
 
+import geo
+
 log = logging.getLogger("rent-radar")
 
 UYBOR_API = "https://api.uybor.uz/api/v1/listings"
@@ -209,11 +211,24 @@ def ensure_tables(conn):
     conn.execute("""CREATE TABLE IF NOT EXISTS market(
         key TEXT PRIMARY KEY, op TEXT, district TEXT, rooms INTEGER, area REAL,
         price_usd REAL, new_building INTEGER, repair TEXT, created_at TEXT,
-        user_id TEXT, dorm INTEGER, first_seen TEXT, last_seen TEXT, removed_at TEXT)""")
+        user_id TEXT, dorm INTEGER, first_seen TEXT, last_seen TEXT, removed_at TEXT,
+        lat REAL, lng REAL, zone INTEGER, landmark TEXT, addr TEXT)""")
     conn.execute("""CREATE TABLE IF NOT EXISTS market_prices(
         key TEXT, seen_at TEXT, price_usd REAL)""")
     conn.execute("CREATE INDEX IF NOT EXISTS market_op ON market(op, district)")
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(market)")}
+    added = False
+    for col, typ in (("lat", "REAL"), ("lng", "REAL"), ("zone", "INTEGER"), ("landmark", "TEXT"), ("addr", "TEXT")):
+        if col not in cols:                      # координаты и ориентиры — с 13.10.2026
+            conn.execute(f"ALTER TABLE market ADD COLUMN {col} {typ}")
+            added = True
+    if added:                                    # старая база — срез с координатами нужен сразу
+        try:
+            conn.execute("INSERT OR REPLACE INTO kv(key, value) VALUES('geo_backfill_needed', 'true')")
+        except Exception:
+            pass
     conn.commit()
+    return added
 
 
 def _row_from_uybor(o: dict, op: str, uzs_per_usd: float):
@@ -246,6 +261,10 @@ def _row_from_uybor(o: dict, op: str, uzs_per_usd: float):
     except (TypeError, ValueError):
         rooms = None
     desc = (o.get("description") or "").lower()
+    lat, lng = o.get("lat"), o.get("lng")
+    if not geo.in_city(lat, lng):
+        lat = lng = None
+    lms = geo.landmarks(o.get("description") or "")
     return {
         "key": f'{op}:uybor:{o.get("id")}', "op": op,
         "district": UYBOR_DISTRICTS.get(o.get("districtId")),
@@ -254,6 +273,9 @@ def _row_from_uybor(o: dict, op: str, uzs_per_usd: float):
         "repair": o.get("repair"), "created_at": o.get("createdAt"),
         "user_id": str(o.get("userId")),
         "dorm": 1 if any(w in desc for w in DORM_WORDS) else 0,
+        "lat": lat, "lng": lng, "zone": o.get("zoneId"),
+        "landmark": " | ".join(lms)[:160] or None,
+        "addr": (str(o.get("address") or "").strip()[:80] or None),
     }
 
 
@@ -262,11 +284,11 @@ def _upsert(conn, r: dict, now: str):
     if old is None:
         conn.execute(
             "INSERT INTO market(key, op, district, rooms, area, price_usd, new_building, "
-            "repair, created_at, user_id, dorm, first_seen, last_seen, removed_at) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,NULL)",
+            "repair, created_at, user_id, dorm, first_seen, last_seen, removed_at, lat, lng, zone, landmark, addr) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,?,?,?,?,?)",
             (r["key"], r["op"], r["district"], r["rooms"], r["area"], r["price_usd"],
              r["new_building"], r["repair"], r["created_at"], r["user_id"], r["dorm"],
-             now, now))
+             now, now, r.get("lat"), r.get("lng"), r.get("zone"), r.get("landmark"), r.get("addr")))
         conn.execute("INSERT INTO market_prices(key, seen_at, price_usd) VALUES(?,?,?)",
                      (r["key"], now, r["price_usd"]))
         return
@@ -274,8 +296,9 @@ def _upsert(conn, r: dict, now: str):
         conn.execute("INSERT INTO market_prices(key, seen_at, price_usd) VALUES(?,?,?)",
                      (r["key"], now, r["price_usd"]))
     conn.execute("UPDATE market SET price_usd=?, area=?, rooms=?, district=?, last_seen=?, "
-                 "removed_at=NULL WHERE key=?",
-                 (r["price_usd"], r["area"], r["rooms"], r["district"], now, r["key"]))
+                 "removed_at=NULL, lat=?, lng=?, zone=?, landmark=?, addr=? WHERE key=?",
+                 (r["price_usd"], r["area"], r["rooms"], r["district"], now,
+                  r.get("lat"), r.get("lng"), r.get("zone"), r.get("landmark"), r.get("addr"), r["key"]))
 
 
 def _fetch(params: dict) -> list:
@@ -326,12 +349,19 @@ def scan(store, cfg: dict, district_ids=None) -> dict:
             time.sleep(0.4)
     conn.commit()
     store.set_kv("market_scan_at", started)
+    geo.load(store, rebuild=True)                # справочник ориентиров — по свежему срезу
+    store.set_kv("price_grid_dirty", True)
     log.info("[рынок] срез Uybor: продажа %d, аренда %d", stats["sale"], stats["rent"])
     return stats
 
 
 def maybe_scan(store, cfg: dict, district_ids=None) -> bool:
     a = assumptions(cfg)
+    ensure_tables(store.conn)
+    if store.get_kv("geo_backfill_needed"):      # 13.10.2026: у среза появились координаты — заполнить сразу
+        store.set_kv("geo_backfill_needed", False)
+        store.set_kv("market_scan_at", None)
+        store.set_kv("market_scan_try", None)
     last = _days_since(store.get_kv("market_scan_at") or "")
     if last is not None and last * 24 < a["scan_every_hours"]:
         return False
@@ -387,6 +417,20 @@ def comparables(store, l: dict, min_n: int = 6, repair=None):
                 and (1 - spread) * area <= ar <= (1 + spread) * area]
 
     kind = "бывшие общежития" if dorm else ("новостройки" if nb else "вторичка")
+    rep = {"good": ", хороший ремонт", "average": ", средний ремонт", "box": ", коробка"}.get(repair, "")
+    g = l.get("geo") or {}
+    if g and geo.GAZ["pts"]:
+        # сначала соседи: в одном районе есть и дорогие, и дешёвые части
+        where = f' от «{g["label"]}»' if g.get("label") else ""
+        for radius, spread in ((1.0, 0.3), (1.0, 0.5), (1.5, 0.5), (2.0, 0.5)):
+            vals = [r[7] / r[6] for r in geo.neighbors(g["lat"], g["lon"], radius)
+                    if r[9] != own and r[5] == dorm and r[4] == nb and (not codes or r[8] in codes)
+                    and (1 - spread) * area <= r[6] <= (1 + spread) * area]
+            if len(vals) >= min_n:
+                rng = f"{(1 - spread) * area:.0f}–{(1 + spread) * area:.0f} м²"
+                rad = f"{radius:g}".replace(".", ",")
+                return {"median_m2": _median(vals), "n": len(vals), "near_km": radius,
+                        "label": f"в радиусе {rad} км{where}, {kind}{rep}, {rng}"}
     d = l.get("district")
     for dist, seg, spread in ((True, True, 0.3), (True, True, 0.5), (False, True, 0.3),
                               (False, True, 0.5), (True, False, 0.5)):
@@ -395,7 +439,6 @@ def comparables(store, l: dict, min_n: int = 6, repair=None):
             where = d if dist else "весь Ташкент"
             what = kind if (seg or dorm) else "вся продажа"
             rng = f"{(1 - spread) * area:.0f}–{(1 + spread) * area:.0f} м²"
-            rep = {"good": ", хороший ремонт", "average": ", средний ремонт", "box": ", коробка"}.get(repair, "")
             return {"median_m2": _median(vals), "n": len(vals), "label": f"{where}, {what}{rep}, {rng}"}
     return None
 
@@ -446,6 +489,18 @@ def analyze(store, l: dict, cfg: dict) -> dict:
     out = {"price": price, "area": area, "flags": [], "assumptions": a}
     if not price:
         return out
+    try:                                           # где квартира: соседи в радиусе, часть района, метро
+        geo.ensure(store)
+        if "geo" not in l:
+            geo.locate(l)
+        if l.get("geo"):
+            l["_nb"] = 1 if looks_new(l.get("new_building"), l.get("text")) else 0
+            l["_dorm"] = 1 if is_dorm(l) else 0
+            out["place"] = geo.locality(l)
+            import analyst
+            out["metro"] = analyst.nearest_metro(l["geo"]["lat"], l["geo"]["lon"])
+    except Exception as e:
+        log.info("[место] %s: %s", l.get("key"), e)
     cls, rsrc, claimed = repair_info(l)
     out["repair"], out["repair_src"], out["repair_claimed"] = cls, rsrc, claimed
     signs = [t.strip() for t in str((l.get("repair_photo") or {}).get("signs") or "").split(",") if t.strip()]
@@ -579,26 +634,54 @@ def analyze(store, l: dict, cfg: dict) -> dict:
     use_all_in = out.get("gap_all_in") is not None and not out.get("comp_same_repair")
     gap = out["gap_all_in"] if use_all_in else out.get("gap")
     out["gap_fair"] = gap
+    near = " рядом" if (out.get("comp") or {}).get("near_km") and not use_all_in else ""
     good_yield = out.get("net_yield") is not None and out["net_yield"] >= a["usd_deposit"] + 0.02
     pct = f"{abs(gap) * 100:.0f}%" if gap is not None else ""
     with_reno = (" даже с ремонтом" if gap < 0 else " с учётом ремонта") if use_all_in else \
         (" с таким же ремонтом" if out.get("comp_same_repair") else "")
     if gap is not None and gap >= 0.10:
-        verdict = ("🔴", "Дорого", f"на {pct} дороже похожих{with_reno}")
+        verdict = ("🔴", "Дорого", f"на {pct} дороже похожих{near}{with_reno}")
     elif gap is not None and gap <= -0.10:
-        verdict = ("🟢", "Хорошая цена", f"на {pct} дешевле похожих{with_reno}")
+        verdict = ("🟢", "Хорошая цена", f"на {pct} дешевле похожих{near}{with_reno}")
     elif gap is None and out.get("comp_unreliable") is not None and out["comp_unreliable"] < 0:
         verdict = ("⚪", "Подозрительно дёшево", "в разы дешевле похожих в районе — проверьте адрес, "
                                                   "документы и состояние")
     elif gap is None:
         verdict = ("⚪", "Сравнить не с чем", "мало похожих объявлений — оценивайте на месте")
     else:
-        verdict = ("🟡", "Цена в рынке", (f"на {pct} {'дешевле' if gap < 0 else 'дороже'} похожих{with_reno}"
+        verdict = ("🟡", "Цена в рынке", (f"на {pct} {'дешевле' if gap < 0 else 'дороже'} похожих{near}{with_reno}"
                                           if abs(gap) >= 0.02 else "как у похожих") + " — торгуйтесь")
     if "dorm" in out["flags"] and verdict[0] != "🔴":
         verdict = ("🟠", verdict[1] + ", но бывшее общежитие", verdict[2] + "; проверьте кадастр и приватизацию")
     out["verdict"] = verdict
     return out
+
+
+def place_lines(x: dict, l: dict):
+    """Место квартиры: (строка для карточки, подробность «как считала»); пустые — если не знаем."""
+    g = l.get("geo") or {}
+    if not g:
+        return "", ""
+    bits = []
+    pl = x.get("place")
+    if pl:
+        pct = f'{pl["diff"] * 100:+.0f}%'.replace("-", "−")
+        bits.append(f'{geo.place_word(pl["diff"])} ({pct} к району)' if abs(pl["diff"]) >= 0.10
+                    else geo.place_word(pl["diff"]))
+    mt = x.get("metro")
+    if mt:
+        name = mt[0].split(" (")[0]
+        bits.append(f"м. {name} ~{mt[2]} мин пешком" if mt[2] <= 25 else f"до метро {mt[1]:.1f} км".replace(".", ","))
+    line = ("Место — " + " · ".join(bits)) if bits else ""
+    det = ""
+    if pl:
+        kind = "новостройки" if l.get("_nb") else "вторичка"
+        rad = f'{pl["radius"]:g}'.replace(".", ",")
+        det = (f'Рядом ({rad} км) {kind} — ${_money(pl["local_m2"])}/м² ({pl["n"]} объявл.), по району '
+               f'${_money(pl["district_m2"])}/м² ({pl["dn"]})')
+    if g.get("src") in ("ориентир", "метро"):
+        det = (det + "; т" if det else "Т") + f'очку поставила по ориентиру «{g.get("label")}» — адрес уточните'
+    return line, det
 
 
 def format_analysis(store, l: dict, cfg: dict) -> str:
@@ -626,6 +709,9 @@ def format_analysis(store, l: dict, cfg: dict) -> str:
     elif x.get("m2"):
         lines.append(f'💵 ${_money(x["m2"])}/м² — похожих пока мало для сравнения')
 
+    pline, pdet = place_lines(x, l)
+    if pline:
+        lines.append("📍 " + pline)
     # ремонт
     cls, rsrc, claimed = x.get("repair"), x.get("repair_src"), x.get("repair_claimed")
     by = {"фото": "по фото", "описание": "по описанию", "пометка сайта": "по пометке сайта"}.get(rsrc, "")
@@ -692,6 +778,8 @@ def format_analysis(store, l: dict, cfg: dict) -> str:
     if x.get("good_comp"):
         gc = x["good_comp"]
         d.append(f'С хорошим ремонтом: ${_money(gc["median_m2"])}/м², {gc["n"]} объявл.')
+    if pdet:
+        d.append(pdet)
     if x.get("official_m2"):
         d.append(f'средняя по району: ${_money(x["official_m2"])}/м² (госоценка на 01.09.2026, новостройки и вторичка вместе)')
     if x.get("days_on_market") is not None:
@@ -758,4 +846,6 @@ def summary_text(store, cfg: dict, districts: list) -> str:
     lines.append(f'Сценарии на год (цена в $): спад {s["pess"][0] * 100:+.0f}%, '
                  f'база {s["base"][0] * 100:+.0f}%, рост {s["opt"][0] * 100:+.0f}%')
     lines.append(f'<a href="{REPORT_URL}">Полный отчёт о рынке</a>')
+    if cfg.get("worker_url"):
+        lines.append(f'<a href="{cfg["worker_url"].rstrip("/")}/map">🗺 Карта цен: дорогие и недорогие части районов</a>')
     return "\n".join(lines)
