@@ -4078,6 +4078,19 @@ def push_price_map(cfg, store) -> bool:
     return False
 
 
+def load_geo():
+    try:
+        if SALE_DB_PATH.exists():
+            gs = Store(SALE_DB_PATH)
+            try:
+                market.ensure_tables(gs.conn)
+                geo.load(gs)
+            finally:
+                gs.conn.close()
+    except Exception as e:
+        log.warning("[место] справочник не загрузился: %s", e)
+
+
 def map_url(cfg, lat=None, lon=None) -> str:
     base = (cfg.get("worker_url") or "").rstrip("/")
     if not base:
@@ -4231,14 +4244,7 @@ def run():
     log.info("Rent Radar запущен%s. Источники: %s. Лимит: $%s",
              mode, ", ".join(enabled) or "нет", cfg["max_price_usd"])
 
-    try:                                       # справочник ориентиров — для «где квартира» и поиска у ориентира
-        if SALE_DB_PATH.exists():
-            _gs = Store(SALE_DB_PATH)
-            market.ensure_tables(_gs.conn)
-            geo.load(_gs)
-            _gs.conn.close()
-    except Exception as e:
-        log.warning("[место] справочник не загрузился: %s", e)
+    load_geo()                                 # справочник ориентиров — для «где квартира» и поиска у ориентира
     sale_cfg = effective_sale_cfg(cfg, store).get("sale_search") or {}   # покупка из чата включает поиск
     sale_store, next_sale = None, 0.0
     next_sale_brokers = time.time() + 120     # сначала — поиск по сайтам, сбор маклеров потом
