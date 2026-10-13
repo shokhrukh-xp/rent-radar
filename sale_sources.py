@@ -233,7 +233,9 @@ def parse_realting(page):
         tg = re.search(r'href="https://(?:telegram\.me|t\.me)/([A-Za-z][A-Za-z0-9_]{3,31})\?', blk)
         fl = FLOOR_RE.search(units.get("Этаж", ""))
         price = _num(usd.group(1)) if usd else None
+        thumbs = list(dict.fromkeys(re.findall(r'https://static\d?\.realting\.com/uploads/thumbs\d*/([0-9a-f]{3}/[0-9a-f]+\.(?:webp|jpe?g|png))', blk)))
         out.append(_listing(
+            photo_urls=[f"https://static2.realting.com/uploads/bigSlider/{t}" for t in thumbs[:4]],
             key=f"sale:realting:{pid}", source="Realting · продажа", site="Realting",
             url=f"https://realting.uz/property/{pid}",
             title=html_lib.unescape(title.group(1)).strip()[:90] if title else f"Realting #{pid}",
@@ -319,6 +321,8 @@ def fetch_yangiuylar(ss, cfg, store):
                 if o.get("completion_date"):
                     bits.append(f"сдача {str(o['completion_date'])[:7]}")
                 out.append(_listing(
+                    photo_urls=[((f.get("file") or {}).get("path")) for f in (o.get("files") or [])
+                                if isinstance(f, dict) and (f.get("file") or {}).get("path")][:4],
                     lat=_num(o.get("latitude")), lon=_num(o.get("longitude")),
                     text_place=f"ЖК «{o.get('name')}»" if o.get("name") else "",
                     key=f"sale:yu:{p['id']}", source="Yangiuylar · новостройка", site="Yangiuylar",
@@ -429,6 +433,25 @@ def _uybor_by_id(rr, uid):
     return l, o.get("operationType") or "sale"
 
 
+def realting_photos(rr, pid) -> list:
+    """Галерея со страницы объявления Realting (в списке — только одно превью)."""
+    r = requests.get(f"https://realting.uz/property/{pid}", headers=rr.HEADERS, timeout=25)
+    r.raise_for_status()
+    hs = list(dict.fromkeys(re.findall(
+        r'https://static\d?\.realting\.com/uploads/(?:bigSlider|bigMax|images|thumbs\d*)/([0-9a-f]{3}/[0-9a-f]+\.(?:webp|jpe?g|png))',
+        r.text)))
+    return [f"https://static2.realting.com/uploads/bigSlider/{h}" for h in hs[:6]]
+
+
+def has_photos(l) -> bool:
+    """Без фото вариант не показываем: сравнивать квартиры без фото бесполезно.
+    Перед отказом пробуем достать фото со страницы объявления."""
+    if l.get("photo_urls"):
+        return True
+    refresh_listing(l)
+    return bool(l.get("photo_urls"))
+
+
 def refresh_listing(l) -> bool:
     """Свежие фото и данные для показа позже: у Joymee ссылки на фото живут 10 минут."""
     rr = _rr()
@@ -439,6 +462,8 @@ def refresh_listing(l) -> bool:
             new = _joymee_listing(rr, lid, _joymee_detail(rr, lid))
         elif key.startswith("sale:uybor:") and not l.get("photo_urls"):
             new, _ = _uybor_by_id(rr, key.rsplit(":", 1)[-1])
+        elif key.startswith("sale:realting:") and len(l.get("photo_urls") or []) < 2:
+            new = {"photo_urls": realting_photos(rr, key.rsplit(":", 1)[-1])}
         else:
             return False
     except (requests.RequestException, ValueError, KeyError) as e:
@@ -671,7 +696,8 @@ def photo_repair(cfg, l) -> bool:
     """Ремонт по фото объявления (модель через воркер). True — сделали новую оценку.
     Оценку храним в объявлении, повторно не зовём; воркер недоступен — попробуем в другой раз."""
     rr = _rr()
-    if "repair_photo" in l or not l.get("photo_urls") or not cfg.get("worker_url"):
+    if "repair_photo" in l or not l.get("photo_urls") or not cfg.get("worker_url") \
+            or (l.get("key") or "").startswith("sale:yu:"):          # у Yangiuylar — рендеры ЖК, не ремонт
         return False
     r = rr.worker_post(cfg, "/svc/repair", {"urls": l["photo_urls"][:4]}, timeout=90)
     if not (r or {}).get("ok"):
@@ -757,6 +783,9 @@ def pick_line(l, why):
 
 
 def queue_pick(store, l, sc, why):
+    if not has_photos(l):
+        _rr().log.info("[продажа] без фото — не показываю: %s", (l.get("title") or l.get("key"))[:50])
+        return
     q = store.get_kv("sale_pick") or []
     if any(x["key"] == l["key"] for x in q):
         return

@@ -13,6 +13,7 @@ import datetime as _dt
 import json
 import re
 import statistics
+import time
 from datetime import datetime, timedelta, timezone
 
 TZ = timezone(timedelta(hours=5))
@@ -1006,22 +1007,16 @@ def notify_offer(cfg, store, oid, pos=None, total=None):
     o = get_offer(store, oid)
     if not o:
         return
-    text = offer_card(store, cfg, o, pos=pos, total=total)
-    kb = json.dumps(triage_keyboard(oid), ensure_ascii=False)
-    if o["photos"]:
-        media = [{"type": "photo", "media": f} for f in o["photos"][:4]]
-        media[0]["caption"] = text[:1000]
-        media[0]["parse_mode"] = "HTML"
-        rr.tg_call(cfg, "sendMediaGroup", {
-            "chat_id": cfg["telegram_chat_id"],
-            "media": json.dumps(media, ensure_ascii=False)})
-        rr.tg_call(cfg, "sendMessage", {
-            "chat_id": cfg["telegram_chat_id"], "text": "Ну как вам? 👀",
-            "reply_markup": kb})
-    else:
-        rr.tg_call(cfg, "sendMessage", {
-            "chat_id": cfg["telegram_chat_id"], "text": text,
-            "parse_mode": "HTML", "reply_markup": kb})
+    oo = dict(o)
+    text = offer_card(store, cfg, oo, pos=pos, total=total)
+    for cut in (200, 80, 0):                     # подпись к фото — до 1024 символов
+        if rr.tg_len(text) <= rr.CAPTION_MAX:
+            break
+        oo["text"] = (o.get("text") or "")[:cut]
+        text = offer_card(store, cfg, oo, pos=pos, total=total)
+    if not o["photos"]:
+        text += "\n📷 Маклер не прислал фото — без них не сравнить, попрошу при уточнении"
+    rr.send_card(cfg, {"photo_urls": o["photos"][:6]}, text, kb=triage_keyboard(oid))
 
 
 def show_offers(cfg, store, batch=None):
@@ -1263,39 +1258,72 @@ def offer_view(store, cfg, o, idx=None):
     for n in (ex.get("notes") or [])[-5:]:
         parts.append(f"📝 {rr.escape_html(n.get('text', ''))}")
     oid = o["oid"]
-    rows = []
+    top = []
     if not o.get("asked_at") and not o.get("replied_at"):
-        rows.append([{"text": "📨 Уточнить детали у маклера", "callback_data": f"o:ask:{oid}"}])
+        top.append({"text": "📨 Уточнить", "callback_data": f"o:ask:{oid}"})
     elif o.get("status") == "asked" and not o.get("replied_at") and can_message_broker(o) \
             and not ex.get("reminded"):
-        rows.append([{"text": "🔔 Напомнить маклеру", "callback_data": f"o:rem:{oid}"}])
-    if v.get("at"):
-        rows.append([{"text": "📅 Перенести просмотр", "callback_data": f"o:view:{oid}"},
-                     {"text": "✖️ Отменить", "callback_data": f"o:vclr:{oid}"}])
-    else:
-        rows.append([{"text": "📅 Назначить просмотр", "callback_data": f"o:view:{oid}"}])
-    rows.append([{"text": "👍 Посмотрели, нравится", "callback_data": f"o:seen:{oid}:g"},
-                 {"text": "🤔 Думаю", "callback_data": f"o:seen:{oid}:m"}])
-    rows.append([{"text": "📝 Заметка", "callback_data": f"o:note:{oid}"},
-                 {"text": "👎 Не то — убрать", "callback_data": f"o:seen:{oid}:n"}])
-    rows.append([{"text": "← К шортлисту", "callback_data": "s:ref"}])
+        top.append({"text": "🔔 Напомнить", "callback_data": f"o:rem:{oid}"})
+    top.append({"text": "📅 Перенести" if v.get("at") else "📅 Просмотр", "callback_data": f"o:view:{oid}"})
+    rows = [top, [{"text": "👍 Нравится", "callback_data": f"o:seen:{oid}:g"},
+                  {"text": "📝 Заметка", "callback_data": f"o:note:{oid}"},
+                  {"text": "👎 Убрать", "callback_data": f"o:seen:{oid}:n"}]]
     return "\n".join(parts), {"inline_keyboard": rows}
 
 
-def show_offer_view(cfg, store, oid, message_id=None):
+def offer_photos(cfg, o) -> list:
+    """Фото варианта: присланные маклером (file_id) или с сайта (свежие ссылки — у Joymee живут 10 минут)."""
+    rr = _rr()
+    photos = list(o.get("photos") or [])
+    key = (o.get("extra") or {}).get("site_key")
+    if key and rr.SALE_DB_PATH.exists():
+        try:
+            import sale_sources
+            st = rr.Store(rr.SALE_DB_PATH)
+            try:
+                row = st.conn.execute("SELECT data FROM listings WHERE key=?", (key,)).fetchone()
+            finally:
+                st.conn.close()
+            if row:
+                l = json.loads(row[0] or "{}")
+                sale_sources.refresh_listing(l)
+                photos = l.get("photo_urls") or photos
+        except Exception as e:
+            rr.log.info("фото варианта #%s: %s", o.get("oid"), e)
+    return photos[:6]
+
+
+def offer_caption(store, cfg, o, head=""):
+    """Текст карточки варианта под фото (≤1024 символа у Telegram): лишнее из описания обрезаем."""
+    rr = _rr()
+    oo = dict(o)
+    for cut in (None, 200, 80, 0):
+        if cut is not None:
+            oo["text"] = (o.get("text") or "")[:cut]
+            oo["note"] = (o.get("note") or "")[:cut]
+        text, kb = offer_view(store, cfg, oo)
+        text = (head + "\n\n" if head else "") + text
+        if rr.tg_len(text) <= rr.CAPTION_MAX:
+            break
+    if not o.get("photos") and not (o.get("extra") or {}).get("site_key"):
+        text += "\n📷 Фото нет — «📨 Уточнить» попросит их у маклера"
+    return text, kb
+
+
+def show_offer_view(cfg, store, oid, message_id=None, head=""):
+    """Карточка варианта одним сообщением: фото + этап + кнопки. После действия — правим её же."""
     rr = _rr()
     o = get_offer(store, oid)
     if not o:
         return False
-    text, kb = offer_view(store, cfg, o)
-    payload = {"chat_id": cfg["telegram_chat_id"], "text": text, "parse_mode": "HTML",
-               "reply_markup": json.dumps(kb, ensure_ascii=False)}
+    text, kb = offer_caption(store, cfg, o, head)
+    kbj = json.dumps(kb, ensure_ascii=False)
     if message_id:
-        payload["message_id"] = message_id
-        if rr.tg_call(cfg, "editMessageText", payload) is not None:
-            return True
-        payload.pop("message_id")
-    rr.tg_call(cfg, "sendMessage", payload)
+        for method, field in (("editMessageCaption", "caption"), ("editMessageText", "text")):
+            if rr.tg_call(cfg, method, {"chat_id": cfg["telegram_chat_id"], "message_id": message_id,
+                                        field: text, "parse_mode": "HTML", "reply_markup": kbj}, quiet=True) is not None:
+                return True
+    rr.send_card(cfg, {"photo_urls": offer_photos(cfg, o)}, text, kb=kb)
     return True
 
 
@@ -1417,9 +1445,11 @@ def handle_offer_cb(data, cfg, store, message_id=None):
                             + (" — маклеру ушёл вежливый отказ." if can_message_broker(o) else "."),
                     "reply_markup": json.dumps({"inline_keyboard": [[
                         {"text": "📋 Шортлист", "callback_data": "s:show"}]]}, ensure_ascii=False)}
-            if message_id:
-                rr.tg_call(cfg, "editMessageText", {**done, "message_id": message_id})
-            else:
+            if not message_id or (
+                    rr.tg_call(cfg, "editMessageCaption", {"chat_id": done["chat_id"], "message_id": message_id,
+                                                          "caption": done["text"], "parse_mode": "HTML",
+                                                          "reply_markup": done["reply_markup"]}, quiet=True) is None
+                    and rr.tg_call(cfg, "editMessageText", {**done, "message_id": message_id}, quiet=True) is None):
                 rr.tg_call(cfg, "sendMessage", done)
             return "👎 Убрала — не наше", True
         toast = "👍 Записала: нравится!" if arg == "g" else "🤔 Записала: думаете"
@@ -1433,18 +1463,30 @@ def handle_offer_cb(data, cfg, store, message_id=None):
     return toast, True
 
 
-def show_shortlist(cfg, store, message_id=None):
+SL_PAGE = 5
+
+
+def show_shortlist(cfg, store, message_id=None, offset=0):
+    """Шортлист — карточками: у каждого варианта свои фото, этап и кнопки. Без сводного списка.
+    Спросить всех разом — одной кнопкой на первой карточке; больше 5 — «Ещё» на последней."""
     rr = _rr()
-    text, kb, _ = shortlist_view(store, cfg)
-    payload = {"chat_id": cfg["telegram_chat_id"], "text": text, "parse_mode": "HTML"}
-    if kb:
-        payload["reply_markup"] = json.dumps(kb, ensure_ascii=False)
-    if message_id:
-        payload["message_id"] = message_id
-        if rr.tg_call(cfg, "editMessageText", payload) is not None:
-            return
-        payload.pop("message_id")
-    rr.tg_call(cfg, "sendMessage", payload)
+    items = [o for o in offers_by_status(store, "shortlist") + offers_by_status(store, "asked") if o]
+    items.sort(key=SORTS.get(store.get_kv("sl_sort", "n"), SORTS["n"])[1])
+    if not items:
+        rr.tg_call(cfg, "sendMessage", {"chat_id": cfg["telegram_chat_id"], "text": SL_EMPTY, "parse_mode": "HTML"})
+        return 0
+    page = items[offset:offset + SL_PAGE]
+    n_ask = sum(1 for o in items if askable(o))
+    for i, o in enumerate(page, offset + 1):
+        text, kb = offer_caption(store, cfg, o, head=f"📋 <b>Шортлист</b> · {i} из {len(items)}")
+        if i == offset + 1 and n_ask > 1:
+            kb["inline_keyboard"].append([{"text": f"📨 Уточнить у всех ({n_ask})", "callback_data": "s:go"}])
+        if i == offset + len(page) and offset + SL_PAGE < len(items):
+            kb["inline_keyboard"].append([{"text": f"Ещё ({len(items) - offset - SL_PAGE})",
+                                           "callback_data": f"s:more:{offset + SL_PAGE}"}])
+        rr.send_card(cfg, {"photo_urls": offer_photos(cfg, o)}, text, kb=kb)
+        time.sleep(1)
+    return len(page)
 
 
 def details_question(o, cfg=None, deal="rent"):
@@ -1463,6 +1505,8 @@ def details_question(o, cfg=None, deal="rent"):
         q[1] += f" ({', '.join(tag)})"
     q[1] += ":"
     items = ["Он ещё актуален?", "Точный адрес и ориентир?"]
+    if not o.get("photos") and not (o.get("extra") or {}).get("site_key"):
+        items.append("Пришлите, пожалуйста, фото квартиры (комнаты, кухня, санузел).")
     if not o["floor"]:
         items.append("Какой этаж и этажность?")
     if not o["area"]:
@@ -1533,28 +1577,20 @@ def handle_shortlist_cb(data, cfg, store, message_id=None):
             oid = int(parts[2])
         except (IndexError, ValueError):
             return "", True
-        if not show_offer_view(cfg, store, oid, message_id):
+        if not show_offer_view(cfg, store, oid):        # новой карточкой с фото, а не поверх списка
             return "Вариант не найден", True
         return "", True
-    if act == "clr":
-        show_shortlist(cfg, store, message_id)
-        return "", True
-    if act == "sort":
-        order = ["n", "p", "m"]
-        cur = store.get_kv("sl_sort", "n")
-        store.set_kv("sl_sort", order[(order.index(cur) + 1) % len(order)])
-        show_shortlist(cfg, store, message_id)
-        return "Сортировка изменена", True
-    if act == "ref":
-        show_shortlist(cfg, store, message_id)
-        return "Обновлено", True
-    if act == "show":                         # кнопка «Шортлист» из другого сообщения — новым сообщением
+    if act in ("clr", "sort", "ref", "show"):  # шортлист — карточками, новыми сообщениями
         show_shortlist(cfg, store)
         return "", True
+    if act == "more":
+        try:
+            show_shortlist(cfg, store, offset=int(parts[2]))
+        except (IndexError, ValueError):
+            show_shortlist(cfg, store)
+        return "", True
     if act == "go":
-        toast = request_details(cfg, store)
-        show_shortlist(cfg, store, message_id)
-        return toast, True
+        return request_details(cfg, store), True
     return "", False
 
 

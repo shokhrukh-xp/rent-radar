@@ -883,11 +883,17 @@ assert any(b["callback_data"] == "s:go" and "(2)" in b["text"] for row in kb["in
 with mock.patch.object(rr, "tg_call", fake_tg):
     SENT.clear()
     cg.handle_shortlist_cb(f"s:o:{oid1}", cfg, cs, 1)          # номер → карточка
-    card = [pl for m, pl in SENT if m == "editMessageText"][-1]
+    card = [pl for m, pl in SENT if m in ("sendMessage", "sendPhoto")][-1]   # номер → новая карточка с фото
     ckb = json.loads(card["reply_markup"])["inline_keyboard"]
     datas = [b["callback_data"] for row in ckb for b in row]
     assert f"o:ask:{oid1}" in datas and f"o:view:{oid1}" in datas and f"o:seen:{oid1}:g" in datas
-    assert "Этап" in card["text"]
+    assert len(datas) <= 5 and "s:ref" not in datas                     # кнопок немного
+    assert "Этап" in (card.get("caption") or card.get("text"))
+    SENT.clear()
+    assert cg.show_shortlist(cfg, cs) == 2                               # шортлист — карточками, без списка
+    sl_cards = [pl for m, pl in SENT if "Шортлист</b> · " in (pl.get("text") or pl.get("caption") or "")]
+    assert len(sl_cards) == 2 and "1 из 2" in (sl_cards[0].get("text") or sl_cards[0].get("caption"))
+    assert "s:go" in sl_cards[0]["reply_markup"]
     SENT.clear()
     toast, _ = cg.handle_offer_cb(f"o:ask:{oid1}", cfg, cs, 1)
     assert "Отправлено: 1" in toast
@@ -914,8 +920,9 @@ with mock.patch.object(rr, "tg_call", fake_tg):
     assert any("Напоминаю" in pl.get("text", "") for m, pl in SENT if str(pl.get("chat_id")) == "555")
     assert "второй раз" in cg.remind_broker(cfg, cs, oid1)
 
-    cg.handle_shortlist_cb("s:sort", cfg, cs, 1)
-    assert cs.get_kv("sl_sort") in ("p", "m", "n")
+    SENT.clear()
+    cg.handle_shortlist_cb("s:sort", cfg, cs, 1)                       # старые кнопки — просто карточки заново
+    assert any("Шортлист</b> · " in (pl.get("text") or pl.get("caption") or "") for m, pl in SENT)
 
 # --- сообщение от маклера через process-слой ---
 with mock.patch.object(rr, "tg_call", fake_tg):
@@ -1203,7 +1210,7 @@ def uy(id_, user, district, room=1, price=40000, cur="usd", days=1, desc="Про
     return {"id": id_, "userId": user, "districtId": district, "room": room, "price": price,
             "priceCurrency": cur, "square": 30, "floor": id_ % 9 + 1, "floorTotal": 12,
             "isNewBuilding": False, "repair": "evro", "createdAt": _iso(days),
-            "description": desc, "address": "ул. Тестовая", "media": []}
+            "description": desc, "address": "ул. Тестовая", "media": [{"url": f"https://api.uybor.uz/api/v1/media/n/{id_}.jpg"}]}
 
 UY_ADS = {1: 1, 2: 134, 3: 1, 4: 2, 5: 1, 6: 1, 7: 1, 8: 1}   # userId → объявлений
 UY_BY_DISTRICT = {
@@ -1961,7 +1968,7 @@ assert j["url"] == "https://joymee.uz/announcements/77" and j["repair"] == "ев
 assert len(rt) == 2 and rt[0]["key"] == "sale:realting:555" and (rt[0]["area"], rt[0]["floor"], rt[0]["price_value"]) == (48, 5, 46000)
 assert rt[0]["district"] == "Юнусабад" and rt[0]["seller"] == "@Agent_Uz"
 # продавец по пометке сайта: без запросов к Uybor
-lj = dict(j); lj["price_usd"] = 45000
+lj = dict(j); lj["price_usd"] = 45000; lj["photo_urls"] = lj.get("photo_urls") or ["https://cdn.joymee.uz/77.jpg"]
 assert rr.sale_reject(lj, ssx, xs, cfg) == ("", False) and lj["seller_kind"] == "owner"
 la = dict(r24[1]); SS.normalize(la, cfg)
 assert rr.sale_reject(la, ssx, xs, cfg) == ("", False) and la["seller_kind"] == "agency"
@@ -1978,7 +1985,7 @@ assert SS.structural_dup(xs, dict(lj, floor=7)) is None
 # подборка: лучшие сверху, 👍 → шортлист с ссылкой и телефоном продавца
 XT = []
 xtg = lambda c, m, pl, **k: (XT.append((m, pl)), {"ok": True})[1]
-lr = dict(rt[0], price_usd=46000)
+lr = dict(rt[0], price_usd=46000, photo_urls=["https://static2.realting.com/uploads/bigSlider/abc/1.webp"])
 xs.save(lj, notified=False); xs.save(lr, notified=False)
 SS.queue_pick(xs, lj, 70, why_j); SS.queue_pick(xs, lr, 55, [])
 with mock.patch.object(rr, "tg_call", xtg):
@@ -1995,8 +2002,8 @@ assert "Последняя подборка" in (XT[-1][1].get("text") or XT[-1]
 XT.clear()
 with mock.patch.object(rr, "tg_call", xtg), mock.patch.object(rr, "SALE_DB_PATH", xdb):
     t5, _ = rr.handle_callback("L:v:sale:joymee:77", rr.default_settings(), ys if "ys" in dir() else None, cfg, 1)
-assert any(m == "sendMessage" and "L:n:sale:joymee:77" in pl.get("reply_markup", "") for m, pl in XT)   # разбор с 👍/Мимо
-assert any("Открыть на Joymee" in (pl.get("text") or "") for m, pl in XT)
+assert any(m in ("sendMessage", "sendPhoto") and "L:n:sale:joymee:77" in pl.get("reply_markup", "") for m, pl in XT)   # разбор с 👍/Мимо
+assert any("Открыть на Joymee" in (pl.get("text") or pl.get("caption") or "") for m, pl in XT)
 assert xs.conn.execute("SELECT notified FROM listings WHERE key='sale:joymee:77'").fetchone()[0] == 1
 with mock.patch.object(rr, "tg_call", xtg), mock.patch.object(rr, "SALE_DB_PATH", xdb):
     t1, _ = rr.handle_callback("L:s:sale:joymee:77", rr.default_settings(), ys, cfg, 1)
@@ -2105,7 +2112,7 @@ ddb = Path("/tmp/test_dups_sale.db"); ddb.unlink(missing_ok=True); ds = rr.Store
 DT = []
 dtg = lambda c, m, pl, **k: (DT.append((m, pl)), {"ok": True})[1]
 base = {"source": "Joymee · продажа", "site": "Joymee", "rooms": 2, "area": 36.0, "floor": 1, "floors_total": 4,
-        "district": "Юнусабад", "phones": [], "text": "", "seller_kind": "owner"}
+        "district": "Юнусабад", "phones": [], "text": "", "seller_kind": "owner", "photo_urls": ["https://cdn.joymee.uz/x.jpg"]}
 own = dict(base, key="sale:joymee:1", url="https://joymee.uz/announcements/1", seller="Umidjon", price_usd=43000,
            title="Юнусабад 2 квартал 1 в 2 /1/4 2 комнаты")
 agt = dict(base, key="sale:joymee:2", url="https://joymee.uz/announcements/2", seller="Санжар", price_usd=47000,
@@ -2267,10 +2274,12 @@ LT = []
 def link_tg(cfg_, method, payload, timeout=20, quiet=False):
     LT.append((method, payload)); return {"ok": True, "result": {"message_id": 5}}
 with mock.patch.object(rr, "SALE_DB_PATH", ldb), mock.patch.object(rr, "tg_call", link_tg), \
-        mock.patch.object(SS, "listing_from_url", lambda c, u: (dict(link_l), "sale")):
+        mock.patch.object(SS, "listing_from_url", lambda c, u: (dict(link_l, photo_urls=["https://x/1.jpg"]), "sale")), \
+        mock.patch.object(SS, "_uybor_by_id", lambda rr_, i: ({"photo_urls": [f"https://api.uybor.uz/{i}.jpg"]}, None)):
     rr.handle_link(cfg, lr_, {"_link": "https://www.olx.uz/d/obyavlenie/kv-ID1.html", "text": "найди похожие https://www.olx.uz/d/obyavlenie/kv-ID1.html"})
-card = next(pl["text"] for m, pl in LT if "Уже видела" in (pl.get("text") or ""))
-assert "<b>Ипотека</b>" in card and rr.tg_len(card) <= rr.CAPTION_MAX and sum("Уже видела" in (pl.get("text") or "") for m, pl in LT) == 1
+tx_ = lambda pl: pl.get("text") or pl.get("caption") or ""
+card = next(tx_(pl) for m, pl in LT if "Уже видела" in tx_(pl))
+assert "<b>Ипотека</b>" in card and rr.tg_len(card) <= rr.CAPTION_MAX and sum("Уже видела" in tx_(pl) for m, pl in LT) == 1
 assert "uybor.uz/listings/777" in card and "маклер" in card
 assert any("L:sim:sale:link:" in (pl.get("reply_markup") or "") for m, pl in LT)
 simm = " ".join(pl.get("reply_markup") or "" for m, pl in LT if "Похожий вариант" in (pl.get("text") or pl.get("caption") or ""))
@@ -2335,11 +2344,13 @@ RT = []
 def rent_tg(cfg_, method, payload, timeout=20, quiet=False):
     RT.append((method, payload)); return {"ok": True, "result": {"message_id": 9}}
 with mock.patch.object(rr, "SALE_DB_PATH", sdb2), mock.patch.object(rr, "tg_call", rent_tg), \
-        mock.patch.object(SS, "listing_from_url", lambda c, u: (dict(rent_l), "rent")):
+        mock.patch.object(SS, "listing_from_url", lambda c, u: (dict(rent_l, photo_urls=["https://x/r.jpg"], url=u,
+                                                                   **({} if u == rent_l["url"] else {"key": "ru:" + u[-3:]})), "rent")):
     rr.handle_link(cfg, rs2, {"_link": rent_l["url"], "text": rent_l["url"] + " похожие есть?"})
-card = next(pl.get("text") or pl.get("caption") or "" for m, pl in RT if "Похожие (3)" in (pl.get("text") or ""))
+tx_ = lambda pl: pl.get("text") or pl.get("caption") or ""
+card = next(tx_(pl) for m, pl in RT if "Похожие (3)" in tx_(pl))
 assert "~$600/мес" in card and "на 17% дороже" in card, card
-assert any("Похожая аренда" in (pl.get("text") or "") for m, pl in RT)
+assert sum("Похожая аренда" in tx_(pl) for m, pl in RT) == 3                     # каждая — своей карточкой с фото
 assert rs2.known("link:" + rent_l["key"].split(":")[-1])
 with mock.patch.object(rr, "SALE_DB_PATH", sdb2), mock.patch.object(rr, "tg_call", rent_tg):
     rr.handle_callback("L:like:link:" + rent_l["key"].split(":")[-1], rr.default_settings(), rs2, cfg, 1)
@@ -2545,3 +2556,20 @@ assert PM[0][0] == "/svc/pricemap" and PM[0][1]["metro"] and gs.get_kv("price_gr
 G.GAZ.update(gaz={}, pts=[], at=0, db=None)
 gdb.unlink(missing_ok=True); rd.unlink(missing_ok=True)
 print("OK — место: ориентиры из объявлений (без «Корзинок»), соседи в радиусе, дорогая/дешёвая часть района, поиск у ориентира, карта цен")
+
+# ============ без фото — не показываем ============
+npdb = Path("/tmp/test_nophoto.db"); npdb.unlink(missing_ok=True); nps = rr.Store(npdb)
+nol = dict(SS._listing(key="sale:tg:x:9", text="2-комн, Мирабад"), price_usd=50000, area=50)
+SS.queue_pick(nps, nol, 80, [])
+assert not nps.get_kv("sale_pick")                                       # в подборку не попал
+SS.queue_pick(nps, dict(nol, photo_urls=["https://x/1.jpg"]), 80, [])
+assert len(nps.get_kv("sale_pick")) == 1
+with mock.patch.object(rr, "tg_call", lambda *a, **k: {"ok": True, "result": {}}):
+    nps.save(nol, notified=False)
+    assert rr.send_site_cards(cfg, nps, ["sale:tg:x:9"]) == 0             # карточка без фото не уходит
+assert "попросить" in cg.details_question({"rooms": 2, "district": "Мирабад", "price_usd": 0, "floor": 3, "area": 50,
+                                           "photos": [], "extra": {}}, cfg, "buy").lower() or \
+       "фото" in cg.details_question({"rooms": 2, "district": "Мирабад", "price_usd": 0, "floor": 3, "area": 50,
+                                      "photos": [], "extra": {}}, cfg, "buy")
+npdb.unlink(missing_ok=True)
+print("OK — без фото: в подборку и карточкой не показываем, у маклера просим фото")

@@ -1236,7 +1236,7 @@ HELP_TEXT = """🏠 <b>Ra'no</b> — ваш ИИ-ассистент по пои�
 Варианты из WhatsApp — перешлите сюда, соберу карточку с анализом цены.
 Ссылка на объявление (OLX, Uybor, Joymee, канал) — разберу и найду похожие.
 Знаете Telegram-канал с объявлениями по Ташкенту — пришлите ссылку или @имя: проверю и добавлю в поиск для всех 📡
-Понравилось объявление с сайта — «👍 В шортлист». В шортлисте нажмите номер: уточнить, назначить просмотр, заметка, «посмотрел».
+Понравилось объявление — «👍 В шортлист». Шортлист приходит карточками с фото: на каждой — уточнить, просмотр, заметка, «нравится» или «убрать».
 Напоминаю сама: если маклер молчит сутки, утром в день просмотра и за 2 часа до него; в 20:00 — итоги дня. Я пунктуальная 😉
 
 Для тонкой настройки радара остались команды: /menu, /status, /owner, /segment, /work, /photos, /pause, /resume"""
@@ -2395,7 +2395,7 @@ def send_similar_rent(cfg, store, sst, l) -> int:
     if not found:
         send_telegram(cfg, "🔎 Похожей аренды за последний месяц не нашла. Нажмите «🎯 Искать такие» — буду ловить новые.")
         return 0
-    n, items = 0, found[:4]
+    n, items = 0, found[:6]
     for i, o in enumerate(items, 1):                 # каждая — отдельной карточкой со своими фото
         if not o.get("title"):                       # строка среза Uybor — открыть объявление целиком
             try:
@@ -2406,6 +2406,8 @@ def send_similar_rent(cfg, store, sst, l) -> int:
                 continue
             o = dict(full, key=rent_key(full), source=full.get("site") or "Uybor")
             o["price_usd"] = to_usd(o.get("price_value"), o.get("price_currency"), cfg)
+        if not o.get("photo_urls"):
+            continue                                 # без фото не показываем
         text = f"🔎 <b>Похожая аренда</b> · {i} из {len(items)}\n\n" + format_message(o, cfg, o.get("is_business") is True)
         kb = {"inline_keyboard": [[{"text": "🎯 Искать такие", "callback_data": f"L:like:{o['key']}"[:64]}]]}
         if not store.known(o["key"]):
@@ -2683,7 +2685,7 @@ def run_search(cfg, store, settings, limit=5, days=7) -> str:
             f"{r}-комн ${m:.0f}" for r, (m, n) in sorted(med.items())))
     send_telegram(cfg, "\n".join(head))
 
-    for i, l in enumerate(ok[:limit], 1):
+    for i, l in enumerate([x for x in ok if x.get("photo_urls")][:limit], 1):   # только с фото
         l["title"] = f"#{i} · {l.get('title', '')}"
         send_listing(cfg, settings, l, likely_makler=False)
         time.sleep(1)
@@ -3736,7 +3738,22 @@ def _pil():
         return False
 
 
-def make_collage(urls, more: int = 0, width: int = 1280):
+def photo_bytes(cfg, ref):
+    """Фото по ссылке или по file_id Telegram (фото, которые прислал маклер)."""
+    if str(ref).startswith("http"):
+        r = requests.get(ref, headers=HEADERS, timeout=15)
+        return r.content if r.status_code == 200 else None
+    if not cfg or not cfg.get("telegram_bot_token"):
+        return None
+    f = tg_call(cfg, "getFile", {"file_id": ref}, quiet=True)
+    path = ((f or {}).get("result") or {}).get("file_path")
+    if not path:
+        return None
+    r = requests.get(f'https://api.telegram.org/file/bot{cfg["telegram_bot_token"]}/{path}', timeout=20)
+    return r.content if r.status_code == 200 else None
+
+
+def make_collage(urls, more: int = 0, width: int = 1280, cfg=None):
     """До 4 фото в одну картинку, как альбом Telegram: 1 крупно сверху + до 3 снизу.
     more — сколько фото не влезло (подпишем «+N» на последнем). Возвращает JPEG или None."""
     if not urls or not _pil():
@@ -3746,9 +3763,9 @@ def make_collage(urls, more: int = 0, width: int = 1280):
     imgs = []
     for u in urls[:4]:
         try:
-            r = requests.get(u, headers=HEADERS, timeout=15)
-            if r.status_code == 200 and len(r.content) > 1000:
-                im = Image.open(BytesIO(r.content))
+            content = photo_bytes(cfg, u)
+            if content and len(content) > 1000:
+                im = Image.open(BytesIO(content))
                 im.load()
                 imgs.append(im.convert("RGB"))
         except Exception as e:
@@ -3809,7 +3826,7 @@ def send_card(cfg, l: dict, text: str, kb: dict = None, silent: bool = False):
         extra["disable_notification"] = True
     if photos and not long_text:
         try:
-            img = make_collage(photos[:4], more=len(photos) - 4)
+            img = make_collage(photos[:4], more=len(photos) - 4, cfg=cfg)
         except Exception as e:
             log.warning("коллаж не собрался: %s", e)
             img = None
@@ -3837,9 +3854,11 @@ def send_card(cfg, l: dict, text: str, kb: dict = None, silent: bool = False):
 def send_site_cards(cfg, sst, items, title="", more=0, more_cb="R:pick", limit=5) -> int:
     """Варианты — каждый отдельной карточкой со своими фото и разбором (без сводных списков).
     items — ключи или объявления; title — подпись сверху «Подборка дня · 2 из 5».
-    more — сколько ещё ждёт: на последней карточке кнопка «Ещё варианты»."""
-    sent, items = 0, list(items)[:limit]
-    for i, it in enumerate(items, 1):
+    Без фото вариант не показываем. more — сколько ещё ждёт: на последней карточке «Ещё варианты»."""
+    ready = []
+    for it in list(items):
+        if len(ready) >= limit:
+            break
         l = it
         if isinstance(it, str) or "price_usd" not in it:
             key = it if isinstance(it, str) else it.get("key")
@@ -3856,10 +3875,16 @@ def send_site_cards(cfg, sst, items, title="", more=0, more_cb="R:pick", limit=5
                     sst.conn.commit()
         except Exception as e:
             log.info("[продажа] карточка %s: %s", l.get("key"), e)
-        head = f"🔎 <b>{escape_html(title)}</b> · {i} из {len(items)}" if title and len(items) > 1 else \
+        if l.get("photo_urls"):
+            ready.append(l)
+        else:
+            log.info("[продажа] без фото — не показываю: %s", l.get("key"))
+    sent = 0
+    for i, l in enumerate(ready, 1):
+        head = f"🔎 <b>{escape_html(title)}</b> · {i} из {len(ready)}" if title and len(ready) > 1 else \
             (f"🔎 <b>{escape_html(title)}</b>" if title else "")
         kb = sale_kb(l["key"], "self")
-        if more and i == len(items):
+        if more and i == len(ready):
             kb["inline_keyboard"].append([{"text": f"Ещё варианты ({more})", "callback_data": more_cb}])
         if send_card(cfg, l, format_sale_card(sst, l, cfg, head=head), kb=kb):
             sent += 1
@@ -4045,6 +4070,10 @@ def run_sale_search(cfg: dict, store, settings: dict, force: bool = False) -> in
         sc, why, strong, _ = sale_sources.score(store, l, cfg, ss)
         l["score"], l["why"] = sc, why
         mins = fresh_owner_minutes(l, ss) if not first else None     # первый проход — без «горячих»
+        if not sale_sources.has_photos(l):           # без фото не сравнить — не показываем
+            store.save(l, notified=False)
+            log.info("[продажа] без фото — не показываю: %s", l["title"][:50])
+            continue
         if mins is not None or (strong and day.get("instant", 0) + capped < cap):
             silent = is_night()
             head = (f"🔥 <b>Только что от собственника</b> · выложено {ago_text(mins)}\n"
@@ -4372,6 +4401,10 @@ def run():
                     store.save(l, notified=False)
                     continue
 
+                if settings.get("photos", True) and not l.get("photo_urls"):
+                    store.save(l, notified=False)          # без фото не сравнить — не показываем
+                    log.info("[%s] без фото — не показываю: %s", name, l["title"][:50])
+                    continue
                 likely_makler = seller_cnt >= cfg["makler_user_threshold"]
                 try:
                     analyst.score_listing(l, store, cfg, market, settings)

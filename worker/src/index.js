@@ -661,6 +661,11 @@ async function pendingChanges(env) {
 }
 
 export async function showShortlist(env, chat, messageId = null) {
+  // карточки с фото собирает Python — список из снимка больше не показываем
+  return asCommand(env, chat, "/shortlist");
+}
+
+export async function showShortlistList(env, chat, messageId = null) {   // прежний список (не используется)
   const ui = await kvGet(env, "ui", null);
   if (!ui || !ui.sl) return asCommand(env, chat, "/shortlist");
   const st = await kvGet(env, "sl", null) || { sort: "n" };
@@ -678,7 +683,6 @@ export async function showShortlist(env, chat, messageId = null) {
 
 async function asCommand(env, chat, cmd, L = "ru") {
   if (await instantText(env, chat, cmd)) return;
-  if (cmd === "/shortlist") { const ui = await kvGet(env, "ui", null); if (ui && ui.sl) return showShortlist(env, chat); }
   // синтетическое сообщение-команда от владельца — Python обработает как набранную
   await queueAndWake(env, { message: { message_id: 0, chat: { id: +chat || chat, type: "private" },
     from: { id: +chat || chat }, date: Math.floor(Date.now() / 1000), text: cmd } }, chat, WAIT[L]);
@@ -1091,35 +1095,24 @@ export async function handleUpdate(env, upd) {
       await queueAndWake(env, upd);
       return "outreach";
     }
-    if (/^s:(o|t):\d+$/.test(data)) {           // номер в шортлисте — карточка варианта из снимка
-      const oid = data.split(":")[2];
-      const card = ((await kvGet(env, "ui", null)) || {}).cards?.[oid];
-      if (card) {
-        await tg(env, "answerCallbackQuery", { callback_query_id: cb.id });
-        const r = await tg(env, "editMessageText", { chat_id: chat, message_id: cb.message.message_id, text: card.text,
-          parse_mode: "HTML", reply_markup: card.kb });
-        if (!r || r.ok === false) await say(env, chat, card.text, { parse_mode: "HTML", reply_markup: card.kb });
-        return "card";
-      }
+    if (/^s:(o|t):\d+$/.test(data)) {           // номер в шортлисте — карточка с фото собирает Python
+      await tg(env, "answerCallbackQuery", { callback_query_id: cb.id, text: "📂 Открываю…" });
+      upd.callback_query = { ...cb, _toast_done: true };
+      await queueAndWake(env, upd);
+      return "card";
     }
-    if (/^s:(clr|sort|ref|go|show)/.test(data) && (await kvGet(env, "ui", null))?.sl) {
-      const st = await kvGet(env, "sl", null) || { sort: "n" };
+    if (/^s:(clr|sort|ref|go|show|more)/.test(data)) {   // шортлист — карточками с фото, их собирает Python
       const act = data.split(":")[1];
-      let toast = "";
-      if (act === "sort") { st.sort = SL_ORDER[(SL_ORDER.indexOf(st.sort) + 1) % 3]; toast = "Сортировка изменена"; }
-      else if (act === "go") {
+      let toast = "📋 Открываю шортлист…";
+      if (act === "go") {
         const ui = await kvGet(env, "ui", null);
-        const n = (ui.sl[st.sort] || ui.sl.n).askable || 0;
-        if (!n) toast = "Всех уже спросила 🙂";
-        else {
-          upd.callback_query = { ...cb, _toast_done: true };
-          await queueAndWake(env, upd);
-          toast = `📨 Спрашиваю ${n} маклеров — ответы принесу сюда`;
-        }
-      } else toast = act === "show" ? "" : "Обновлено";
-      await kvSet(env, "sl", { sort: st.sort || "n" });
+        const n = ((ui?.sl || {}).n || {}).askable || 0;
+        toast = ui?.sl && !n ? "Всех уже спросила 🙂" : `📨 Спрашиваю маклеров — ответы принесу сюда`;
+        if (ui?.sl && !n) { await tg(env, "answerCallbackQuery", { callback_query_id: cb.id, text: toast }); return "shortlist"; }
+      }
       await tg(env, "answerCallbackQuery", { callback_query_id: cb.id, text: toast });
-      if (act !== "go") await showShortlist(env, chat, act === "show" ? null : cb.message.message_id);
+      upd.callback_query = { ...cb, _toast_done: true };
+      await queueAndWake(env, upd);
       return "shortlist";
     }
     if (/^o:(view|note):\d+$/.test(data)) {      // дальше — ввод текста: время просмотра или заметка
@@ -1335,7 +1328,7 @@ export async function handleUpdate(env, upd) {
       return "interview";
     }
     if (await instantText(env, chat, cmd)) return "instant";
-    if (/^\/(shortlist|short)$/.test(cmd) && (await kvGet(env, "ui", null))?.sl) return (await showShortlist(env, chat), "shortlist");
+    if (/^\/(shortlist|short)$/.test(cmd)) return (await showShortlist(env, chat), "shortlist");
     await queueAndWake(env, upd, chat, WAIT[L]);
     return "queued";
   }

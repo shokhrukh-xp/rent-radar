@@ -329,20 +329,19 @@ assert.deepEqual(texts().slice(-3), ["📊 <b>Рынок</b> Мирабад $145
 assert.equal((await drain()).length, 0);                                     // Python не понадобился
 sent.length = 0;
 await handleUpdate(env, { update_id: ++uid, callback_query: { id: "m2", data: "cmd:/shortlist", message: { message_id: 31, chat: { id: +OWNER } } } });
-assert.match(texts().at(-1), /1\. <b>\$44000<\/b>[\s\S]*2\. <b>\$41000<\/b>[\s\S]*дешевле/);
-assert.ok(JSON.stringify(sent.at(-1).reply_markup).includes("s:o:22") && JSON.stringify(sent.at(-1).reply_markup).includes("(2)"));
-// номер → карточка варианта правкой того же сообщения, без Python
+got = await drain();                                                         // шортлист — карточками с фото: собирает Python
+assert.equal(got.at(-1).message.text, "/shortlist");
+assert.ok(!texts().some(t => /1\. <b>\$44000/.test(t)));                     // списка из снимка больше нет
+// номер → карточка варианта с фото — тоже Python
 await handleUpdate(env, { update_id: ++uid, callback_query: { id: "m3", data: "s:o:22", message: { message_id: 40, chat: { id: +OWNER } } } });
-let ed = sent.filter(x => x.m === "editMessageText").at(-1);
-assert.equal(ed.message_id, 40); assert.match(ed.text, /Вариант #22[\s\S]*Этап/);
-assert.equal((await drain()).length, 0);
+got = await drain();
+assert.equal(got.at(-1).callback_query.data, "s:o:22"); assert.equal(got.at(-1).callback_query._toast_done, true);
 await handleUpdate(env, { update_id: ++uid, callback_query: { id: "m4", data: "s:sort", message: { message_id: 40, chat: { id: +OWNER } } } });
-ed = sent.filter(x => x.m === "editMessageText").at(-1);
-assert.match(ed.text, /^📋[\s\S]*1\. <b>\$41000[\s\S]*2\. <b>\$44000/);           // по цене
+assert.equal((await drain()).at(-1).callback_query.data, "s:sort");
 await handleUpdate(env, { update_id: ++uid, callback_query: { id: "m5", data: "s:go", message: { message_id: 40, chat: { id: +OWNER } } } });
 got = await drain();
 assert.equal(got.at(-1).callback_query.data, "s:go"); assert.equal(got.at(-1).callback_query._toast_done, true);
-assert.match(sent.filter(x => x.m === "answerCallbackQuery").at(-1).text, /Спрашиваю 2/);
+assert.match(sent.filter(x => x.m === "answerCallbackQuery").at(-1).text, /Спрашиваю маклеров/);
 // просмотр: кнопка → фраза → время разобрано сразу, Python получает готовое
 await handleUpdate(env, { update_id: ++uid, callback_query: { id: "m7", data: "o:view:22", message: { message_id: 41, chat: { id: +OWNER } } } });
 assert.match(texts().at(-1), /Когда идём смотреть вариант #22/);
@@ -406,7 +405,7 @@ assert.deepEqual(sent.filter(x => x.m === "deleteMessages").at(-1).message_ids, 
 const nEdits = sent.filter(x => x.m === "editMessageText").length;
 await handleUpdate(env, { update_id: ++uid, callback_query: { id: "m6", data: "s:show", message: { message_id: 50, chat: { id: +OWNER } } } });
 assert.equal(sent.filter(x => x.m === "editMessageText").length, nEdits);
-assert.match(texts().at(-1), /Шортлист/);
+assert.equal((await drain()).at(-1).callback_query.data, "s:show");               // карточки соберёт Python
 
 // «любой район» — отдельная пометка, чтобы поиск по сайтам шёл по всему городу, а не по центру
 { const ivA = { ans: { deal: "buy", city: "tashkent" }, hist: [], sent: "", mode: "" };
