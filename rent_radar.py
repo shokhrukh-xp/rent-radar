@@ -1228,7 +1228,7 @@ WELCOME_TEXT = (
 HELP_TEXT = """🏠 <b>Ra'no</b> — ваш ИИ-ассистент по поиску жилья. Рассказываю, как со мной дружить 🙂
 
 <b>Команды запоминать не нужно.</b> Внизу три кнопки — два способа искать:
-🔎 <b>Ищет Ra'no</b> — я сама смотрю сайты (Uybor, Realt24, Joymee, Realting, Yangiuylar) и Telegram-каналы. Выгодное — сразу, остальное — подборкой в 19:30
+🔎 <b>Ищет Ra'no</b> — я сама смотрю сайты (Uybor, Realt24, Joymee, Realting, Yangiuylar) и Telegram-каналы. Выгодное — сразу, остальное — в 19:30 лучшими карточками
 📇 <b>Через маклеров</b> — если на сайтах пусто: запрос маклерам по одному, их варианты карточками, шортлист
 ⋯ <b>Ещё</b> — вариант из WhatsApp, цены рынка, текст запроса, начать заново
 
@@ -2383,11 +2383,9 @@ def handle_rent_link(cfg, store, sst, l, note=""):
             gap = l["price_usd"] / med - 1
             text += (f"\n\n📊 Похожие ({len(sim)}) сдают в среднем за ~${_money(med)}/мес — "
                      + (f"эта на {abs(gap) * 100:.0f}% {'дешевле' if gap < 0 else 'дороже'}" if abs(gap) >= 0.03 else "эта в рынке"))
-    ids = send_listing(cfg, {"photos": True}, l, False, text=text)
     kb = {"inline_keyboard": [[{"text": "🔎 Похожие", "callback_data": f"L:sim:{l['key']}"[:64]},
                                {"text": "🎯 Искать такие", "callback_data": f"L:like:{l['key']}"[:64]}]]}
-    tg_call(cfg, "sendMessage", {"chat_id": cfg["telegram_chat_id"], "text": "Что делаем с этой арендой?",
-                                 "reply_markup": json.dumps(kb, ensure_ascii=False)})
+    send_card(cfg, l, text, kb=kb)
     if LIKE_WORDS.search(note or ""):
         send_similar_rent(cfg, store, sst, l)
 
@@ -2397,15 +2395,24 @@ def send_similar_rent(cfg, store, sst, l) -> int:
     if not found:
         send_telegram(cfg, "🔎 Похожей аренды за последний месяц не нашла. Нажмите «🎯 Искать такие» — буду ловить новые.")
         return 0
-    lines = [f"🔎 <b>Похожая аренда</b> · ±20% к цене — {len(found)} шт., дешёвые сверху", ""]
-    for i, o in enumerate(found, 1):
-        bits = [f"{o['rooms']}к" if o.get("rooms") else "", f"{o['area']:g} м²" if o.get("area") else "",
-                o.get("district") or ""]
-        lines.append(f'{i}. <b>${_money(o["price_usd"])}</b>/мес · ' + " · ".join(b for b in bits if b)
-                     + f' · <a href="{o["url"]}">{escape_html(o.get("site") or o.get("source") or "")}</a>')
-    tg_call(cfg, "sendMessage", {"chat_id": cfg["telegram_chat_id"], "text": "\n".join(lines)[:4000],
-                                 "parse_mode": "HTML", "disable_web_page_preview": True})
-    return len(found)
+    n, items = 0, found[:4]
+    for i, o in enumerate(items, 1):                 # каждая — отдельной карточкой со своими фото
+        if not o.get("title"):                       # строка среза Uybor — открыть объявление целиком
+            try:
+                full, _ = sale_sources.listing_from_url(cfg, o["url"])
+            except Exception:
+                full = None
+            if not full:
+                continue
+            o = dict(full, key=rent_key(full), source=full.get("site") or "Uybor")
+            o["price_usd"] = to_usd(o.get("price_value"), o.get("price_currency"), cfg)
+        text = f"🔎 <b>Похожая аренда</b> · {i} из {len(items)}\n\n" + format_message(o, cfg, o.get("is_business") is True)
+        kb = {"inline_keyboard": [[{"text": "🎯 Искать такие", "callback_data": f"L:like:{o['key']}"[:64]}]]}
+        if not store.known(o["key"]):
+            store.save(o, notified=True)
+        n += bool(send_card(cfg, o, text, kb=kb))
+        time.sleep(1)
+    return n
 
 
 def send_similar(cfg, sst, l) -> int:
@@ -2417,15 +2424,9 @@ def send_similar(cfg, sst, l) -> int:
     for o in found:                       # чтобы 📷/👍 по номеру работали и для объявлений из среза Uybor
         if not sst.known(o["key"]):
             sst.save({**o, "text": o.get("text") or ""}, notified=True)
-    top = [{"key": o["key"], "line": sale_sources.pick_line(o, o.get("why") or [])} for o in found]
-    where = ", ".join(x for x in (f'{l["rooms"]}-комн' if l.get("rooms") else "", l.get("district") or "") if x)
-    text, kb = sale_sources._pick_message(
-        top, f"🔎 <b>Похожие</b>{' · ' + escape_html(where) if where else ''} · ±20% к цене — {len(top)} шт., "
-             "дешёвые за м² сверху")
-    tg_call(cfg, "sendMessage", {"chat_id": cfg["telegram_chat_id"], "text": text, "parse_mode": "HTML",
-                                 "disable_web_page_preview": True, "reply_markup": json.dumps(kb, ensure_ascii=False)})
+    top = [{"key": o["key"], "line": sale_sources.pick_line(o, o.get("why") or [])} for o in found[:5]]
     sst.set_kv("last_pick", top)
-    return len(top)
+    return send_site_cards(cfg, sst, [o["key"] for o in found[:5]], title="Похожий вариант")
 
 
 def search_like(cfg, store, l) -> str:
@@ -2522,7 +2523,7 @@ def rano_screen(cfg, store) -> dict:
              f"Сегодня: новых объявлений {st.get('seen', 0)}, подошло {st.get('fit', 0)}",
              f"Прислала сразу: {st.get('instant', 0)} · в подборке ждут: {pend}",
              f"Всего прислала: {sent_total}", "",
-             "Самые выгодные (ниже рынка, снижена цена) несу сразу. Остальные — подборкой в 19:30, лучшие сверху ✨"]
+             "Самые выгодные (ниже рынка, снижена цена) несу сразу. Остальные — в 19:30: лучшие, каждая своей карточкой с фото ✨"]
     rows = []
     if pend:
         rows.append([{"text": f"📬 Показать подборку сейчас ({pend})", "callback_data": "R:pick"}])
@@ -3800,12 +3801,13 @@ def send_card(cfg, l: dict, text: str, kb: dict = None, silent: bool = False):
     """Одно сообщение на вариант: коллаж (или одно фото) с подписью и кнопками.
     Нет фото или они не грузятся — тем же текстом. Возвращает id сообщения списком; False — не ушло."""
     photos = l.get("photo_urls") or []
+    long_text = tg_len(text) > 1024              # в подпись к фото не влезет — текстом, фото превью сверху
     extra = {"parse_mode": "HTML"}
     if kb:
         extra["reply_markup"] = json.dumps(kb, ensure_ascii=False)
     if silent:
         extra["disable_notification"] = True
-    if photos:
+    if photos and not long_text:
         try:
             img = make_collage(photos[:4], more=len(photos) - 4)
         except Exception as e:
@@ -3825,9 +3827,44 @@ def send_card(cfg, l: dict, text: str, kb: dict = None, silent: bool = False):
                                        "caption": text, **extra}, quiet=True)
         if r is not None:
             return _msg_ids(r) or True
-    r = tg_call(cfg, "sendMessage", {"chat_id": cfg["telegram_chat_id"], "text": text,
-                                     "disable_web_page_preview": True, **extra})
+    prev = ({"link_preview_options": json.dumps({"url": photos[0], "prefer_large_media": True,
+                                                 "show_above_text": True})} if photos else
+            {"disable_web_page_preview": True})
+    r = tg_call(cfg, "sendMessage", {"chat_id": cfg["telegram_chat_id"], "text": text[:4096], **prev, **extra})
     return False if r is None else (_msg_ids(r) or True)
+
+
+def send_site_cards(cfg, sst, items, title="", more=0, more_cb="R:pick", limit=5) -> int:
+    """Варианты — каждый отдельной карточкой со своими фото и разбором (без сводных списков).
+    items — ключи или объявления; title — подпись сверху «Подборка дня · 2 из 5».
+    more — сколько ещё ждёт: на последней карточке кнопка «Ещё варианты»."""
+    sent, items = 0, list(items)[:limit]
+    for i, it in enumerate(items, 1):
+        l = it
+        if isinstance(it, str) or "price_usd" not in it:
+            key = it if isinstance(it, str) else it.get("key")
+            row = sst.conn.execute("SELECT data FROM listings WHERE key=?", (key,)).fetchone()
+            if not row:
+                continue
+            l = json.loads(row[0] or "{}")
+        l = dict(l)
+        try:
+            fresh = sale_sources.refresh_listing(l)          # у Joymee ссылки на фото живут 10 минут
+            if sale_sources.photo_repair(cfg, l) or fresh:
+                if sst.known(l["key"]):
+                    sst.conn.execute("UPDATE listings SET data=? WHERE key=?", (sst.pack(l), l["key"]))
+                    sst.conn.commit()
+        except Exception as e:
+            log.info("[продажа] карточка %s: %s", l.get("key"), e)
+        head = f"🔎 <b>{escape_html(title)}</b> · {i} из {len(items)}" if title and len(items) > 1 else \
+            (f"🔎 <b>{escape_html(title)}</b>" if title else "")
+        kb = sale_kb(l["key"], "self")
+        if more and i == len(items):
+            kb["inline_keyboard"].append([{"text": f"Ещё варианты ({more})", "callback_data": more_cb}])
+        if send_card(cfg, l, format_sale_card(sst, l, cfg, head=head), kb=kb):
+            sent += 1
+        time.sleep(1)
+    return sent
 
 
 def sale_criteria_text(ss: dict) -> str:
@@ -3977,7 +4014,7 @@ def run_sale_search(cfg: dict, store, settings: dict, force: bool = False) -> in
     if first:
         days = ss.get("notify_max_age_days", 14)
         found = (f"За последние {days} дней нашлось подходящих: {len(unique)}. Самые выгодные пришлю "
-                 f"отдельно, остальные — одной подборкой, лучшие сверху."
+                 f"сразу, остальные — лучшими карточками с фото, по одной."
                  if unique else
                  f"За последние {days} дней подходящих нет — но я на посту, пришлю, как только появятся 👀")
         title = "Условия поиска обновлены" if intro_sent else "Поиск квартиры для покупки включён"
@@ -4233,7 +4270,7 @@ def run():
                 "chat_id": cfg["telegram_chat_id"], "parse_mode": "HTML",
                 "text": "✨ <b>Обновила кнопки внизу</b>\n\n"
                         "🔎 <b>Ищет Ra'no</b> — я сама смотрю Uybor, Realt24, Joymee, Realting, Yangiuylar и "
-                        "Telegram-каналы. Выгодное присылаю сразу, остальное — подборкой в 19:30.\n"
+                        "Telegram-каналы. Выгодное присылаю сразу, остальное — в 19:30 лучшими карточками.\n"
                         "📇 <b>Через маклеров</b> — запрос маклерам, их варианты и шортлист.\n"
                         "⋯ <b>Ещё</b> — всё остальное.",
                 "reply_markup": json.dumps(concierge.OWNER_KB, ensure_ascii=False)}) is not None:

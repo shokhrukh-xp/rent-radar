@@ -773,20 +773,6 @@ def pick_pending(store):
     return fresh
 
 
-def _pick_message(top, header, rest=0):
-    """Подборка: варианты списком, под ним один ряд номеров. Номер открывает карточку
-    (фото, разбор, «В шортлист / Мимо») — больше кнопок здесь не нужно."""
-    lines = [header]
-    for i, x in enumerate(top, 1):
-        lines += ["", f"<b>{i}.</b> {x['line']}"]
-    lines += ["", "Нажмите номер — пришлю фото и разбор цены."]
-    nums = [{"text": str(i), "callback_data": f"L:v:{x['key']}"[:64]} for i, x in enumerate(top, 1)]
-    rows = [nums[i:i + 5] for i in range(0, len(nums), 5)] if len(nums) != 6 else [nums[:3], nums[3:]]
-    if rest:
-        rows.append([{"text": f"Ещё варианты ({rest})", "callback_data": "R:pick"}])
-    return "\n".join(lines)[:4000], {"inline_keyboard": rows}
-
-
 def send_pick(cfg, store, limit=5, reason="Подборка дня"):
     """Лучшие из накопленного одним сообщением; присланное помечаем, остальное ждёт.
     Показанное запоминаем как «последнюю подборку» — на неё ссылаются «покажи 2 и 4»."""
@@ -795,12 +781,8 @@ def send_pick(cfg, store, limit=5, reason="Подборка дня"):
     if not q:
         return 0
     top, rest = q[:limit], q[limit:]
-    text, kb = _pick_message(top, f"🔎 <b>{reason}</b> — {len(top)} из {len(q)} новых, лучшие сверху",
-                             len(rest))
-    ok = rr.tg_call(cfg, "sendMessage", {
-        "chat_id": cfg["telegram_chat_id"], "text": text, "parse_mode": "HTML",
-        "disable_web_page_preview": True, "reply_markup": json.dumps(kb, ensure_ascii=False)})
-    if ok is None:
+    # без сводного списка: каждый вариант — своей карточкой с фото и разбором
+    if not rr.send_site_cards(cfg, store, [x["key"] for x in top], title=reason, more=len(rest), limit=limit):
         return 0
     for x in top:
         store.conn.execute("UPDATE listings SET notified=1 WHERE key=?", (x["key"],))
@@ -819,11 +801,7 @@ def resend_last_pick(cfg, store):
     top = store.get_kv("last_pick") or []
     if not top:
         return 0
-    text, kb = _pick_message(top, f"🔎 <b>Последняя подборка</b> — {len(top)} шт., номера те же")
-    rr.tg_call(cfg, "sendMessage", {
-        "chat_id": cfg["telegram_chat_id"], "text": text, "parse_mode": "HTML",
-        "disable_web_page_preview": True, "reply_markup": json.dumps(kb, ensure_ascii=False)})
-    return len(top)
+    return rr.send_site_cards(cfg, store, [x["key"] for x in top], title="Последняя подборка")
 
 
 def remember_shown(store, l, why):
@@ -898,13 +876,10 @@ def attach_dup(cfg, store, l, dup, ss=None):
         store.conn.commit()
         queue_pick(store, l, sc, why)
         return "queued"
-    text = (f"💸 <b>Та же квартира — дешевле на ${op - lp:,.0f}</b>\n\n{pick_line(l, why)}\n\n"
+    head = (f"💸 <b>Та же квартира — дешевле на ${op - lp:,.0f}</b>\n"
             f"Раньше присылала её за ${op:,.0f} ({rr.escape_html(o.get('site') or 'Uybor')}"
-            f"{', ' + KIND_RU[o['seller_kind']] if o.get('seller_kind') in KIND_RU else ''}).").replace(",", " ")
-    kb = {"inline_keyboard": [[{"text": "Открыть: фото и разбор", "callback_data": f"L:v:{l['key']}"[:64]}]]}
-    ok = rr.tg_call(cfg, "sendMessage", {
-        "chat_id": cfg["telegram_chat_id"], "text": text, "parse_mode": "HTML",
-        "disable_web_page_preview": True, "reply_markup": json.dumps(kb, ensure_ascii=False)})
+            f"{', ' + KIND_RU[o['seller_kind']] if o.get('seller_kind') in KIND_RU else ''})").replace(",", " ")
+    ok = rr.send_card(cfg, l, rr.format_sale_card(store, l, cfg, head=head), kb=rr.sale_kb(l["key"], "self")) or None
     store.save(l, notified=ok is not None, dup_of=dup)
     if ok is not None:
         remember_shown(store, l, why)

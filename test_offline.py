@@ -1293,8 +1293,9 @@ with mock.patch.object(rr.requests, "get", fake_uy_get), mock.patch.object(rr, "
 assert n == 0, (n, sent_msgs)                      # ниже рынка не нашлось — всё в подборку
 assert "Поиск квартиры для покупки включён" in sent_msgs[0][1]
 assert "нашлось подходящих: 3" in sent_msgs[0][1] and "45 дней" in sent_msgs[0][1]
-assert "Что нашлось сейчас" in sent_msgs[-1][1] and all(shown(i) for i in (101, 104, 202))
-assert sent_msgs[-1][1].count("собственник") == 3
+cards_ = [m for m in sent_msgs if "Что нашлось сейчас" in m[1]]          # без списка: каждая — своей карточкой
+assert len(cards_) == 3 and all(shown(i) for i in (101, 104, 202)) and "1 из 3" in cards_[0][1]
+assert all("Собственник" in m[1] and "L:n:" in m[2] for m in cards_)
 # повторный проход ничего не дублирует и вступление не повторяет
 sent_msgs.clear()
 with mock.patch.object(rr.requests, "get", fake_uy_get), mock.patch.object(rr, "tg_call", fake_sale_tg), \
@@ -1371,9 +1372,8 @@ with mock.patch.object(rr.requests, "get", fake_uy_get), mock.patch.object(rr, "
     n = rr.run_sale_search(ss_all, sstore, {"photos": False})
 assert all(shown(i) for i in (102, 201, 301)), [m[1][:60] for m in sent_msgs]   # 102, 201 и 3-комнатная 301
 assert "Условия поиска обновлены" in sent_msgs[0][1] and "нашлось подходящих: 3" in sent_msgs[0][1]
-assert sent_msgs[-1][1].count("агентство/маклер") == 2                  # 102 и 201
-assert any("3-комн" in blk and "собственник" in blk for blk in sent_msgs[-1][1].split("\n\n")) and \
-    "sale:uybor:301" in sent_msgs[-1][2]                                  # подборка: блок на вариант, номер — кнопкой
+assert sum("Маклер / агентство" in m[1] for m in sent_msgs) == 2         # 102 и 201
+assert any("<b>3-комн" in m[1] and "Собственник" in m[1] and "sale:uybor:301" in m[2] for m in sent_msgs)
 assert not shown(101)                                                   # не повторили
 sent_msgs.clear()
 with mock.patch.object(rr.requests, "get", fake_uy_get), mock.patch.object(rr, "tg_call", fake_sale_tg), \
@@ -1420,8 +1420,7 @@ sdb.unlink(missing_ok=True); sstore = rr.Store(sdb); sent_msgs.clear()
 with mock.patch.object(rr.requests, "get", fake_uy_get), mock.patch.object(rr, "tg_call", fake_sale_tg), \
         mock.patch.object(rr.time, "sleep"):
     rr.run_sale_search(ss_all, sstore, {"photos": False})
-m602 = [blk for m in sent_msgs for blk in m[1].split("\n\n") if "listings/602" in blk or
-        ("Что нашлось" in m[1] and ":602\"" in m[2] and "136 дн." in blk)]
+m602 = [m[1] for m in sent_msgs if inmsg(m, 602)]
 assert len(m602) == 1 and "перевыложено" in m602[0] and "на рынке ~136 дн." in m602[0], sent_msgs
 assert not any(inmsg(m, 601) for m in sent_msgs)
 sdb.unlink(missing_ok=True)
@@ -1984,16 +1983,15 @@ xs.save(lj, notified=False); xs.save(lr, notified=False)
 SS.queue_pick(xs, lj, 70, why_j); SS.queue_pick(xs, lr, 55, [])
 with mock.patch.object(rr, "tg_call", xtg):
     assert SS.send_pick(cfg, xs) == 2
-pk = XT[-1][1]
-kb_ = json.loads(pk["reply_markup"])["inline_keyboard"]
-assert [b["text"] for b in kb_[0]] == ["1", "2"] and len(kb_) == 1                # один ряд номеров, без 📷/👍
-assert kb_[0][0]["callback_data"] == "L:v:sale:joymee:77" and kb_[0][1]["callback_data"] == "L:v:sale:realting:555"
-assert "L:s:" not in pk["reply_markup"] and SS.pick_pending(xs) == [] and "<a href" not in pk["text"]
+cards = [pl for m, pl in XT if m in ("sendMessage", "sendPhoto") and "Подборка дня" in (pl.get("text") or pl.get("caption") or "")]
+assert len(cards) == 2 and "1 из 2" in (cards[0].get("text") or cards[0].get("caption"))   # каждая — своей карточкой
+assert "L:n:sale:joymee:77" in cards[0]["reply_markup"] and "L:n:sale:realting:555" in cards[1]["reply_markup"]
+assert SS.pick_pending(xs) == []
 assert [x["key"] for x in xs.get_kv("last_pick")] == ["sale:joymee:77", "sale:realting:555"]
 XT.clear()
 with mock.patch.object(rr, "tg_call", xtg):
     assert SS.resend_last_pick(cfg, xs) == 2
-assert "Последняя подборка" in XT[-1][1]["text"] and "L:v:sale:realting:555" in XT[-1][1]["reply_markup"]
+assert "Последняя подборка" in (XT[-1][1].get("text") or XT[-1][1].get("caption")) and "L:n:sale:realting:555" in XT[-1][1]["reply_markup"]
 XT.clear()
 with mock.patch.object(rr, "tg_call", xtg), mock.patch.object(rr, "SALE_DB_PATH", xdb):
     t5, _ = rr.handle_callback("L:v:sale:joymee:77", rr.default_settings(), ys if "ys" in dir() else None, cfg, 1)
@@ -2028,6 +2026,7 @@ with mock.patch.object(rr, "tg_call", xtg):
 man = [pl["text"] for m, pl in XT if "Позвоните или напишите" in pl.get("text", "")]
 assert man and "По вашему объявлению о продаже" in man[0] and "Продавец: 📞" in man[0]
 # подборка дня — только в 19:30–23:00 и раз в день
+xs.save(dict(lr, key="sale:realting:999"), notified=False)
 SS.queue_pick(xs, dict(lr, key="sale:realting:999"), 50, [])
 with mock.patch.object(rr, "tg_call", xtg):
     assert SS.maybe_daily_pick(cfg, xs, datetime(2026, 10, 8, 18, 0, tzinfo=cg.TZ)) == 0
@@ -2133,7 +2132,8 @@ with mock.patch.object(rr, "tg_call", dtg):
     cheap = dict(own, key="sale:uybor:3", site="Uybor", seller="Нигора", price_usd=41000, url="https://uybor.uz/3")
     assert SS.attach_dup(cfg, ds, cheap, "sale:joymee:1", {}) == "cheaper"
     m = DT[-1][1]
-    assert "дешевле на $2 000" in m["text"] and "L:v:sale:uybor:3" in m["reply_markup"] and "$43 000" in m["text"]
+    t_ = m.get("text") or m.get("caption") or ""                         # полная карточка, а не строчка
+    assert "дешевле на $2 000" in t_ and "L:n:sale:uybor:3" in m["reply_markup"] and "$43 000" in t_ and "<b>Ипотека</b>" in t_
     c = json.loads(ds.conn.execute("SELECT data FROM listings WHERE key='sale:uybor:3'").fetchone()[0])
     assert {a["key"] for a in c["alts"]} == {"sale:joymee:1", "sale:joymee:2"}
     # дешевле, а прежняя ждёт в подборке — заменяем её
@@ -2270,11 +2270,11 @@ with mock.patch.object(rr, "SALE_DB_PATH", ldb), mock.patch.object(rr, "tg_call"
         mock.patch.object(SS, "listing_from_url", lambda c, u: (dict(link_l), "sale")):
     rr.handle_link(cfg, lr_, {"_link": "https://www.olx.uz/d/obyavlenie/kv-ID1.html", "text": "найди похожие https://www.olx.uz/d/obyavlenie/kv-ID1.html"})
 card = next(pl["text"] for m, pl in LT if "Уже видела" in (pl.get("text") or ""))
-assert "<b>Ипотека</b>" in card and rr.tg_len(card) <= rr.CAPTION_MAX and sum("Ипотека" in (pl.get("text") or "") for m, pl in LT) == 1
+assert "<b>Ипотека</b>" in card and rr.tg_len(card) <= rr.CAPTION_MAX and sum("Уже видела" in (pl.get("text") or "") for m, pl in LT) == 1
 assert "uybor.uz/listings/777" in card and "маклер" in card
 assert any("L:sim:sale:link:" in (pl.get("reply_markup") or "") for m, pl in LT)
-simm = next(pl.get("reply_markup") or "" for m, pl in LT if "Похожие" in (pl.get("text") or "") and "±20%" in (pl.get("text") or ""))
-assert "sale:uybor:800" in simm and "sale:uybor:899" not in simm                           # другой район — не похожее
+simm = " ".join(pl.get("reply_markup") or "" for m, pl in LT if "Похожий вариант" in (pl.get("text") or pl.get("caption") or ""))
+assert "sale:uybor:800" in simm and "sale:uybor:899" not in simm                           # похожие — карточками; другой район — нет
 ls2 = rr.Store(ldb)
 assert ls2.known("sale:uybor:800") and [x["key"] for x in ls2.get_kv("last_pick")][0].startswith("sale:uybor:")
 ls2.conn.close()
