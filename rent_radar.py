@@ -4636,7 +4636,7 @@ def run_sale_search(cfg: dict, store, settings: dict, force: bool = False) -> in
     for l in unique[:ss.get("first_run_limit", 25) * 4]:
         if pump():                                 # условия поменялись — остальное разберём по новым
             break
-        dup = find_sale_dup(l, store, cfg) or sale_sources.structural_dup(store, l)
+        dup = find_sale_dup(l, store, cfg) or sale_sources.structural_dup(store, l) or sale_sources.photo_dup(store, l)
         if dup:
             act = sale_sources.attach_dup(cfg, store, l, dup, ss)
             sent += act == "cheaper"

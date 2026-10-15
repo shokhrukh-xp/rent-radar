@@ -832,6 +832,7 @@ def queue_pick(store, l, sc, why):
     q.append({"key": l["key"], "score": sc, "line": pick_line(l, why), "at": time.time()})
     q = sorted(q, key=lambda x: -x["score"])[:80]
     store.set_kv("sale_pick", q)
+    remember_photos(store, l)
 
 
 def pick_pending(store):
@@ -878,6 +879,7 @@ def remember_shown(store, l, why):
     rec = (store.get_kv("shown_recent") or [])[-14:]
     rec.append({"key": l["key"], "line": pick_line(l, why), "at": time.time()})
     store.set_kv("shown_recent", rec)
+    remember_photos(store, l)
 
 
 KIND_RU = {"owner": "собственник", "agency": "маклер"}
@@ -1026,6 +1028,87 @@ def same_flat(a, b):
     da, dp = (0.01, 0.01) if strict else (0.03, 0.12)
     return abs(a["area"] - b["area"]) / a["area"] <= da and \
         abs(a["price_usd"] - b["price_usd"]) / a["price_usd"] <= dp
+
+
+# ------------------------------------------------------------ дубли по фото --
+# Маклер перевыкладывает квартиру собственника: другой текст, другая цена, этажа нет — а фото те же.
+# dHash первых фото (64 бита): одинаковые снимки после пережатия/обрезки отличаются на несколько бит.
+PHASH_BITS = 6                 # «то же фото»: расстояние Хэмминга не больше
+PHASH_PHOTOS = 2               # сколько первых фото хешировать
+PHASH_DAYS = 60
+
+
+def _dhash(content: bytes):
+    from io import BytesIO
+    from PIL import Image
+    im = Image.open(BytesIO(content)).convert("L").resize((9, 8), Image.LANCZOS)
+    px = list(im.getdata())
+    bits = 0
+    for row in range(8):
+        for col in range(8):
+            bits = (bits << 1) | (px[row * 9 + col] > px[row * 9 + col + 1])
+    return bits
+
+
+def photo_hashes(l) -> list:
+    """Хеши первых фото (запоминаем в объявлении). Рендеры ЖК (Yangiuylar) не хешируем — у разных квартир они общие."""
+    if "phash" in l:
+        return l["phash"]
+    if (l.get("key") or "").startswith("sale:yu:") or not l.get("photo_urls"):
+        return []
+    rr = _rr()
+    out = []
+    for u in l["photo_urls"][:PHASH_PHOTOS]:
+        try:
+            r = requests.get(u, headers=rr.HEADERS, timeout=12)
+            if r.status_code == 200 and len(r.content) > 2000:
+                h = _dhash(r.content)
+                if h not in (0, (1 << 64) - 1):          # однотонная заглушка — не хеш
+                    out.append(h)
+        except Exception:
+            continue
+    l["phash"] = out
+    return out
+
+
+def _ensure_phash_table(store):
+    store.conn.execute("CREATE TABLE IF NOT EXISTS photo_hash(key TEXT, h INTEGER, rooms INTEGER, area REAL, at REAL)")
+    store.conn.execute("CREATE INDEX IF NOT EXISTS photo_hash_key ON photo_hash(key)")
+
+
+def remember_photos(store, l):
+    """Показали или поставили в подборку — запоминаем хеши его фото."""
+    try:
+        hs = photo_hashes(l)
+    except Exception:
+        hs = []
+    if not hs:
+        return
+    _ensure_phash_table(store)
+    store.conn.execute("DELETE FROM photo_hash WHERE key=?", (l["key"],))
+    store.conn.executemany("INSERT INTO photo_hash(key, h, rooms, area, at) VALUES(?,?,?,?,?)",
+                           [(l["key"], h - (1 << 63), l.get("rooms"), l.get("area"), time.time()) for h in hs])
+    store.conn.execute("DELETE FROM photo_hash WHERE at < ?", (time.time() - PHASH_DAYS * 86400,))
+    store.conn.commit()
+
+
+def photo_dup(store, l):
+    """Ключ уже показанной/ждущей квартиры с теми же фото — или None. Комнаты и площадь не должны спорить:
+    одинаковые фото подъезда/вида из окна у соседних квартир — не повод склеивать разные."""
+    hs = photo_hashes(l)
+    if not hs:
+        return None
+    _ensure_phash_table(store)
+    rows = store.conn.execute("SELECT key, h, rooms, area FROM photo_hash WHERE key != ?", (l["key"],)).fetchall()
+    for key, h, rooms, area in rows:
+        h += 1 << 63
+        if rooms and l.get("rooms") and rooms != l["rooms"]:
+            continue
+        if area and l.get("area") and abs(area - l["area"]) / max(area, l["area"]) > 0.08:
+            continue
+        if any(bin(h ^ x).count("1") <= PHASH_BITS for x in hs):
+            return key
+    return None
 
 
 def structural_dup(store, l, days=45):

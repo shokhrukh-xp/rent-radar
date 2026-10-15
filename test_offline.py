@@ -2997,3 +2997,32 @@ with mock.patch.object(rr.requests, "get", lambda *a, **k: _R404()):
     assert rr.harvest_realting(ps_) == 0 and ps_.get_kv("realting_page") == 1
 pd_.unlink(missing_ok=True)
 print("OK — скорость: сообщения клиента посреди прохода, без вложенности; Realting не застревает на 404")
+
+# ============ дубли по фото: маклер перевыложил квартиру собственника с другим текстом и ценой ============
+from io import BytesIO as _BIO
+from PIL import Image as _Img, ImageDraw as _Draw
+def _jpeg(seed, shift=0):
+    im = _Img.new("RGB", (320, 240), (200, 190, 180)); d = _Draw.Draw(im)
+    for i in range(12):
+        x = (seed * 37 + i * 53) % 280
+        d.rectangle([x + shift, (i * 19) % 200, x + 30 + shift, (i * 19) % 200 + 25], fill=((i * 40) % 255, 90, (seed * 70) % 255))
+    b = _BIO(); im.save(b, "JPEG", quality=70); return b.getvalue()
+IMGS = {"u/own1.jpg": _jpeg(1), "u/brk1.jpg": _jpeg(1, shift=1), "u/other.jpg": _jpeg(5), "u/own2.jpg": _jpeg(2)}
+class _RI:
+    def __init__(self, c): self.status_code, self.content = 200, c
+pdb_ = Path("/tmp/test_phash.db"); pdb_.unlink(missing_ok=True)
+pst_ = rr.Store(pdb_)
+with mock.patch.object(_ss_p.requests, "get", lambda u, **k: _RI(IMGS[u])):
+    own = {"key": "sale:uybor:1", "rooms": 2, "area": 55, "price_usd": 60000, "photo_urls": ["u/own1.jpg", "u/own2.jpg"]}
+    _ss_p.queue_pick(pst_, own, 70, [])                          # собственник — в подборке
+    assert pst_.conn.execute("SELECT COUNT(*) FROM photo_hash").fetchone()[0] == 2
+    brk = {"key": "sale:joymee:9", "rooms": 2, "area": 56, "price_usd": 64000, "photo_urls": ["u/brk1.jpg"]}
+    assert _ss_p.photo_dup(pst_, brk) == "sale:uybor:1"            # те же фото, пережаты и сдвинуты
+    oth = {"key": "sale:joymee:10", "rooms": 2, "area": 55, "price_usd": 60000, "photo_urls": ["u/other.jpg"]}
+    assert _ss_p.photo_dup(pst_, oth) is None                      # другая квартира
+    big = dict(brk, key="sale:joymee:11", area=80)
+    assert _ss_p.photo_dup(pst_, big) is None                      # фото похожи, а площадь другая — не склеиваем
+    yu = {"key": "sale:yu:5", "rooms": 2, "area": 55, "price_usd": 60000, "photo_urls": ["u/own1.jpg"]}
+    assert _ss_p.photo_dup(pst_, yu) is None                       # рендеры ЖК не сравниваем
+pdb_.unlink(missing_ok=True)
+print("OK — дубли по фото: перевыложенная маклером квартира узнаётся по снимкам, разные квартиры не склеиваются")
