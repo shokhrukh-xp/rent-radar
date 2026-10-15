@@ -636,3 +636,21 @@ console.log("OK — без кнопок у клиента");
   resetLangCache();
 }
 console.log("OK — языки: клиенту на английском/узбекском — перевод, разметка и цифры не трогаются");
+
+// ── сторож: сервер перестал забирать очередь 25+ минут — владельцу одно сообщение, и когда ожил
+{
+  const { watchdog } = await import("../src/index.js");
+  const envW = { ...env, WAKE_GH: "off" };
+  const now = Date.now();
+  await env.DB.prepare("INSERT OR REPLACE INTO kv(k, v) VALUES('py_seen', ?)").bind(JSON.stringify(now - 30 * 60e3)).run();
+  await env.DB.prepare("DELETE FROM kv WHERE k='py_watch'").run();
+  const before = sent.length;
+  assert.equal(await watchdog(envW, now), "alert");
+  assert.ok(sent.length === before + 1 && /молчит 30 мин/.test(sent.at(-1).text) && !("_noTr" in sent.at(-1)));
+  assert.equal(await watchdog(envW, now + 15 * 60e3), "ok");                 // не чаще раза в 6 часов
+  await env.DB.prepare("UPDATE kv SET v=? WHERE k='py_seen'").bind(JSON.stringify(now + 16 * 60e3)).run();
+  assert.equal(await watchdog(envW, now + 17 * 60e3), "recovered");
+  assert.ok(/снова на связи/.test(sent.at(-1).text));
+  assert.equal(await watchdog({ ...env, WAKE_GH: "" }, now), "skip");
+}
+console.log("OK — сторож сервера: молчит 25+ минут — сообщение владельцу, ожил — тоже");

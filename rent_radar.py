@@ -1225,11 +1225,13 @@ def tg_call(cfg, method: str, payload: dict, timeout: int = 20, quiet: bool = Fa
         return None
 
 
-def send_telegram(cfg, text: str) -> bool:
-    return tg_call(cfg, "sendMessage", {
-        "chat_id": cfg["telegram_chat_id"], "text": text,
-        "parse_mode": "HTML",
-    }) is not None
+def send_telegram(cfg, text: str, _admin: bool = False) -> bool:
+    """Сообщение клиенту. _admin — служебное (источники, сбои): владельцу сервиса, по-русски, без перевода."""
+    p = {"chat_id": (cfg.get("admin_chat_id") or cfg["telegram_chat_id"]) if _admin else cfg["telegram_chat_id"],
+         "text": text, "parse_mode": "HTML"}
+    if _admin:
+        p["_noTr"] = True
+    return tg_call(cfg, "sendMessage", p) is not None
 
 
 def send_photo_upload(cfg, photo_url: str, caption: str) -> bool:
@@ -4854,6 +4856,47 @@ def sale_status_text(cfg: dict) -> str:
     return "\n".join(lines)
 
 
+SOURCE_DOWN_HOURS = 6                              # источник с ошибками дольше — сообщить владельцу
+
+
+def note_source(store, name, err=""):
+    """Здоровье источника аренды: когда последний раз ответил без ошибки."""
+    h = store.get_kv("rent_src_health") or {}
+    now = time.time()
+    cur = h.get(name) or {}
+    h[name] = {"ok_at": now if not err else cur.get("ok_at", now), "err": err[:120], "at": now}
+    store.set_kv("rent_src_health", h)
+
+
+def source_health(cfg, store, sale_store, now=None) -> list:
+    """Раз в час: какие источники не отвечают дольше SOURCE_DOWN_HOURS. Владельцу — одно сообщение на
+    источник в сутки и одно, когда он снова заработал. Возвращает список упавших."""
+    now = now or time.time()
+    if now - float(store.get_kv("health_at") or 0) < 3600:
+        return []
+    store.set_kv("health_at", now)
+    rows = {f"аренда · {k}": v for k, v in (store.get_kv("rent_src_health") or {}).items()}
+    if sale_store is not None:
+        rows.update({f"продажа · {k}": v for k, v in (sale_store.get_kv("sale_src_stats") or {}).items()})
+    sent = store.get_kv("health_alerts") or {}
+    down = []
+    for name, v in rows.items():
+        ok_at = float(v.get("ok_at") or v.get("at") or now)
+        bad = bool(v.get("err")) and now - ok_at > SOURCE_DOWN_HOURS * 3600
+        if bad:
+            down.append(name)
+            if now - float(sent.get(name) or 0) > 86400:
+                if send_telegram(cfg, f"⚠️ <b>Источник не отвечает</b>: {escape_html(name)} — уже "
+                                      f"{(now - ok_at) / 3600:.0f} ч.\nОшибка: <code>{escape_html(v['err'][:120])}</code>\n"
+                                      "Остальные источники работают; как заработает — скажу.", _admin=True):
+                    sent[name] = now
+        elif sent.get(name) and not v.get("err"):
+            send_telegram(cfg, f"✅ Источник снова работает: {escape_html(name)}", _admin=True)
+            sent.pop(name, None)
+    store.set_kv("health_alerts", sent)
+    return down
+
+
 BROKER_HARVEST_EVERY = 3 * 3600
 PUMP_EVERY = 3                                   # с; как часто заглядывать в сообщения посреди долгой работы
 _PUMP = {"ctx": None, "last": 0.0, "busy": False, "n": 0}
@@ -4972,7 +5015,9 @@ def run():
             except Exception as e:
                 log.warning("[%s] ошибка получения: %s", name, e)
                 next_run[name] = now + min(900, scfg.get("interval_seconds", 120) * 3)
+                note_source(store, name, str(e))
                 continue
+            note_source(store, name)
 
             fresh = 0
             warm = not store.get_kv(f"src_warm:{name}")     # новый источник: текущее — запомнить молча
@@ -5078,6 +5123,11 @@ def run():
                     log.info("[продажа] новых: %d", n)
             except Exception as e:      # поиск покупки не должен ронять радар
                 log.warning("[продажа] проход не удался: %s", e)
+        if not once:
+            try:
+                source_health(cfg, store, sale_store)            # источник молчит часами — сказать владельцу
+            except Exception as e:
+                log.warning("проверка источников не удалась: %s", e)
         if sale_store is not None and not once and not fresh:
             try:
                 sale_sources.maybe_daily_pick(cfg, sale_store)   # 19:30 — подборка дня

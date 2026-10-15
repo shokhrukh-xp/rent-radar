@@ -399,7 +399,7 @@ def fetch_due(ss, cfg, store, force=False):
             got = fn(ss, cfg, store)
             out += got
             nxt[name] = now + every
-            stats[name] = {"at": now, "n": len(got), "err": ""}
+            stats[name] = {"at": now, "n": len(got), "err": "", "ok_at": now}
         except Exception as e:
             nxt[name] = now + min(3600, every * 2)
             stats[name] = {**stats.get(name, {}), "at": now, "err": str(e)[:120]}

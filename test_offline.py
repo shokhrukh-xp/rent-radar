@@ -2730,7 +2730,7 @@ with mock.patch.object(rr, "tg_call", bz_tg):
     ask = [pl for m, pl in BZ if pl.get("business_connection_id") == "BC1"]
     assert len(ask) == 1 and ask[0]["chat_id"] == 9001, BZ
     q = ask[0]["text"]
-    assert "фото" in q and "адрес" in q and "Ra'no" not in q and "посмотреть" not in q   # без подписи, без просмотра
+    assert "фото" in q.lower() and "адрес" in q.lower() and "Ra'no" not in q and "посмотреть" not in q   # без подписи, без просмотра
     assert any(str(pl.get("chat_id")) == "500" for m, pl in BZ)                        # клиенту — карточка
     # маклер досылает фото — в тот же вариант, карточка обновится; второй раз не спрашиваем
     BZ.clear()
@@ -2858,7 +2858,7 @@ with mock.patch.object(rr, "tg_call", lambda c, m, p, **k: MN.append((m, p)) or 
     # пересланный вариант: уточнение — готовым текстом клиенту, один раз
     oid, _ = cg.save_offer(mn, mcfg, "owner", "Азиз", "Продаю 2 комн Мирабад", [])
     MN.clear()
-    assert cg.manual_auto_ask(mcfg, mn, oid) and "<code>" in MN[-1][1]["text"] and "фото" in MN[-1][1]["text"]
+    assert cg.manual_auto_ask(mcfg, mn, oid) and "<code>" in MN[-1][1]["text"] and "фото" in MN[-1][1]["text"].lower()
     assert not cg.manual_auto_ask(mcfg, mn, oid)
 rr.concierge._BIZ_STORE["store"] = None
 mnd.unlink(missing_ok=True)
@@ -3074,3 +3074,25 @@ finally:
     _geo_t.GAZ["pts"] = _gz2
     Path("/tmp/test_knn.db").unlink(missing_ok=True)
 print("OK — оценка цены: ближайшие похожие с весами, без засилья одного продавца, «хорошая цена» — только за пределами разброса")
+
+# ============ надёжность: источник с ошибками дольше 6 ч — владельцу одно сообщение, и когда заработал ============
+hdb_ = Path("/tmp/test_health.db"); hdb_.unlink(missing_ok=True)
+hst_ = rr.Store(hdb_); hss_ = rr.Store(Path("/tmp/test_health2.db"))
+HS = []
+with mock.patch.object(rr, "send_telegram", lambda c, txt, _admin=False: HS.append((txt, _admin)) or True):
+    now_ = time.time()
+    rr.note_source(hst_, "telegram")
+    h_ = hst_.get_kv("rent_src_health"); h_["telegram"]["ok_at"] = now_ - 7 * 3600; hst_.set_kv("rent_src_health", h_)
+    rr.note_source(hst_, "telegram", "ConnectionError: t.me timeout")
+    hss_.set_kv("sale_src_stats", {"realt24": {"at": now_, "n": 5, "err": "", "ok_at": now_}})
+    assert rr.source_health({}, hst_, hss_, now=now_) == ["аренда · telegram"]
+    assert len(HS) == 1 and "не отвечает" in HS[0][0] and HS[0][1] is True              # служебное — владельцу
+    assert rr.source_health({}, hst_, hss_, now=now_ + 60) == [] and len(HS) == 1        # чаще раза в час не проверяем
+    hst_.set_kv("health_at", 0)
+    rr.source_health({}, hst_, hss_, now=now_ + 120)
+    assert len(HS) == 1                                                               # повтор — не раньше чем через сутки
+    rr.note_source(hst_, "telegram")
+    hst_.set_kv("health_at", 0)
+    assert rr.source_health({}, hst_, hss_, now=now_ + 200) == [] and "снова работает" in HS[-1][0]
+hdb_.unlink(missing_ok=True); Path("/tmp/test_health2.db").unlink(missing_ok=True)
+print("OK — надёжность: упавший источник — сообщение владельцу раз в сутки и когда снова заработал")

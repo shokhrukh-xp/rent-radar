@@ -1106,7 +1106,7 @@ DECLINE_REASONS = [
 def decline_text(cfg, reason=""):
     a = cfg.get("assistant_name", "Ra'no")
     r = next((x for x in DECLINE_REASONS if x[0] == reason), DECLINE_REASONS[-1])
-    return (f"Rahmat за вариант! 🙏 Клиенту, увы, не подошёл" + (f" — {r[2]}" if r[2] else "") + ". "
+    return (f"Спасибо за вариант! 🙏 Клиенту, увы, не подошёл" + (f" — {r[2]}" if r[2] else "") + ". "
             f"{r[3]}, с радостью посмотрю. ({a})")
 
 
@@ -1742,26 +1742,25 @@ def biz_followup_text(o, deal="rent", uz=False):
     ex = o.get("extra") or {}
     items = []
     if not o.get("photos"):
-        items.append("Yuborolasizmi rasmlarini (xonalar, oshxona, sanuzel)?" if uz else
-                     "Пришлите, пожалуйста, фото (комнаты, кухня, санузел).")
+        items.append("Rasmlar: xonalar, oshxona, sanuzel" if uz else "Фото: комнаты, кухня, санузел")
     if not (ex.get("address") or ex.get("landmark") or ex.get("lat")):
-        items.append("Aniq manzil yoki mo'ljal (lokatsiya ham bo'ladi)?" if uz else
-                     "Точный адрес или ориентир? Можно просто прислать локацию.")
+        items.append("Manzil yoki mo'ljal (lokatsiya tashlasangiz ham bo'ladi)" if uz else
+                     "Адрес или ориентир — можно просто прислать локацию")
     if not o.get("floor"):
-        items.append("Qavati va necha qavatli?" if uz else "Какой этаж и этажность?")
+        items.append("Qavati va necha qavatli" if uz else "Этаж и этажность")
     if not o.get("area"):
-        items.append("Maydoni qancha?" if uz else "Какая площадь?")
+        items.append("Maydoni" if uz else "Площадь")
     if not o.get("price_usd"):
-        items.append(("Narxi qancha, kelishsa bo'ladimi?" if deal == "buy" else "Oyiga narxi qancha?") if uz else
-                     ("Какая цена и есть ли торг?" if deal == "buy" else "Какая цена в месяц?"))
+        items.append(("Narxi va kelishsa bo'ladimi" if deal == "buy" else "Oylik narxi") if uz else
+                     ("Цена и есть ли торг" if deal == "buy" else "Цена в месяц"))
     if deal == "buy" and not ex.get("documents"):
-        items.append("Hujjatlari joyidami (kadastr), ipotekaga beriladimi?" if uz else
-                     "Документы в порядке (кадастр)? Можно в ипотеку?")
+        items.append("Hujjatlari (kadastr) joyidami, ipotekaga beriladimi" if uz else
+                     "Документы (кадастр) в порядке? Можно ли в ипотеку")
     if not ex.get("commission"):
-        items.append("Vositachilik haqi qancha?" if uz else "Какая комиссия?")
+        items.append("Vositachilik haqi" if uz else "Комиссия")
     if not items:
         return ""
-    head = "Rahmat! Bir nechta savol:" if uz else "Спасибо! Уточните, пожалуйста:"
+    head = "Rahmat! Iltimos, yozib yuboring:" if uz else "Спасибо! Подскажите, пожалуйста:"
     return "\n".join([head] + [f"{i}. {t}" for i, t in enumerate(items, 1)])
 
 
@@ -1779,8 +1778,9 @@ def manual_auto_ask(cfg, store, oid) -> bool:
     if not q:
         return False
     tag = _offer_tag(o)
-    q = q.replace("Спасибо! Уточните, пожалуйста:", "Спасибо за вариант" + (f" ({tag})" if tag else "")
-                  + "! Уточните, пожалуйста:").replace("Rahmat! Bir nechta savol:", "Variant uchun rahmat! Bir nechta savol:")
+    q = q.replace("Спасибо! Подскажите, пожалуйста:", "Спасибо за вариант" + (f" ({tag})" if tag else "")
+                  + "! Подскажите, пожалуйста:").replace("Rahmat! Iltimos, yozib yuboring:",
+                                                        "Variant uchun rahmat! Iltimos, yozib yuboring:")
     _set_extra(store, oid, auto_asked=datetime.now(timezone.utc).isoformat())
     return rr.send_telegram(cfg, f"✍️ По варианту #{oid} не хватает деталей — вот текст для маклера, "
                                  "скопируйте и отправьте ему. Ответ перешлите мне — допишу в карточку.\n\n"

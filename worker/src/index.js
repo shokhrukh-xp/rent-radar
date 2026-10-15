@@ -908,7 +908,10 @@ async function startAddMode(env, chat) {
 // ───────────────────────────── «будильник» для Python ─────────────────────────────
 async function pythonAlive(env) {
   const hb = await kvGet(env, "py_alive", null);
-  return !!(hb && Date.now() < hb.until && Date.now() - hb.at < 15 * 60e3);
+  if (hb && Date.now() < hb.until && Date.now() - hb.at < 15 * 60e3) return true;
+  // свой сервер: между 10-минутными проходами пауза в секунды (git pull, бэкап) — это не «сплю», не пугаем клиента
+  if (env.WAKE_GH === "off" && Date.now() - (await kvGet(env, "py_seen", 0)) < 3 * 60e3) return true;
+  return false;
 }
 /** Будит GitHub Actions, если Python сейчас не работает. Возвращает true, если он уже жив. */
 export async function wake(env) {
@@ -928,6 +931,29 @@ export async function wake(env) {
   await kvSet(env, "last_wake_status", st);
   if (r.status !== 204) console.log("wake failed", st.status, st.body);
   return false;
+}
+/** Сторож: Python на сервере перестал забирать очередь (сервер упал, контейнер встал) — сказать владельцу.
+ *  Раз в 6 часов, пока молчит; и одно сообщение, когда снова на связи. Вызывается cron'ом каждые 15 минут. */
+export const WATCH_QUIET_MIN = 25;
+export async function watchdog(env, now = Date.now()) {
+  if (env.WAKE_GH !== "off" || !env.OWNER_CHAT) return "skip";       // Python не на своём сервере — будим GitHub
+  const seen = await kvGet(env, "py_seen", 0);
+  if (!seen) return "never";
+  const st = await kvGet(env, "py_watch", { down: false, at: 0 });
+  const quiet = (now - seen) / 60e3;
+  if (quiet >= WATCH_QUIET_MIN && (!st.down || now - st.at > 6 * 3600e3)) {
+    await tg(env, "sendMessage", { chat_id: env.OWNER_CHAT, parse_mode: "HTML", _noTr: true,
+      text: `⚠️ <b>Сервер Ra'no молчит ${Math.round(quiet)} мин</b> — поиск и ответы, которым нужен сервер, стоят.\n` +
+        "Проверьте: <code>ssh sonar docker ps</code> и <code>docker logs rano --tail 50</code>. Как оживёт — напишу." });
+    await kvSet(env, "py_watch", { down: true, at: now });
+    return "alert";
+  }
+  if (st.down && quiet < 5) {
+    await tg(env, "sendMessage", { chat_id: env.OWNER_CHAT, _noTr: true, text: "✅ Сервер Ra'no снова на связи." });
+    await kvSet(env, "py_watch", { down: false, at: now });
+    return "recovered";
+  }
+  return "ok";
 }
 async function queueAndWake(env, upd, chat, note) {
   await enqueue(env, upd);
@@ -1622,6 +1648,7 @@ export default {
   // 08:30 и 20:00 по Ташкенту — разбудить Python к утренней сводке просмотров и вечерним итогам
   async scheduled(event, env, ctx) {
     ctx.waitUntil(wake(env).catch(e => console.log("cron wake error", e.stack || e)));
+    ctx.waitUntil(watchdog(env).catch(e => console.log("watchdog error", e.stack || e)));
   },
   async fetch(req, env, ctx) {
     const url = new URL(req.url);
@@ -1648,6 +1675,7 @@ export default {
         const after = parseInt(url.searchParams.get("after") || "0", 10) || 0;
         const until = parseInt(url.searchParams.get("until") || "0", 10) || 0;
         await kvSet(env, "py_alive", { at: Date.now(), until: until ? until * 1000 : Date.now() + 120e3 });
+        await kvSet(env, "py_seen", Date.now());                    // для сторожа: когда сервер был на связи
         const d = await db(env);
         if (after) await d.prepare("DELETE FROM queue WHERE id<=?").bind(after).run();
         const r = await d.prepare("SELECT id, upd FROM queue WHERE id>? ORDER BY id LIMIT 100").bind(after).all();
