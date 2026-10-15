@@ -1131,6 +1131,28 @@ def biz_ready_store(store) -> bool:
         return False
 
 
+def broker_mode(store) -> str:
+    """Как клиент работает с маклерами: «biz» — Ra'no подключена к его Telegram; «manual» — без доступа:
+    ответы маклеров он пересылает сам, маклер может писать и прямо в бота; «» — ещё не выбрал."""
+    if biz_ready_store(store):
+        return "biz"
+    try:
+        return (store.get_kv("broker_mode") or "") if store else ""
+    except Exception:
+        return ""
+
+
+MANUAL_HOWTO = (
+    "Хорошо, без подключения 👍 Так тоже работает:\n"
+    "1. Скажите «напиши маклерам» — пришлю 5 маклеров. Нажмёте на имя — откроется чат, текст уже вписан, "
+    "останется «Отправить».\n"
+    "2. В тексте есть ссылка на меня — маклер может прислать варианты сразу мне.\n"
+    "3. Ответил вам — перешлите мне его сообщения: нажмите на сообщение и держите → «Переслать» → Ra'no. "
+    "Можно выбрать сразу несколько, с фото. Сделаю карточку с картой и разбором цены.\n"
+    "4. Если в ответе чего-то не хватает, пришлю готовый текст уточнения — отправите маклеру сами.\n\n"
+    "Ваши чаты я не вижу и ничего от вашего имени не пишу. Передумаете — напишите «подключить телеграм».")
+
+
 def biz_guide(cfg, store=None) -> str:
     """Инструкция для любого человека: что нажать, что выбрать, что Ra'no будет видеть."""
     bot = cfg.get("bot_username") or "rano_smart_bot"
@@ -1158,7 +1180,8 @@ def biz_guide(cfg, store=None) -> str:
         "• уточняю у маклера фото, адрес, этаж, цену;\n"
         "• о просмотре, торге и отказе — только после вашего «да» здесь.\n"
         "Если названия пунктов чуть другие — ищите «Чат-боты» в разделе для бизнеса. "
-        "Отключить можно там же в любой момент.")
+        "Отключить можно там же в любой момент.\n\n"
+        "Не хотите давать доступ к чатам — напишите «без подключения»: буду работать через пересылку.")
 
 
 def _biz_voice(text: str, cfg) -> str:
@@ -1649,6 +1672,27 @@ def biz_followup_text(o, deal="rent", uz=False):
         return ""
     head = "Rahmat! Bir nechta savol:" if uz else "Спасибо! Уточните, пожалуйста:"
     return "\n".join([head] + [f"{i}. {t}" for i, t in enumerate(items, 1)])
+
+
+def manual_auto_ask(cfg, store, oid) -> bool:
+    """Вариант пришёл пересылкой (маклеру писать не можем): один раз — готовый текст уточнения клиенту,
+    отправит маклеру сам."""
+    rr = _rr()
+    o = get_offer(store, oid)
+    if not o or can_message_broker(o) or is_site_offer(o) or (o.get("extra") or {}).get("auto_asked"):
+        return False
+    ans = get_anketa(store).get("ans") or {}
+    deal = "buy" if ans.get("deal") in ("buy", "sale") else "rent"
+    q = biz_followup_text(o, deal, ans.get("lang") == "uz")
+    if not q:
+        return False
+    tag = _offer_tag(o)
+    q = q.replace("Спасибо! Уточните, пожалуйста:", "Спасибо за вариант" + (f" ({tag})" if tag else "")
+                  + "! Уточните, пожалуйста:").replace("Rahmat! Bir nechta savol:", "Variant uchun rahmat! Bir nechta savol:")
+    _set_extra(store, oid, auto_asked=datetime.now(timezone.utc).isoformat())
+    return rr.send_telegram(cfg, f"✍️ По варианту #{oid} не хватает деталей — вот текст для маклера, "
+                                 "скопируйте и отправьте ему. Ответ перешлите мне — допишу в карточку.\n\n"
+                                 f"<code>{rr.escape_html(q)}</code>")
 
 
 def biz_auto_ask(cfg, store, oid) -> bool:

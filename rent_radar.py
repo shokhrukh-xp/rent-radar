@@ -1260,7 +1260,7 @@ HELP_TEXT = """🏠 <b>Ra'no</b> — ваш ИИ-ассистент по пои�
 
 Маклерам: скажите «напиши маклерам» — пришлю 5 маклеров под ваш запрос. Нажмёте на имя — откроется чат с ним, текст уже вписан, останется «Отправить».
 
-Хотите, чтобы маклеры отвечали прямо вам в Telegram, а я читала их ответы и сама уточняла детали? Напишите «подключить телеграм» — пришлю инструкцию на минуту."""
+Хотите, чтобы маклеры отвечали прямо вам в Telegram, а я читала их ответы и сама уточняла детали? Напишите «подключить телеграм» — пришлю инструкцию на минуту. Не хотите давать доступ к чатам — «без подключения»: ответы маклеров будете пересылать мне, а уточнения я подготовлю текстом."""
 
 DISTRICT_LIST = sorted(DISTRICTS)
 PRICE_PRESETS = [300, 400, 500, 700, 1000, 1500]
@@ -2190,9 +2190,13 @@ def send_broker_batch(cfg, store, settings, n=OUTREACH_BATCH) -> str:
         store.broker_status(b["bid"], "offered")       # показан — второй раз не предложим
     left = len(pool) - len(pick)
     more = f" Ещё {left} — напишите «ещё маклеров»." if left and room - len(pick) > 0 else ""
+    mode = concierge.broker_mode(store)
     lines += ["", ("Как отправите — я увижу сама и буду следить за ответами: соберу карточки и уточню детали." if biz else
-                   "Маклеры ответят вам — перешлите их сообщения мне, сделаю карточки. А чтобы я читала ответы сама, "
-                   "напишите «подключить телеграм».") + more]
+                   "Маклеры ответят вам или сразу мне. Ответили вам — перешлите их сообщения мне "
+                   "(держите сообщение → «Переслать» → Ra'no), сделаю карточки."
+                   + ("" if mode == "manual" else " Хотите, чтобы я читала ответы сама, — «подключить телеграм»; "
+                      "не хотите давать доступ — «без подключения»."))
+              + more]
     day["n"] += len(pick)
     store.set_kv("outreach_day", day)
     msg = "\n".join(lines)
@@ -2698,8 +2702,9 @@ def via_screen(cfg, store) -> dict:
         lines.append(f"⏳ Ждём ответа на уточнение: {waiting}")
     lines += ["", "Скажите «напиши маклерам» — пришлю 5 маклеров со вписанным запросом (до 15 в день, чтобы Telegram "
               "не счёл это спамом). Маклер ответил в WhatsApp — перешлите мне, сделаю карточку."]
-    if not concierge.biz_ready(store):
-        lines.append("Чтобы я сама читала ответы маклеров в ваших чатах — напишите «подключить телеграм».")
+    if not concierge.broker_mode(store):
+        lines.append("Чтобы я сама читала ответы маклеров в ваших чатах — напишите «подключить телеграм». "
+                     "Без доступа к чатам — «без подключения», будем через пересылку.")
     rows = []
     if pool:
         rows.append([{"text": f"🏠 Варианты ({pool})", "callback_data": "cmd:/offers"}])
@@ -2774,6 +2779,7 @@ def ui_snapshot(cfg, store, settings) -> dict:
             "screens": screens, "ctx": ctx,
             "free": cfg.get("free_offers", 2), "deal": deal,
             "brokers": brokers, "brokers_total": len(ranked), "biz": concierge.biz_ready(store),
+            "broker_mode": concierge.broker_mode(store),
             "header": outreach_header(store, deal, text, len(ranked)) if ranked else "",
             "brokers_empty": outreach_empty_text(store, deal) if not ranked else ""}
 
@@ -3323,6 +3329,7 @@ def flush_pending_offer(cfg, store, sale_store=None):
             if request_deal(store) == "sale":
                 send_offer_analysis(cfg, store, int(k), sale_store)
             concierge.biz_auto_ask(cfg, store, int(k))   # чат клиента: сама спрашиваю, чего не хватает
+            concierge.manual_auto_ask(cfg, store, int(k))  # переслали: готовый текст уточнения клиенту
         except Exception as e:
             log.warning("не показал вариант %s: %s", k, e)
 
@@ -3440,6 +3447,13 @@ def process_commands(cfg: dict, store, long_poll: int = 0) -> dict:
 
         if msg.get("_biz_guide"):            # «подключи к моему телеграму» — пошаговая инструкция
             send_telegram(cfg, concierge.biz_guide(cfg, store))
+            continue
+        if msg.get("_biz_decline"):          # «не хочу давать доступ» — работаем через пересылку
+            store.set_kv("broker_mode", "manual")
+            send_telegram(cfg, concierge.MANUAL_HOWTO if not concierge.biz_ready(store) else
+                          "Ra'no сейчас подключена к вашему Telegram. Чтобы отключить: Настройки → Telegram для "
+                          "бизнеса → Чат-боты → Ra'no → «Отключить бота». Дальше буду работать через пересылку.")
+            push_snapshot(cfg, store, settings, force=True)
             continue
         if msg.get("_link"):                 # воркер: владелец прислал ссылку на объявление
             handle_link(cfg, store, msg)

@@ -2780,3 +2780,40 @@ assert rr._owner_no_buttons(ocfg, {"chat_id": 500, "text": "t", "reply_markup": 
 assert "Кнопок больше нет" in rr.VIEW_HINT and "своими словами" in rr.WELCOME_TEXT + rr.HELP_TEXT
 assert "напиши маклерам" in rr.HELP_TEXT and "пару нажатий" not in rr.WELCOME_TEXT
 print("OK — без кнопок: клиенту клавиатуры не уходят, подсказки — какими словами сказать")
+
+# ============ без подключения к Telegram: пересылка + маклер может писать прямо в бота ============
+mnd = Path("/tmp/test_manual.db"); mnd.unlink(missing_ok=True); mn = rr.Store(mnd)
+MN = []
+mcfg = dict(cfg, telegram_chat_id="600", worker_url="")
+cg.save_anketa(mn, {"i": 99, "ans": {"lang": "ru", "deal": "buy", "object": "flat", "city": "tashkent",
+                                     "rooms": ["2"], "budget": "70000", "contact": "bot"}})
+for i in range(6):
+    mn.conn.execute("INSERT INTO brokers(bid, source, name, phone, tg, status, ads, districts, deals) VALUES(?,?,?,?,?,?,?,?,?)",
+                    (f"q{i}", "uybor", f"М {i}", f"90{i:07d}", "", "new", 10, '["Мирабад"]', '["sale"]'))
+mn.conn.commit()
+with mock.patch.object(rr, "tg_call", lambda c, m, p, **k: MN.append((m, p)) or {"ok": True, "result": {"message_id": 3}}), \
+        mock.patch.object(rr, "push_snapshot", lambda *a, **k: True):
+    rr.concierge._BIZ_STORE["store"] = mn
+    assert cg.broker_mode(mn) == ""
+    rr.handle_command("/brokers", rr.default_settings(), mn, mcfg)
+    first = [p for m, p in MN if "Маклеры под ваш запрос" in p.get("text", "")][-1]["text"]
+    assert "без подключения" in first and "WhatsApp" in first and "Переслать" in first          # выбор — словами
+    # «не хочу давать доступ» → режим пересылки, понятная инструкция
+    with mock.patch.object(rr, "fetch_updates", lambda c, st, lp=0: ({"result": [{"update_id": 1, "message": {
+            "chat": {"id": 600}, "text": "не хочу давать доступ", "_biz_decline": True}}]}, "tg_offset")):
+        rr.process_commands(mcfg, mn)
+    assert mn.get_kv("broker_mode") == "manual" and cg.broker_mode(mn) == "manual"
+    assert "Переслать" in MN[-1][1]["text"] and "ничего от вашего имени не пишу" in MN[-1][1]["text"]
+    assert "t.me/rano_smart_bot" in cg.compose_request(mcfg, mn)                                  # маклер может писать в бота
+    MN.clear()
+    rr.handle_command("/brokers", rr.default_settings(), mn, mcfg)
+    nxt = [p for m, p in MN if "Маклеры под ваш запрос" in p.get("text", "")][-1]["text"]
+    assert "подключить телеграм" not in nxt and "Переслать" in nxt                                 # больше не уговариваем
+    # пересланный вариант: уточнение — готовым текстом клиенту, один раз
+    oid, _ = cg.save_offer(mn, mcfg, "owner", "Азиз", "Продаю 2 комн Мирабад", [])
+    MN.clear()
+    assert cg.manual_auto_ask(mcfg, mn, oid) and "<code>" in MN[-1][1]["text"] and "фото" in MN[-1][1]["text"]
+    assert not cg.manual_auto_ask(mcfg, mn, oid)
+rr.concierge._BIZ_STORE["store"] = None
+mnd.unlink(missing_ok=True)
+print("OK — без подключения: выбор словами, инструкция по пересылке, ссылка на бота в запросе, уточнения готовым текстом")

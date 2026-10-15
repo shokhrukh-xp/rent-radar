@@ -593,6 +593,8 @@ assert.equal(await handleUpdate(env, { update_id: ++bu, business_connection: { i
 assert.equal(await handleUpdate(env, { update_id: ++bu, business_message: { business_connection_id: "BC1", chat: { id: 9001 }, text: "есть вариант" } }), "business");
 const qn = (await env.DB.prepare("SELECT upd FROM queue").all()).results.map(r => JSON.parse(r.upd));
 assert.ok(qn.some(u => u.business_message?.chat?.id === 9001) && qn.some(u => u.business_connection?.id === "BC1"));
+{ const m = msg("не хочу давать доступ к чатам"); m.update_id = ++bu;
+  assert.equal(await handleUpdate(env, m), "biz_decline"); }
 for (const t of ["Как подключить тебя к моему телеграму?", "/connect"]) {
   const m = msg(t); m.update_id = ++bu;
   assert.equal(await handleUpdate(env, m), "biz_guide");

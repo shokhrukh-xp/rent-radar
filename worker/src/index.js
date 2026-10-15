@@ -791,7 +791,9 @@ export async function showOffers(env, chat, all = false) {
       ? `\nВы написали ${ui.written} маклерам — как ответят, принесу их варианты сюда карточками. ` +
         "Скажите «напиши маклерам» — подберу ещё."
       : "\nСкажите «напиши маклерам» — подберу маклеров под ваш запрос, текст им уже будет вписан.";
-    const biz = ui.biz ? "" : "\nЧтобы я сама читала ответы маклеров в ваших чатах — напишите «подключить телеграм».";
+    const biz = ui.biz ? "" : ui.broker_mode === "manual"
+      ? "\nМаклер ответил вам — перешлите мне его сообщения, сделаю карточку."
+      : "\nЧтобы я сама читала ответы маклеров в ваших чатах — «подключить телеграм». Без доступа к чатам — «без подключения».";
     await say(env, chat, (waiting ? "Пока тихо — новых карточек нет 🌙" : "Пока тихо — новых вариантов нет 🌙") +
       (ui.shortlist ? ` В шортлисте — ${ui.shortlist}, скажите «шортлист».` : "") + hint + biz + waitNote);
     return;
@@ -1192,6 +1194,9 @@ async function startInterview(env, chat, fresh, lang = "ru") {
 // «подключить к телеграму», «как ты будешь читать маклеров», «telegram business» — без слов про поиск квартиры
 export const BIZ_ASK = /(подключ\w*|привяз\w*|привяж\w*|настро\w*|ulash|ulang)[^.!?\n]{0,40}(телеграм\w*|telegram|аккаунт\w*|akkaunt)|telegram\s*(business|для\s*бизнеса|biznes)|бизнес[- ]?(режим|аккаунт)|(читать|отвечать)[^.!?\n]{0,25}маклер\w*\s+(в|из)\s+(моих|моём|моем|мой)/i;
 
+// «не хочу давать доступ», «без подключения» — работа через пересылку
+export const BIZ_NO = /без\s+(подключени[а-яё]*|доступа)|не\s+(хочу|буду|надо|нужно)\s+(давать\s+)?(подключ[а-яё]*|доступ[а-яё]*|давать\s+доступ)|(отключ[а-яё]*|выключ[а-яё]*)\s+(тебя\s+)?(от\s+)?(моего\s+)?(телеграм[а-яё]*|чат[а-яё]*)|ulamasdan|ulamayman/i;
+
 export async function handleUpdate(env, upd) {
   const owner = String(env.OWNER_CHAT);
   const last = await kvGet(env, "last_upd", 0);
@@ -1417,6 +1422,11 @@ export async function handleUpdate(env, upd) {
   }
 
   // «подключи к моему телеграму» — пошаговая инструкция Telegram для бизнеса (текст и проверка — в Python)
+  if (BIZ_NO.test(text)) {
+    upd.message = { ...msg, _biz_decline: true };
+    await queueAndWake(env, upd);
+    return "biz_decline";
+  }
   if (/^\/connect(@\w+)?$/i.test(text) || BIZ_ASK.test(text)) {
     upd.message = { ...msg, _biz_guide: true };
     await queueAndWake(env, upd);
