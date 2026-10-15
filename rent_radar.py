@@ -1238,7 +1238,9 @@ HELP_TEXT = """🏠 <b>Ra'no</b> — ваш ИИ-ассистент по пои�
 Про конкретную квартиру удобнее всего ответить на её сообщение — тогда я точно пойму, о какой речь. Но можно и просто описать: «та, что на Чиланзаре».
 
 Каждый вариант приходит альбомом: первым — карта, где квартира, дальше фото, под ними — разбор цены.
-Могу ещё: разобрать ссылку на объявление, сделать карточку из пересланного сообщения маклера, написать маклерам, показать цены рынка. Напоминаю сама — о просмотрах и если маклер молчит."""
+Могу ещё: разобрать ссылку на объявление, сделать карточку из пересланного сообщения маклера, написать маклерам, показать цены рынка. Напоминаю сама — о просмотрах и если маклер молчит.
+
+Хотите, чтобы маклеры отвечали прямо вам в Telegram, а я читала их ответы и сама уточняла детали? Напишите «подключить телеграм» — пришлю инструкцию на минуту."""
 
 DISTRICT_LIST = sorted(DISTRICTS)
 PRICE_PRESETS = [300, 400, 500, 700, 1000, 1500]
@@ -3014,8 +3016,83 @@ def intake_offer(cfg, store, group, chat_key, name, text, photos, media_group=No
     return oid, is_new
 
 
-def handle_broker_message(cfg, store, msg):
-    """Маклер пишет боту напрямую — сохраняем вариант и показываем владельцу."""
+BIZ_REQUEST_RE = re.compile(r"ИИ-помощник|sun'iy intellekt yordamchisi", re.I)
+
+
+def handle_business_update(cfg, store, upd) -> bool:
+    """Telegram для бизнеса: клиент подключил Ra'no к своему аккаунту.
+    Подключение — запоминаем и пишем клиенту, что дальше. Сообщения — только из чатов, куда клиент отправил
+    запрос (в нём строка про ИИ-помощника); остальные чаты не читаем и не храним."""
+    bc = upd.get("business_connection")
+    if bc:
+        owner = str(cfg["telegram_chat_id"])
+        if str(bc.get("user_chat_id") or "") != owner:
+            log.info("[бизнес] подключение не от владельца — пока не поддерживаем")
+            return True
+        rights = bc.get("rights") or {}
+        can_reply = bool(rights.get("can_reply") or bc.get("can_reply"))
+        prev = store.get_kv("biz_conn") or {}
+        conn = {"id": bc.get("id"), "user_id": (bc.get("user") or {}).get("id"),
+                "enabled": bool(bc.get("is_enabled")), "can_reply": can_reply, "at": time.time()}
+        store.set_kv("biz_conn", conn)
+        a = cfg.get("assistant_name", "Ra'no")
+        if not conn["enabled"]:
+            send_telegram(cfg, f"🔌 {a} отключена от вашего Telegram — ответы маклеров в ваших чатах больше не вижу. "
+                               "Подключить снова: напишите «подключить телеграм».")
+        elif not can_reply:
+            send_telegram(cfg, f"⚠️ Почти готово: {a} подключена, но без права отвечать — уточнять у маклеров "
+                               "не смогу.\nОткройте Настройки → Telegram для бизнеса → Чат-боты → "
+                               f"@{cfg.get('bot_username') or 'rano_smart_bot'} и включите <b>ответ на сообщения</b>.")
+        elif not (prev.get("enabled") and prev.get("can_reply")):
+            req = concierge.compose_request(cfg, store)
+            store.set_kv("request_text", req)
+            send_telegram(cfg, f"✅ <b>{a} подключена к вашему Telegram.</b>\n\n"
+                               "Как это работает: вы отправляете маклеру запрос — я вижу его ответ, собираю карточку "
+                               "с картой и сама уточняю фото, адрес и цену. Другие ваши чаты не читаю.\n\n"
+                               "Ваш запрос маклерам (нажмите, чтобы скопировать):\n"
+                               f"<code>{escape_html(req)}</code>")
+        return True
+    m = upd.get("business_message") or upd.get("edited_business_message")
+    if not m:
+        return bool(upd.get("deleted_business_messages"))
+    conn = store.get_kv("biz_conn") or {}
+    if not conn.get("id") or m.get("business_connection_id") != conn["id"]:
+        return True
+    peer = (m.get("chat") or {}).get("id")
+    if not peer or (m.get("chat") or {}).get("type", "private") != "private":
+        return True
+    chats = store.get_kv("biz_chats") or {}
+    k = f"biz:{peer}"
+    outgoing = str((m.get("from") or {}).get("id") or "") == str(conn.get("user_id") or "")
+    if outgoing:
+        if m.get("sender_business_bot"):            # это наше же сообщение маклеру
+            return True
+        text = m.get("text") or m.get("caption") or ""
+        if k not in chats and BIZ_REQUEST_RE.search(text):
+            ch = m.get("chat") or {}
+            chats[k] = {"since": time.time(), "username": ch.get("username"),
+                        "name": " ".join(x for x in [ch.get("first_name"), ch.get("last_name")] if x)}
+            store.set_kv("biz_chats", chats)
+            un = (ch.get("username") or "").lower()
+            if un:                                   # маклер из нашей базы — отмечаем «написали»
+                store.conn.execute("UPDATE brokers SET status='contacted', last_contact=? "
+                                   "WHERE lower(ltrim(COALESCE(tg,''),'@'))=? AND status='new'",
+                                   (datetime.now(timezone.utc).isoformat(), un))
+                store.conn.commit()
+            log.info("[бизнес] запрос ушёл маклеру %s", chats[k]["name"] or un or peer)
+        return True
+    if k not in chats:                               # чат без нашего запроса — не читаем
+        return True
+    if upd.get("edited_business_message"):
+        return True
+    handle_broker_message(cfg, store, m, key=k, quiet=True)
+    return True
+
+
+def handle_broker_message(cfg, store, msg, key=None, quiet=False):
+    """Маклер пишет боту напрямую — сохраняем вариант и показываем владельцу.
+    key/quiet — маклер пишет в чат клиента (Telegram для бизнеса): ключ biz:<чат>, сами ему не отвечаем —
+    уточнит concierge.biz_auto_ask после показа карточки."""
     chat = msg.get("chat") or {}
     chat_id = chat.get("id")
     if not chat_id:
@@ -3024,6 +3101,22 @@ def handle_broker_message(cfg, store, msg):
         or chat.get("username") or "маклер"
     text, photos = _offer_parts(msg)
     if not text and not photos:
+        return
+    if quiet:
+        k = key or f"biz:{chat_id}"
+        asked = (store.get_kv("biz_asked") or {}).get(k) or {}
+        if asked.get("oid") and time.time() - asked.get("at", 0) < 72 * 3600:
+            # ответ на наши уточнения: дописываем в тот же вариант и покажем обновлённую карточку
+            concierge.merge_into_offer(store, cfg, int(asked["oid"]), text, photos)
+            pend = store.get_kv("pending_offers") or {}
+            pend[str(asked["oid"])] = {"at": time.time(), "group": f"chat:{k}", "update": True}
+            store.set_kv("pending_offers", pend)
+            return
+        try:
+            oid, is_new = intake_offer(cfg, store, f"chat:{k}", k, name, text, photos, msg.get("media_group_id"))
+            log.info("вариант #%s из чата клиента от %s (%s)", oid, name, "новый" if is_new else "дополнение")
+        except Exception as e:
+            log.warning("не сохранил вариант из чата клиента %s: %s", chat_id, e)
         return
 
     if msg.get("_welcomed"):                 # воркер уже познакомил маклера с запросом
@@ -3116,6 +3209,7 @@ def flush_pending_offer(cfg, store, sale_store=None):
     due = [k for k, v in pend.items() if now - v.get("at", 0) >= quiet]
     if not due:
         return
+    due_meta = {k: pend.get(k) or {} for k in due}
     for k in due:
         pend.pop(k, None)
     store.set_kv("pending_offers", pend)
@@ -3127,10 +3221,13 @@ def flush_pending_offer(cfg, store, sale_store=None):
                 concierge.mark_as_message(cfg, store, int(k))   # «позвоню», «есть варианты» — не карточка
                 continue
             if ai:
-                concierge.enrich_offer(cfg, store, int(k), ai)
+                concierge.enrich_offer(cfg, store, int(k), ai, fill_only=bool(due_meta.get(k, {}).get("update")))
+            if due_meta.get(k, {}).get("update"):        # маклер ответил на уточнения в чате клиента
+                send_telegram(cfg, f"💬 Маклер дослал по варианту #{k} — обновила карточку.")
             concierge.notify_offer(cfg, store, int(k))
             if request_deal(store) == "sale":
                 send_offer_analysis(cfg, store, int(k), sale_store)
+            concierge.biz_auto_ask(cfg, store, int(k))   # чат клиента: сама спрашиваю, чего не хватает
         except Exception as e:
             log.warning("не показал вариант %s: %s", k, e)
 
@@ -3205,8 +3302,16 @@ def process_commands(cfg: dict, store, long_poll: int = 0) -> dict:
         return settings
     changed = False
     snap = False                                  # шортлист/карточки поменялись — воркеру сразу
+    concierge._BIZ_STORE["store"] = store          # подключён ли Telegram для бизнеса — для отправки маклерам
     for upd in resp.get("result", []):
         offset = max(offset, upd.get("update_id", 0))
+        if any(upd.get(x) for x in ("business_connection", "business_message", "edited_business_message",
+                                     "deleted_business_messages")):
+            try:
+                handle_business_update(cfg, store, upd)
+            except Exception as e:
+                log.warning("[бизнес] не разобрала обновление: %s", e)
+            continue
 
         cb = upd.get("callback_query")
         if cb:
@@ -3238,6 +3343,9 @@ def process_commands(cfg: dict, store, long_poll: int = 0) -> dict:
             handle_broker_message(cfg, store, msg)   # это маклер прислал вариант
             continue
 
+        if msg.get("_biz_guide"):            # «подключи к моему телеграму» — пошаговая инструкция
+            send_telegram(cfg, concierge.biz_guide(cfg, store))
+            continue
         if msg.get("_link"):                 # воркер: владелец прислал ссылку на объявление
             handle_link(cfg, store, msg)
             continue

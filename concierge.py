@@ -532,6 +532,14 @@ def compose_request(cfg, store, username=None):
     assistant = cfg.get("assistant_name", "Ra'no")
     # в латинском письме имя тоже латиницей, иначе выходит «Раноga»
     assistant_lat = {"Рано": "Rano", "Амина": "Amina"}.get(assistant, assistant)
+    if biz_ready_store(store):
+        # клиент подключил Ra'no к своему Telegram: маклер отвечает прямо в этот чат, а про ИИ-помощника
+        # говорим один раз — здесь (по этой строке Ra'no и узнаёт, что запрос ушёл)
+        parts.append(f"Menga {assistant_lat} — sun'iy intellekt yordamchisi yordam beradi, u shu chatda "
+                     "tafsilotlarni aniqlashtirishi mumkin. Variantlarni shu yerga yuboring." if uz else
+                     f"Мне помогает {assistant} — ИИ-помощник, она может уточнить детали прямо в этом чате. "
+                     "Варианты присылайте сюда.")
+        who = "none"
     if who in ("bot", "both"):
         # Даём кликабельную ссылку, а не @упоминание: маклер, который ищет бота
         # по имени, легко попадает к чужому боту с похожим юзернеймом.
@@ -1093,8 +1101,85 @@ def decline_text(cfg, reason=""):
 
 
 def can_message_broker(o) -> bool:
-    """Боту можно писать только маклерам, которые сами писали в бота (не пересланным)."""
-    return str(o.get("broker_chat") or "").lstrip("-").isdigit()
+    """Писать можно маклерам, которые сами писали в бота, и маклерам в чатах клиента,
+    куда Ra'no подключена через Telegram для бизнеса (biz:<чат>). Пересланным — нельзя."""
+    c = str(o.get("broker_chat") or "")
+    return c.lstrip("-").isdigit() or (c.startswith("biz:") and biz_ready_store(None))
+
+
+# ============================================== TELEGRAM ДЛЯ БИЗНЕСА ======
+# Клиент подключает Ra'no к своему аккаунту (Настройки → Telegram для бизнеса → Чат-боты).
+# Тогда маклер отвечает прямо в чате клиента, а Ra'no читает ответ, собирает карточку и сама
+# уточняет недостающее. Первое сообщение маклеру отправляет сам клиент — в нём сказано про ИИ-помощника.
+
+_BIZ_STORE = {"store": None}
+
+
+def biz_conn(store):
+    st = store or _BIZ_STORE["store"]
+    return (st.get_kv("biz_conn") or {}) if st else {}
+
+
+def biz_ready(store) -> bool:
+    c = biz_conn(store)
+    return bool(c.get("id") and c.get("enabled") and c.get("can_reply"))
+
+
+def biz_ready_store(store) -> bool:
+    try:
+        return biz_ready(store)
+    except Exception:                               # база закрыта/другой поток — считаем, что не подключено
+        return False
+
+
+def biz_guide(cfg, store=None) -> str:
+    """Инструкция для любого человека: что нажать, что выбрать, что Ra'no будет видеть."""
+    bot = cfg.get("bot_username") or "rano_smart_bot"
+    a = cfg.get("assistant_name", "Ra'no")
+    c = biz_conn(store) if store else {}
+    if c.get("enabled") and c.get("can_reply"):
+        return (f"✅ {a} уже подключена к вашему Telegram — ответы маклеров вижу и уточняю сама.\n\n"
+                "Отключить: Настройки → Telegram для бизнеса → Чат-боты → @" + bot + " → «Отключить бота».")
+    return (
+        f"🔗 <b>Подключите {a} к своему Telegram</b> — один раз, около минуты.\n"
+        "Тогда маклеры отвечают прямо вам в чат, а я читаю ответ, собираю карточку с картой и сама "
+        "уточняю фото, адрес и цену.\n\n"
+        "<b>1.</b> Откройте <b>Настройки</b> → <b>Telegram для бизнеса</b>.\n"
+        "<b>2.</b> Нажмите <b>Чат-боты</b>.\n"
+        f"<b>3.</b> Впишите <code>@{bot}</code> (нажмите — скопируется) и выберите бота в списке.\n"
+        "<b>4.</b> Доступ к чатам: выберите <b>Только выбранные чаты</b> → добавьте <b>Новые чаты</b> "
+        "и <b>Не контакты</b>. Старые переписки и ваши контакты я не увижу.\n"
+        "<b>5.</b> В разрешениях бота оставьте включённым <b>ответ на сообщения</b>.\n"
+        "<b>6.</b> Нажмите <b>Добавить</b> (или ✓ вверху).\n\n"
+        "Всё — я сама увижу подключение и напишу вам здесь.\n\n"
+        "<b>Что я делаю в ваших чатах:</b>\n"
+        "• читаю только чаты, куда вы отправили запрос маклеру; остальное не открываю и не храню;\n"
+        "• уточняю у маклера фото, адрес, этаж, цену;\n"
+        "• о просмотре, торге и отказе — только после вашего «да» здесь.\n"
+        "Если названия пунктов чуть другие — ищите «Чат-боты» в разделе для бизнеса. "
+        "Отключить можно там же в любой момент.")
+
+
+def _biz_voice(text: str, cfg) -> str:
+    """Из аккаунта клиента пишем от первого лица, без подписи: про ИИ-помощника сказано в первом сообщении."""
+    a = (cfg or {}).get("assistant_name", "Ra'no")
+    t = re.sub(rf"^Здравствуйте! Это {re.escape(a)} 👋, ИИ-ассистент по поиску жилья\.\n", "", text)
+    t = t.replace(f"Здравствуйте! Это снова {a} 🙂 ", "Здравствуйте! ")
+    t = t.replace("Клиенту, увы, не подошёл", "Увы, не подошёл").replace("клиенту", "мне")
+    return re.sub(rf"\s*\({re.escape(a)}\)\s*$", "", t)
+
+
+def broker_send(cfg, store, broker_chat, text):
+    """Сообщение маклеру: в бота — от бота; в чат клиента — через Telegram для бизнеса."""
+    rr = _rr()
+    c = str(broker_chat or "")
+    if c.startswith("biz:"):
+        conn = biz_conn(store)
+        if not (conn.get("id") and conn.get("enabled")):
+            return None
+        return rr.tg_call(cfg, "sendMessage", {"business_connection_id": conn["id"], "chat_id": int(c[4:]),
+                                               "text": _biz_voice(text, cfg)}, quiet=True)
+    return rr.tg_call(cfg, "sendMessage", {"chat_id": broker_chat, "text": text})
 
 
 def handle_triage_cb(data, cfg, store):
@@ -1126,8 +1211,7 @@ def handle_triage_cb(data, cfg, store):
                            (f"\n👎 {next((t for c, t, *_ in DECLINE_REASONS if c == reason), '')}", oid))
         store.conn.commit()
     if can_message_broker(o):
-        rr.tg_call(cfg, "sendMessage",
-                   {"chat_id": o["broker_chat"], "text": decline_text(cfg, reason)})
+        broker_send(cfg, store, o["broker_chat"], decline_text(cfg, reason))
         return "Маклеру ответила вежливо 🙏", True
     return "👎 Поняла, мимо", True
 
@@ -1438,7 +1522,7 @@ def remind_broker(cfg, store, oid):
         rr.send_telegram(cfg, f"✍️ Маклер по варианту #{oid} не в боте — напомните сами, текст готов:\n\n"
                               f"<code>{rr.escape_html(remind_text(o, cfg))}</code>")
         return "Текст напоминания — в чате"
-    ok = rr.tg_call(cfg, "sendMessage", {"chat_id": o["broker_chat"], "text": remind_text(o, cfg)})
+    ok = broker_send(cfg, store, o["broker_chat"], remind_text(o, cfg))
     if ok is None:
         return "Не получилось отправить"
     now = datetime.now(timezone.utc).isoformat()
@@ -1486,7 +1570,7 @@ def handle_offer_cb(data, cfg, store, message_id=None):
         if arg == "n":
             set_offer_status(store, oid, "rejected")
             if can_message_broker(o):
-                rr.tg_call(cfg, "sendMessage", {"chat_id": o["broker_chat"], "text": decline_text(cfg)})
+                broker_send(cfg, store, o["broker_chat"], decline_text(cfg))
             done = {"chat_id": cfg["telegram_chat_id"], "parse_mode": "HTML",
                     "text": f"👎 Вариант #{oid} убран из шортлиста"
                             + (" — маклеру ушёл вежливый отказ." if can_message_broker(o) else "."),
@@ -1535,6 +1619,56 @@ def show_shortlist(cfg, store, message_id=None, offset=0):
         rr.send_card(cfg, offer_media(cfg, o), text, ref=f"O:{o['oid']}")
         time.sleep(1)
     return len(page)
+
+
+def biz_followup_text(o, deal="rent", uz=False):
+    """Что спросить у маклера сразу после его варианта: только недостающее. О просмотре и торге — нет:
+    это решает клиент."""
+    ex = o.get("extra") or {}
+    items = []
+    if not o.get("photos"):
+        items.append("Yuborolasizmi rasmlarini (xonalar, oshxona, sanuzel)?" if uz else
+                     "Пришлите, пожалуйста, фото (комнаты, кухня, санузел).")
+    if not (ex.get("address") or ex.get("landmark")):
+        items.append("Aniq manzil yoki mo'ljal?" if uz else "Точный адрес или ориентир?")
+    if not o.get("floor"):
+        items.append("Qavati va necha qavatli?" if uz else "Какой этаж и этажность?")
+    if not o.get("area"):
+        items.append("Maydoni qancha?" if uz else "Какая площадь?")
+    if not o.get("price_usd"):
+        items.append(("Narxi qancha, kelishsa bo'ladimi?" if deal == "buy" else "Oyiga narxi qancha?") if uz else
+                     ("Какая цена и есть ли торг?" if deal == "buy" else "Какая цена в месяц?"))
+    if deal == "buy" and not ex.get("documents"):
+        items.append("Hujjatlari joyidami (kadastr), ipotekaga beriladimi?" if uz else
+                     "Документы в порядке (кадастр)? Можно в ипотеку?")
+    if not ex.get("commission"):
+        items.append("Vositachilik haqi qancha?" if uz else "Какая комиссия?")
+    if not items:
+        return ""
+    head = "Rahmat! Bir nechta savol:" if uz else "Спасибо! Уточните, пожалуйста:"
+    return "\n".join([head] + [f"{i}. {t}" for i, t in enumerate(items, 1)])
+
+
+def biz_auto_ask(cfg, store, oid) -> bool:
+    """Вариант пришёл в чат клиента — один раз дописываем маклеру, чего не хватает (окно 24 ч открыто:
+    маклер только что написал)."""
+    o = get_offer(store, oid)
+    if not o or not str(o.get("broker_chat") or "").startswith("biz:") or not biz_ready(store):
+        return False
+    if (o.get("extra") or {}).get("auto_asked"):
+        return False
+    ans = get_anketa(store).get("ans") or {}
+    deal = "buy" if ans.get("deal") in ("buy", "sale") else "rent"
+    text = biz_followup_text(o, deal, ans.get("lang") == "uz")
+    if not text:
+        return False
+    if broker_send(cfg, store, o["broker_chat"], text) is None:
+        return False
+    _set_extra(store, oid, auto_asked=datetime.now(timezone.utc).isoformat())
+    asked = store.get_kv("biz_asked") or {}
+    asked[str(o["broker_chat"])] = {"oid": oid, "at": time.time()}
+    store.set_kv("biz_asked", asked)
+    return True
 
 
 def details_question(o, cfg=None, deal="rent"):
@@ -1591,9 +1725,7 @@ def request_details(cfg, store, oids=None):
             store.conn.execute("UPDATE broker_offers SET asked_at=? WHERE oid=?",
                                (datetime.now(timezone.utc).isoformat(), oid))
             continue
-        ok = rr.tg_call(cfg, "sendMessage",
-                        {"chat_id": o["broker_chat"],
-                         "text": details_question(o, cfg, deal)})
+        ok = broker_send(cfg, store, o["broker_chat"], details_question(o, cfg, deal))
         if ok is not None:
             store.conn.execute(
                 "UPDATE broker_offers SET status='asked', asked_at=? WHERE oid=?",

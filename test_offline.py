@@ -2665,3 +2665,83 @@ G.CITY_PROFILES["ташкент"] = {**G.CITY_FALLBACK["ташкент"], "near_
 cdb.unlink(missing_ok=True); crd.unlink(missing_ok=True)
 print("OK — центр: что считается центром города — из интернета, проверено по карте; «у центра» помечаем")
 
+
+# ============ Telegram для бизнеса: Ra'no в чатах клиента — читает маклеров и уточняет сама ============
+bzd = Path("/tmp/test_biz.db"); bzd.unlink(missing_ok=True); bz = rr.Store(bzd)
+BZ = []
+def bz_tg(c, method, payload, timeout=20, quiet=False):
+    BZ.append((method, payload)); return {"ok": True, "result": {"message_id": 7}}
+bcfg = dict(cfg, telegram_chat_id="500", worker_url="")
+cg.save_anketa(bz, {"i": 99, "ans": {"lang": "ru", "deal": "buy", "object": "flat", "city": "tashkent",
+                                     "rooms": ["2"], "budget": "70000", "contact": "bot"}})
+bz.conn.execute("INSERT INTO brokers(bid, source, name, phone, tg, status) VALUES('b1','uybor','Азиз','901','@Makler1','new')")
+bz.conn.commit()
+assert "rano_smart_bot" in cg.compose_request(bcfg, bz)                          # не подключено — ссылка на бота
+guide = cg.biz_guide(bcfg, bz)
+assert "Telegram для бизнеса" in guide and "Чат-боты" in guide and "@rano_smart_bot" in guide and "Новые чаты" in guide
+with mock.patch.object(rr, "tg_call", bz_tg):
+    rr.concierge._BIZ_STORE["store"] = bz
+    # подключили без права отвечать — подсказываем, что включить
+    rr.handle_business_update(bcfg, bz, {"business_connection": {"id": "BC1", "user": {"id": 500}, "user_chat_id": 500,
+                                         "is_enabled": True, "rights": {}}})
+    assert "ответ на сообщения" in BZ[-1][1]["text"] and not cg.biz_ready(bz)
+    rr.handle_business_update(bcfg, bz, {"business_connection": {"id": "BC1", "user": {"id": 500}, "user_chat_id": 500,
+                                         "is_enabled": True, "rights": {"can_reply": True}}})
+    assert cg.biz_ready(bz) and "подключена к вашему Telegram" in BZ[-1][1]["text"]
+    req = bz.get_kv("request_text")
+    assert "ИИ-помощник" in req and "t.me/rano_smart_bot" not in req                # про ИИ — в первом сообщении
+    # чужое подключение — не наше
+    rr.handle_business_update(bcfg, bz, {"business_connection": {"id": "X", "user": {"id": 1}, "user_chat_id": 1,
+                                         "is_enabled": True, "rights": {"can_reply": True}}})
+    assert bz.get_kv("biz_conn")["id"] == "BC1"
+    def bmsg(peer, frm, text=None, photo=None, **kw):
+        m = {"business_connection_id": "BC1", "chat": {"id": peer, "type": "private", "first_name": "Азиз",
+                                                         "username": "makler1"}, "from": {"id": frm}, **kw}
+        if text: m["text"] = text
+        if photo: m["photo"] = [{"file_id": photo, "width": 9, "height": 9}]
+        return {"business_message": m}
+    n0 = bz.conn.execute("SELECT COUNT(*) FROM broker_offers").fetchone()[0]
+    rr.handle_business_update(bcfg, bz, bmsg(9002, 9002, "Привет! Как дела?"))           # чат без запроса — не читаем
+    rr.handle_business_update(bcfg, bz, bmsg(9001, 9001, "2 комн Мирабад 65 000$"))     # маклер раньше запроса — тоже
+    assert bz.conn.execute("SELECT COUNT(*) FROM broker_offers").fetchone()[0] == n0 and not bz.get_kv("biz_chats")
+    rr.handle_business_update(bcfg, bz, bmsg(9001, 500, req))                           # клиент отправил запрос
+    assert "biz:9001" in bz.get_kv("biz_chats")
+    assert bz.conn.execute("SELECT status FROM brokers WHERE bid='b1'").fetchone()[0] == "contacted"   # сам отметил
+    BZ.clear()
+    rr.handle_business_update(bcfg, bz, bmsg(9001, 9001, "Есть 2 комн Мирабад 58 м2, 65 000$, 4/9"))
+    assert not BZ                                                                      # маклеру сразу не отвечаем
+    o = bz.conn.execute("SELECT oid, broker_chat FROM broker_offers ORDER BY oid DESC LIMIT 1").fetchone()
+    assert o[1] == "biz:9001"
+    pend = bz.get_kv("pending_offers"); pend[str(o[0])]["at"] -= 1000; bz.set_kv("pending_offers", pend)
+    with mock.patch.object(rr, "send_offer_analysis", lambda *a, **k: None):
+        rr.flush_pending_offer(bcfg, bz)
+    ask = [pl for m, pl in BZ if pl.get("business_connection_id") == "BC1"]
+    assert len(ask) == 1 and ask[0]["chat_id"] == 9001, BZ
+    q = ask[0]["text"]
+    assert "фото" in q and "адрес" in q and "Ra'no" not in q and "посмотреть" not in q   # без подписи, без просмотра
+    assert any(str(pl.get("chat_id")) == "500" for m, pl in BZ)                        # клиенту — карточка
+    # маклер досылает фото — в тот же вариант, карточка обновится; второй раз не спрашиваем
+    BZ.clear()
+    rr.handle_business_update(bcfg, bz, bmsg(9001, 9001, photo="ph1"))
+    rr.handle_business_update(bcfg, bz, bmsg(9001, 9001, "Юнусабадская 5, рядом метро"))
+    rows = bz.conn.execute("SELECT oid, photos, text FROM broker_offers WHERE broker_chat='biz:9001'").fetchall()
+    assert len(rows) == 1 and json.loads(rows[0][1]) == ["ph1"] and "Юнусабадская" in rows[0][2], rows
+    pend = bz.get_kv("pending_offers"); pend[str(o[0])]["at"] -= 1000; bz.set_kv("pending_offers", pend)
+    with mock.patch.object(rr, "send_offer_analysis", lambda *a, **k: None):
+        rr.flush_pending_offer(bcfg, bz)
+    assert any("дослал" in pl.get("text", "") for m, pl in BZ)
+    assert not [pl for m, pl in BZ if pl.get("business_connection_id")]
+    # наше же сообщение (через бота) и отказ — без подписи, от первого лица
+    rr.handle_business_update(bcfg, bz, bmsg(9001, 500, "Спасибо!", sender_business_bot={"id": 1}))
+    BZ.clear()
+    cg.handle_triage_cb(f"t:r:{o[0]}:p", bcfg, bz)
+    dec = [pl for m, pl in BZ if pl.get("business_connection_id")]
+    assert dec and "Увы, не подошёл" in dec[0]["text"] and "(Ra'no)" not in dec[0]["text"]
+    # отключили — больше не пишем маклерам из аккаунта клиента
+    rr.handle_business_update(bcfg, bz, {"business_connection": {"id": "BC1", "user": {"id": 500}, "user_chat_id": 500,
+                                         "is_enabled": False, "rights": {"can_reply": True}}})
+    assert not cg.biz_ready(bz) and "отключена" in BZ[-1][1]["text"]
+    assert cg.broker_send(bcfg, bz, "biz:9001", "тест") is None
+rr.concierge._BIZ_STORE["store"] = None
+bzd.unlink(missing_ok=True)
+print("OK — Telegram для бизнеса: подключение с проверкой прав, только чаты с запросом, вариант в карточку, сама уточняет недостающее")

@@ -1189,6 +1189,9 @@ async function startInterview(env, chat, fresh, lang = "ru") {
 }
 
 // ───────────────────────────── разбор обновления ─────────────────────────────
+// «подключить к телеграму», «как ты будешь читать маклеров», «telegram business» — без слов про поиск квартиры
+export const BIZ_ASK = /(подключ\w*|привяз\w*|привяж\w*|настро\w*|ulash|ulang)[^.!?\n]{0,40}(телеграм\w*|telegram|аккаунт\w*|akkaunt)|telegram\s*(business|для\s*бизнеса|biznes)|бизнес[- ]?(режим|аккаунт)|(читать|отвечать)[^.!?\n]{0,25}маклер\w*\s+(в|из)\s+(моих|моём|моем|мой)/i;
+
 export async function handleUpdate(env, upd) {
   const owner = String(env.OWNER_CHAT);
   const last = await kvGet(env, "last_upd", 0);
@@ -1367,6 +1370,12 @@ export async function handleUpdate(env, upd) {
     return "queued";
   }
 
+  // Telegram для бизнеса: клиент подключил Ra'no к своему аккаунту — чаты с маклерами разбирает Python
+  if (upd.business_connection || upd.business_message || upd.edited_business_message
+      || upd.deleted_business_messages) {
+    await queueAndWake(env, upd);
+    return "business";
+  }
   const msg = upd.message || upd.edited_message;
   if (!msg) { await enqueue(env, upd); return "queued"; }
   const chat = String(msg.chat?.id ?? "");
@@ -1404,6 +1413,13 @@ export async function handleUpdate(env, upd) {
   if (text === BTN.more) {
     await say(env, chat, "Что ещё умею:", { reply_markup: { inline_keyboard: MORE_MENU_ROWS() } });
     return "more";
+  }
+
+  // «подключи к моему телеграму» — пошаговая инструкция Telegram для бизнеса (текст и проверка — в Python)
+  if (/^\/connect(@\w+)?$/i.test(text) || BIZ_ASK.test(text)) {
+    upd.message = { ...msg, _biz_guide: true };
+    await queueAndWake(env, upd);
+    return "biz_guide";
   }
 
   // вариант, который владелец пересылает или вставляет (из WhatsApp и других чатов)
@@ -1604,7 +1620,10 @@ export default {
       if (p === "/svc/bye") { await kvSet(env, "py_alive", null); return json({ ok: true }); }
       if (p === "/svc/setup") {
         const hook = await tg(env, "setWebhook", { url: url.origin + "/tg", secret_token: env.TG_SECRET || undefined,
-          allowed_updates: ["message", "edited_message", "callback_query"], drop_pending_updates: false });
+          allowed_updates: ["message", "edited_message", "callback_query", "business_connection",
+                            "business_message", "edited_business_message", "deleted_business_messages"],
+          drop_pending_updates: false });
+        const me = await tg(env, "getMe", {});           // включён ли бизнес-режим в BotFather
         // кнопка меню «Параметры» (мини-апп) больше не нужна — возвращаем список команд
         const menu = await tg(env, "setChatMenuButton", { menu_button: { type: "commands" } });
         const menuOwner = await tg(env, "setChatMenuButton", { chat_id: +env.OWNER_CHAT, menu_button: { type: "commands" } });
@@ -1629,7 +1648,8 @@ export default {
           };
         }
         const info = await tg(env, "getWebhookInfo", {});
-        return json({ hook, menu, menuOwner, cmds, cmdsAll, profile, info: info.result });
+        return json({ hook, menu, menuOwner, cmds, cmdsAll, profile, info: info.result,
+                     business_mode: !!me.result?.can_connect_to_business });
       }
       if (p === "/svc/avatar") {         // аватар бота (Bot API 9.4 setMyProfilePhoto) из публичного репо
         const src = url.searchParams.get("src") || AVATAR_URL;

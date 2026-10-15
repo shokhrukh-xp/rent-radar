@@ -2,7 +2,7 @@
 // D1 эмулируется на node:sqlite, Telegram / Gemini / GitHub — подменой fetch.
 import { DatabaseSync } from "node:sqlite";
 import assert from "node:assert/strict";
-import worker, { repairFromPhotos, linkFacts, suggestedChannels, parseNum, applyPatch, essentialsOk, finalAns, handleUpdate, summary, pairsToSet, OWNER_KB, BROKER_KB, BTN, parseWhen, PROFILE, interviewCore } from "../src/index.js";
+import worker, { repairFromPhotos, linkFacts, suggestedChannels, parseNum, applyPatch, essentialsOk, finalAns, handleUpdate, summary, pairsToSet, OWNER_KB, BROKER_KB, BTN, parseWhen, PROFILE, interviewCore, BIZ_ASK } from "../src/index.js";
 
 function d1() {
   const s = new DatabaseSync(":memory:");
@@ -597,3 +597,16 @@ console.log("OK — ориентир клиента (near) и карта цен:
   assert.equal(got.at(-1).callback_query.data, "L:n:sale:uybor:5");
   sent.length = 0; }
 console.log("OK — квартиры словами: ответом, по номеру/описанию или сразу после карточки; несколько действий разом; переспрашивает, если неясно");
+
+// ── Telegram для бизнеса: обновления — в Python; «подключи к телеграму» — инструкция из Python
+let bu = 900000;
+assert.equal(await handleUpdate(env, { update_id: ++bu, business_connection: { id: "BC1", user_chat_id: +OWNER, is_enabled: true } }), "business");
+assert.equal(await handleUpdate(env, { update_id: ++bu, business_message: { business_connection_id: "BC1", chat: { id: 9001 }, text: "есть вариант" } }), "business");
+const qn = (await env.DB.prepare("SELECT upd FROM queue").all()).results.map(r => JSON.parse(r.upd));
+assert.ok(qn.some(u => u.business_message?.chat?.id === 9001) && qn.some(u => u.business_connection?.id === "BC1"));
+for (const t of ["Как подключить тебя к моему телеграму?", "/connect"]) {
+  const m = msg(t); m.update_id = ++bu;
+  assert.equal(await handleUpdate(env, m), "biz_guide");
+}
+assert.ok(!BIZ_ASK.test("хочу 2 комнаты рядом с метро, подключен газ"));
+console.log("OK — Telegram для бизнеса: подключение и сообщения из чатов клиента — в Python, инструкция по запросу словами");
