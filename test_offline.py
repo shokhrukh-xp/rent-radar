@@ -2737,6 +2737,23 @@ with mock.patch.object(rr, "tg_call", bz_tg):
     cg.handle_triage_cb(f"t:r:{o[0]}:p", bcfg, bz)
     dec = [pl for m, pl in BZ if pl.get("business_connection_id")]
     assert dec and "Увы, не подошёл" in dec[0]["text"] and "(Ra'no)" not in dec[0]["text"]
+    # маклеры — ссылками с вписанным запросом: 5 за раз, до 15 в день, показанных второй раз не даём
+    for i in range(20):
+        bz.conn.execute("INSERT INTO brokers(bid, source, name, phone, tg, status, ads, districts, deals) "
+                        "VALUES(?,?,?,?,?,?,?,?,?)", (f"m{i}", "uybor", f"Маклер {i}", f"90{i:07d}",
+                                                      "" if i % 2 else f"mk{i}", "new", 30 - i, '["Мирабад"]', '["sale"]'))
+    bz.conn.commit()
+    BZ.clear()
+    assert rr.handle_command("/brokers", rr.default_settings(), bz, bcfg)[0] == ""
+    m1 = [pl for m, pl in BZ if "Маклеры под ваш запрос" in pl.get("text", "")]
+    assert len(m1) == 1 and m1[0]["text"].count('<a href="https://t.me/') == 5 and "?text=" in m1[0]["text"]
+    assert "reply_markup" not in m1[0] and "ещё маклеров" in m1[0]["text"]
+    assert bz.conn.execute("SELECT COUNT(*) FROM brokers WHERE status='offered'").fetchone()[0] == 5
+    rr.handle_command("/brokers", rr.default_settings(), bz, bcfg)
+    rr.handle_command("/brokers", rr.default_settings(), bz, bcfg)
+    stop = rr.handle_command("/brokers", rr.default_settings(), bz, bcfg)[0]
+    assert "на сегодня хватит" in stop and bz.conn.execute(
+        "SELECT COUNT(*) FROM brokers WHERE status='offered'").fetchone()[0] == 15
     # отключили — больше не пишем маклерам из аккаунта клиента
     rr.handle_business_update(bcfg, bz, {"business_connection": {"id": "BC1", "user": {"id": 500}, "user_chat_id": 500,
                                          "is_enabled": False, "rights": {"can_reply": True}}})

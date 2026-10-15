@@ -1520,6 +1520,9 @@ def handle_command(text: str, settings: dict, store, cfg: dict):
             return "Текст запроса ещё не готов — пройдите /anketa", None
         return f"📝 <b>Текущий запрос маклерам</b>\n\n<code>{escape_html(t)}</code>", None
     if cmd in ("/brokers", "/makler", "/outreach"):
+        if concierge.biz_ready(store):              # Ra'no в Telegram клиента — ссылки с вписанным текстом
+            t = send_broker_batch(cfg, store, settings)
+            return t, None
         send_broker_cards(cfg, store, settings)
         return "", None
     if cmd in ("/find", "/top", "/search"):
@@ -2116,6 +2119,62 @@ def broker_card(b, deal, text):
     return body, row
 
 
+OUTREACH_BATCH = 5          # маклеров за раз
+OUTREACH_DAY_MAX = 15       # и не больше в день: бережём аккаунт клиента от жалоб «спам»
+
+
+def send_broker_batch(cfg, store, settings, n=OUTREACH_BATCH) -> str:
+    """Ra'no подключена к Telegram клиента: подбирает маклеров и присылает одним сообщением ссылки —
+    нажали на имя, открылся чат с маклером, запрос уже вписан, осталось «Отправить». Что ушло — Ra'no видит
+    сама (handle_business_update), дальше ведёт переписку. Кнопок нет."""
+    text = store.get_kv("request_text") or concierge.compose_request(cfg, store)
+    deal = request_deal(store)
+    today = datetime.now(TASHKENT_TZ).strftime("%Y-%m-%d")
+    day = store.get_kv("outreach_day") or {}
+    if day.get("d") != today:
+        day = {"d": today, "n": 0}
+    room = OUTREACH_DAY_MAX - day["n"]
+    if room <= 0:
+        return (f"Сегодня уже дала {OUTREACH_DAY_MAX} маклеров — на сегодня хватит, чтобы Telegram не счёл это "
+                "рассылкой. Завтра пришлю следующих, а пока жду ответы.")
+    pool = [b for b in ranked_brokers(store, deal) if b.get("tg") or len(re.sub(r"\D", "", b.get("phone") or "")) >= 9]
+    if not pool:
+        return outreach_empty_text(store, deal)
+    pick = pool[:min(n, room)]
+    want = request_districts(store)
+    lines = [f"📇 <b>Маклеры под ваш запрос</b> — {len(pick)} из {len(pool)}",
+             "Нажмите на имя — откроется чат с маклером, запрос уже вписан. Осталось нажать «Отправить».", ""]
+    for i, b in enumerate(pick, 1):
+        ds = [d for d in b["districts"] if d in want][:2] or b["districts"][:2]
+        bits = [", ".join(ds)] if ds else []
+        if b.get("ads"):
+            bits.append(f"{b['ads']} {concierge.plural(b['ads'], 'объявление', 'объявления', 'объявлений')}")
+        if b.get("tg"):
+            link = tg_user_link(b["tg"], text)
+        else:
+            digits = re.sub(r"\D", "", b["phone"])
+            digits = "998" + digits if len(digits) == 9 else digits
+            from urllib.parse import quote
+            link = f"https://t.me/+{digits}?text={quote(text)}"
+            bits.append("по номеру — если чат не откроется, значит, номер скрыт")
+        name = escape_html((b.get("name") or "Маклер").strip()[:40])
+        lines.append(f'{i}. <a href="{link}">{name}</a>' + (" — " + escape_html(" · ".join(bits)) if bits else ""))
+        store.broker_status(b["bid"], "offered")       # показан — второй раз не предложим
+    left = len(pool) - len(pick)
+    lines += ["", "Как отправите — я увижу сама и буду следить за ответами: соберу карточки и уточню детали."
+              + (f" Ещё {left} — напишите «ещё маклеров»." if left and room - len(pick) > 0 else "")]
+    day["n"] += len(pick)
+    store.set_kv("outreach_day", day)
+    msg = "\n".join(lines)
+    if tg_call(cfg, "sendMessage", {"chat_id": cfg["telegram_chat_id"], "text": msg, "parse_mode": "HTML",
+                                    "disable_web_page_preview": True}) is None:
+        for i, b in enumerate(pick):                  # не ушло (длинные ссылки) — по одному
+            one = "\n".join([lines[0], lines[1], "", lines[3 + i]])
+            tg_call(cfg, "sendMessage", {"chat_id": cfg["telegram_chat_id"], "text": one, "parse_mode": "HTML",
+                                         "disable_web_page_preview": True})
+    return ""
+
+
 def outreach_progress(st, left) -> str:
     return (f"\n\n<i>Написано {st.get('sent', 0)} · пропущено {st.get('skipped', 0)} · "
             f"в очереди ещё {left}</i>")
@@ -2680,7 +2739,7 @@ def ui_snapshot(cfg, store, settings) -> dict:
             "sl": sl, "sl_empty": concierge.SL_EMPTY, "cards": cards, "texts": texts,
             "screens": screens, "ctx": ctx,
             "free": cfg.get("free_offers", 2), "deal": deal,
-            "brokers": brokers, "brokers_total": len(ranked),
+            "brokers": brokers, "brokers_total": len(ranked), "biz": concierge.biz_ready(store),
             "header": outreach_header(store, deal, text, len(ranked)) if ranked else "",
             "brokers_empty": outreach_empty_text(store, deal) if not ranked else ""}
 
@@ -3076,7 +3135,7 @@ def handle_business_update(cfg, store, upd) -> bool:
             un = (ch.get("username") or "").lower()
             if un:                                   # маклер из нашей базы — отмечаем «написали»
                 store.conn.execute("UPDATE brokers SET status='contacted', last_contact=? "
-                                   "WHERE lower(ltrim(COALESCE(tg,''),'@'))=? AND status='new'",
+                                   "WHERE lower(ltrim(COALESCE(tg,''),'@'))=? AND status IN ('new', 'offered')",
                                    (datetime.now(timezone.utc).isoformat(), un))
                 store.conn.commit()
             log.info("[бизнес] запрос ушёл маклеру %s", chats[k]["name"] or un or peer)

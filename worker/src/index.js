@@ -802,6 +802,8 @@ export async function startOutreach(env, chat) {
   const iv = await kvGet(env, ivKey(chat), null);
   // нет снимка или запрос поменялся после него — ссылки со старым текстом слать нельзя
   if (!ui || (iv && iv.sentAt && iv.sentAt > (ui.at || 0))) return asCommand(env, chat, "/brokers");
+  // Ra'no подключена к Telegram клиента: подбор и ссылки с вписанным запросом — в Python, без кнопок
+  if (ui.biz) return asCommand(env, chat, "/brokers");
   if (!ui.brokers || !ui.brokers.length) { await say(env, chat, ui.brokers_empty || "Маклеров под ваш запрос пока не нашла — ищу дальше."); return; }
   await kvSet(env, "out", { sent: 0, skipped: 0, done: [], at: Date.now() });
   await say(env, chat, ui.header, { parse_mode: "HTML" });
