@@ -2743,8 +2743,12 @@ with mock.patch.object(rr, "tg_call", bz_tg):
     BZ.clear()
     assert rr.handle_command("/brokers", rr.default_settings(), bz, bcfg)[0] == ""
     m1 = [pl for m, pl in BZ if "Маклеры под ваш запрос" in pl.get("text", "")]
-    assert len(m1) == 1 and m1[0]["text"].count('<a href="https://t.me/') == 5 and "?text=" in m1[0]["text"]
-    assert "reply_markup" not in m1[0] and "ещё маклеров" in m1[0]["text"]
+    allb = [pl for m, pl in BZ if m == "sendMessage"]
+    joined = "\n".join(pl["text"] for pl in allb)
+    assert len(m1) == 1 and joined.count('<a href="https://t.me/') == 5 and "?text=" in joined
+    assert not any("reply_markup" in pl for pl in allb) and "ещё маклеров" in allb[-1]["text"]
+    # ссылки с двуязычным запросом длинные: 5 в одно сообщение Telegram не пустит — шлём по одному маклеру
+    assert len(allb) == 5 and all(pl["text"].count('<a href="https://t.me/') == 1 for pl in allb)
     assert bz.conn.execute("SELECT COUNT(*) FROM brokers WHERE status='offered'").fetchone()[0] == 5
     rr.handle_command("/brokers", rr.default_settings(), bz, bcfg)
     rr.handle_command("/brokers", rr.default_settings(), bz, bcfg)
@@ -2814,12 +2818,15 @@ with mock.patch.object(rr, "tg_call", lambda c, m, p, **k: MN.append((m, p)) or 
         rr.process_commands(mcfg, mn)
     assert mn.get_kv("broker_mode") == "manual" and cg.broker_mode(mn) == "manual" and not mn.get_kv("brokers_pending")
     assert any("ничего от вашего имени не пишу" in p.get("text", "") for m, p in MN)
-    first = [p for m, p in MN if "Маклеры под ваш запрос" in p.get("text", "")][-1]["text"]
+    def batch_text(L):                                  # подборка может прийти несколькими сообщениями
+        i = max(k for k, (m, p) in enumerate(L) if "Маклеры под ваш запрос" in p.get("text", ""))
+        return "\n".join(p.get("text", "") for m, p in L[i:] if m == "sendMessage")
+    first = batch_text(MN)
     assert "WhatsApp" in first and "Переслать" in first and "подключить телеграм" not in first
     assert "t.me/rano_smart_bot" in cg.compose_request(mcfg, mn)                                  # маклер может писать в бота
     MN.clear()
     rr.handle_command("/brokers", rr.default_settings(), mn, mcfg)
-    nxt = [p for m, p in MN if "Маклеры под ваш запрос" in p.get("text", "")][-1]["text"]
+    nxt = batch_text(MN)
     assert "подключить телеграм" not in nxt and "Переслать" in nxt                                 # больше не уговариваем
     # пересланный вариант: уточнение — готовым текстом клиенту, один раз
     oid, _ = cg.save_offer(mn, mcfg, "owner", "Азиз", "Продаю 2 комн Мирабад", [])

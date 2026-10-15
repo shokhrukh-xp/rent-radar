@@ -2174,6 +2174,7 @@ def broker_card(b, deal, text):
 
 OUTREACH_BATCH = 5          # маклеров за раз
 OUTREACH_DAY_MAX = 15       # и не больше в день: бережём аккаунт клиента от жалоб «спам»
+BATCH_ONE_MSG_MAX = 3500    # подборка длиннее — по маклеру в сообщении
 
 
 def send_broker_batch(cfg, store, settings, n=OUTREACH_BATCH) -> str:
@@ -2232,12 +2233,18 @@ def send_broker_batch(cfg, store, settings, n=OUTREACH_BATCH) -> str:
     day["n"] += len(pick)
     store.set_kv("outreach_day", day)
     msg = "\n".join(lines)
-    if tg_call(cfg, "sendMessage", {"chat_id": cfg["telegram_chat_id"], "text": msg, "parse_mode": "HTML",
-                                    "disable_web_page_preview": True}) is None:
-        for i, b in enumerate(pick):                  # не ушло (длинные ссылки) — по одному
-            one = "\n".join([lines[0], lines[1], "", lines[3 + i]])
-            tg_call(cfg, "sendMessage", {"chat_id": cfg["telegram_chat_id"], "text": one, "parse_mode": "HTML",
-                                         "disable_web_page_preview": True})
+    opt = {"chat_id": cfg["telegram_chat_id"], "parse_mode": "HTML", "disable_web_page_preview": True}
+    # В ссылках целиком вписан запрос (на двух языках) — пять таких в одном сообщении Telegram не пропускает
+    # (ENTITIES_TOO_LONG). Поэтому длинную подборку шлём по маклеру в сообщении: шапка — в первом, подсказка — в последнем.
+    if len(msg) <= BATCH_ONE_MSG_MAX and tg_call(cfg, "sendMessage", {**opt, "text": msg}) is not None:
+        return ""
+    items = lines[3:3 + len(pick)]
+    tail = "\n".join(lines[3 + len(pick):]).strip()
+    for i, item in enumerate(items):
+        part = ([lines[0], lines[1], ""] if i == 0 else []) + [item]
+        if i == len(items) - 1 and tail:
+            part += ["", tail]
+        tg_call(cfg, "sendMessage", {**opt, "text": "\n".join(part)})
     return ""
 
 
