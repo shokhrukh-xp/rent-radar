@@ -15,7 +15,7 @@ import re
 import statistics
 import time
 
-from i18n import t
+from i18n import t, dist
 from i18n_texts import GUIDE as _GUIDE, GUIDE_ON as _GUIDE_ON, MANUAL as _MANUAL
 from datetime import datetime, timedelta, timezone
 
@@ -1600,6 +1600,18 @@ def _offer_tag(o):
         tag.append(f"{o['rooms']}-комн")
     if o.get("district"):
         tag.append(o["district"])
+    if o.get("price_usd"):
+        tag.append(fmt_money(o["price_usd"]))
+    return ", ".join(tag)
+
+
+def offer_tag_client(o):
+    """Как _offer_tag, но на языке клиента (маклерам — всегда _offer_tag, по-русски, перевод — в broker_send)."""
+    tag = []
+    if o.get("rooms"):
+        tag.append(t("{n}-комн", n=o["rooms"]))
+    if o.get("district"):
+        tag.append(dist(o["district"]))
     if o.get("price_usd"):
         tag.append(fmt_money(o["price_usd"]))
     return ", ".join(tag)

@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 import requests
 
 import geo
+import i18n as _i18n
 from i18n import t, dist
 dist_ = dist
 
@@ -513,7 +514,7 @@ def comparables(store, l: dict, min_n: int = 6, repair=None):
         if len(vals) >= min_n:
             where = dist_(d) if dist else dist_("весь Ташкент")
             what = kind if (seg or dorm) else t("вся продажа")
-            rng = f"{(1 - spread) * area:.0f}–{(1 + spread) * area:.0f} м²"
+            rng = t("{a} м²", a=f"{(1 - spread) * area:.0f}–{(1 + spread) * area:.0f}")
             return {"median_m2": _median(vals), "n": len(vals), "label": f"{where}, {what}{rep}, {rng}"}
     return None
 
@@ -532,12 +533,13 @@ def rent_comparables(store, l: dict, min_n: int = 5):
                 if dd == d and (rooms is None or r == rooms) and 0.7 * area <= ar <= 1.3 * area]
         if len(same) >= min_n:
             return {"rent": _median(same), "n": len(same),
-                    "label": f"{d}, {rooms or '?'}-комн, {0.7 * area:.0f}–{1.3 * area:.0f} м²"}
+                    "label": t("{d}, {r}-комн, {a}–{b} м²", d=dist_(d or ""), r=rooms or "?",
+                               a=f"{0.7 * area:.0f}", b=f"{1.3 * area:.0f}")}
         band = area_band(area)
         per = [p / ar for dd, r, ar, p in rows if dd == d and area_band(ar) == band]
         if len(per) >= min_n:
             return {"rent": _median(per) * area, "n": len(per),
-                    "label": f"{d}, {BAND_RU.get(band, '')}, $/м² × площадь"}
+                    "label": t("{d}, {band}, $/м² × площадь", d=dist_(d or ""), band=t(BAND_RU.get(band, "")))}
     return None
 
 
@@ -620,11 +622,11 @@ def analyze(store, l: dict, cfg: dict) -> dict:
     if area:
         rc = rent_comparables(store, l)
         if rc:
-            rent, rent_src = rc["rent"], f'медиана {rc["n"]} объявл.: {rc["label"]}'
+            rent, rent_src = rc["rent"], t("медиана {n} объявл.: {label}", n=rc["n"], label=rc["label"])
         else:
             fb = a["rent_m2_fallback"]
             rent = fb.get(l.get("district"), fb.get("*")) * area
-            rent_src = "средняя $/м² по району (ЦЭИР/ЦБ, 2026) × площадь"
+            rent_src = t("средняя $/м² по району (ЦЭИР/ЦБ, 2026) × площадь")
     rent_ads = None
     base_cost = out.get("all_in") or price          # вложено: цена + ремонт
     if rent and rent * 12 / base_cost > a["city_gross_yield"] * 1.6:
@@ -633,13 +635,13 @@ def analyze(store, l: dict, cfg: dict) -> dict:
         rent_ads = rent
         fb = a["rent_m2_fallback"]
         rent = fb.get(l.get("district"), fb.get("*")) * area
-        rent_src = "средняя $/м² по району (ЦЭИР/ЦБ, 2026) × площадь"
+        rent_src = t("средняя $/м² по району (ЦЭИР/ЦБ, 2026) × площадь")
     if rent:
         if is_dorm(l):
             k = 1 - a["dorm_rent_discount"]       # своих данных по аренде общежитий почти нет
             rent *= k
             rent_ads = rent_ads * k if rent_ads else None
-            rent_src += f', −{a["dorm_rent_discount"] * 100:.0f}% за общежитие (допущение)'
+            rent_src += t(", −{p}% за общежитие (допущение)", p=f'{a["dorm_rent_discount"] * 100:.0f}')
         out["rent_ads"] = rent_ads
         months = 12 - a["vacancy_months"]
         net_year = rent * months * (1 - a["rent_tax"])
@@ -689,21 +691,21 @@ def analyze(store, l: dict, cfg: dict) -> dict:
     dom = out.get("days_on_market") or 0
     if dom >= 45:
         k += 0.02
-        args.append(f"висит {dom:.0f} дн.")
+        args.append(t("висит {n} дн.", n=f"{dom:.0f}"))
     pc = out.get("price_change")
     if pc and pc[1] < pc[0]:
         k += 0.02
-        args.append("цену уже снижали")
+        args.append(t("цену уже снижали"))
     if cls in ("none", "box"):
         k += 0.02
-        args.append(f"нужен ремонт ~${_money(out.get('reno') or 0)}")
+        args.append(t("нужен ремонт ~${v}", v=_money(out.get('reno') or 0)))
     if rsrc == "фото" and claimed and REPAIR_RANK[cls] < REPAIR_RANK.get(claimed, 0):
         k += 0.02
-        args.append("по фото ремонт хуже заявленного")
+        args.append(t("по фото ремонт хуже заявленного"))
     if gap0 is not None and gap0 >= 0.03:
-        args.insert(0, f"дороже похожих на {gap0 * 100:.0f}%")
+        args.insert(0, t("дороже похожих на {p}%", p=f"{gap0 * 100:.0f}"))
     if l.get("seller_kind") == "agency":
-        args.append("комиссию маклера — тоже в торг")
+        args.append(t("комиссию маклера — тоже в торг"))
     calm = gap0 is not None and gap0 <= -0.10 and cls not in ("none", "box")
     if calm:
         k = 0.02                                       # цена уже ниже рынка — давить не стоит
@@ -792,135 +794,148 @@ def place_lines(x: dict, l: dict):
 
 def format_analysis(store, l: dict, cfg: dict) -> str:
     """Разбор варианта: вывод сверху, дальше — ремонт, ипотека, торг, вложение;
-    как считала — в сворачиваемом блоке."""
+    как считала — в сворачиваемом блоке. Все строки — через t(): переведены вручную (i18n.CAT)."""
     x = analyze(store, l, cfg)
     if not x.get("price"):
         return ""
     a, price, area = x["assumptions"], x["price"], x.get("area")
-    head = [f'{l["rooms"]}-комн' if l.get("rooms") else "", f'{area:g} м²' if area else "", f'${_money(price)}']
-    lines = ["📊 <b>Анализ</b> · " + ", ".join(h for h in [l.get("district") or ""] + head if h), ""]
+    head = [t("{n}-комн", n=l["rooms"]) if l.get("rooms") else "", t("{a} м²", a=f"{area:g}") if area else "",
+            f'${_money(price)}']
+    lines = [t("📊 <b>Анализ</b>") + " · " + ", ".join(h for h in [dist_(l.get("district") or "")] + head if h), ""]
     em, title, why = x["verdict"]
     lines.append(f"{em} <b>{title}</b> — {why}")
 
     # цена
     c = x.get("comp")
     if x.get("gap") is not None:
-        side = "ниже" if x["gap"] < 0 else "выше"
-        size = f'на {abs(x["gap"]) * 100:.0f}% {side}' if abs(x["gap"]) >= 0.02 else "на уровне"
-        lines.append(f'💵 ${_money(x["m2"])}/м² — {size} похожих (${_money(c["median_m2"])}/м²)'
-                     + (f' · по рынку ≈ ${_money(_r500(x["fair"]))}' if x.get("fair") else ""))
+        g_ = abs(x["gap"]) * 100
+        size = (t("на {p}% ниже", p=f"{g_:.0f}") if x["gap"] < 0 else t("на {p}% выше", p=f"{g_:.0f}")) \
+            if g_ >= 2 else t("на уровне")
+        lines.append(t("💵 ${m2}/м² — {size} похожих (${med}/м²)", m2=_money(x["m2"]), size=size,
+                       med=_money(c["median_m2"]))
+                     + (t(" · по рынку ≈ ${v}", v=_money(_r500(x["fair"]))) if x.get("fair") else ""))
     elif c:
-        lines.append(f'💵 ${_money(x["m2"])}/м², а похожие — ${_money(c["median_m2"])}/м²: разница слишком '
-                     f'большая, чтобы сравнивать, — смотрите квартиру')
+        lines.append(t("💵 ${m2}/м², а похожие — ${med}/м²: разница слишком большая, чтобы сравнивать, — смотрите квартиру",
+                       m2=_money(x["m2"]), med=_money(c["median_m2"])))
     elif x.get("m2"):
-        lines.append(f'💵 ${_money(x["m2"])}/м² — похожих пока мало для сравнения')
+        lines.append(t("💵 ${m2}/м² — похожих пока мало для сравнения", m2=_money(x["m2"])))
 
     pline, pdet = place_lines(x, l)
     if pline:
         lines.append("📍 " + pline)
     # ремонт
     cls, rsrc, claimed = x.get("repair"), x.get("repair_src"), x.get("repair_claimed")
-    by = {"фото": "по фото", "описание": "по описанию", "пометка сайта": "по пометке сайта"}.get(rsrc, "")
-    seen = f' (видно: {x["repair_signs"]})' if x.get("repair_signs") else ""
+    by = t({"фото": "по фото", "описание": "по описанию", "пометка сайта": "по пометке сайта"}.get(rsrc, "")) \
+        if rsrc in ("фото", "описание", "пометка сайта") else ""
+    seen = t(" (видно: {s})", s=_i18n.ai(cfg, x["repair_signs"]) if _i18n.LANG != "ru" else x["repair_signs"]) \
+        if x.get("repair_signs") else ""
     short = {"good": "хороший", "average": "средний", "none": "без ремонта", "box": "коробка"}
     differ = ""
     if rsrc == "фото" and claimed and claimed != cls:
-        differ = f'. В объявлении — «{short[claimed]}»' + (", на фото хуже" if REPAIR_RANK[cls] < REPAIR_RANK[claimed]
-                                                           else ", на фото лучше")
+        differ = (t(". В объявлении — «{c}», на фото хуже", c=t(short[claimed])) if REPAIR_RANK[cls] < REPAIR_RANK[claimed]
+                  else t(". В объявлении — «{c}», на фото лучше", c=t(short[claimed])))
     if cls == "good":
-        lines.append(f"🛠 Ремонт {by}: хороший — можно заезжать{seen}{differ}")
+        lines.append(t("🛠 Ремонт {by}: хороший — можно заезжать{seen}{differ}", by=by, seen=seen, differ=differ))
     elif cls and x.get("reno"):
-        what = {"average": "освежить", "none": "капитальный", "box": "отделка с нуля"}[cls]
-        line = f'🛠 Ремонт {by}: {short[cls]}{seen} — {what} ~${_money(x["reno"])}{differ}. С ним ≈ ${_money(x["all_in"])}'
+        what = t({"average": "освежить", "none": "капитальный", "box": "отделка с нуля"}[cls])
+        line = t("🛠 Ремонт {by}: {cls}{seen} — {what} ~${reno}{differ}. С ним ≈ ${all_in}", by=by, cls=t(short[cls]),
+                 seen=seen, what=what, reno=_money(x["reno"]), differ=differ, all_in=_money(x["all_in"]))
         g = x.get("gap_all_in")
         if g is not None:
-            line += (f', на {abs(g) * 100:.0f}% {"дешевле" if g < 0 else "дороже"} похожих с хорошим ремонтом'
-                     if abs(g) >= 0.02 else ", как похожие с хорошим ремонтом")
+            line += ((t(", на {p}% дешевле похожих с хорошим ремонтом", p=f"{abs(g) * 100:.0f}") if g < 0 else
+                      t(", на {p}% дороже похожих с хорошим ремонтом", p=f"{abs(g) * 100:.0f}"))
+                     if abs(g) >= 0.02 else t(", как похожие с хорошим ремонтом"))
         lines.append(line)
     elif area:
-        lines.append(f'🛠 Ремонт не понять ни по фото, ни по описанию — уточните. Если нужен капитальный, добавьте ~$'
-                     f'{_money((a.get("renovation_m2") or {}).get("none", 95) * area)}')
+        lines.append(t("🛠 Ремонт не понять ни по фото, ни по описанию — уточните. Если нужен капитальный, добавьте ~${v}",
+                       v=_money((a.get("renovation_m2") or {}).get("none", 95) * area)))
     else:
-        lines.append("🛠 Ремонт не указан — уточните у продавца")
+        lines.append(t("🛠 Ремонт не указан — уточните у продавца"))
 
     # ипотека
     m = x.get("mortgage")
     lines.append("🏦 " + mortgage_line(x))
     if m:
-        lines.append(f'   взнос ${_money(m["down"])} ({m["down_share"] * 100:.0f}%), '
-                     f'≈ {_mln(m["pay_uzs"])} млн сум/мес (~${_money(m["pay_usd"])}) на {m["years"]} лет')
+        lines.append("   " + t("взнос ${down} ({share}%), ≈ {mln} млн сум/мес (~${usd}) на {years} лет",
+                              down=_money(m["down"]), share=f'{m["down_share"] * 100:.0f}', mln=_mln(m["pay_uzs"]),
+                              usd=_money(m["pay_usd"]), years=m["years"]))
         if x.get("rent"):
             diff = m["pay_usd"] - x["rent"]
-            lines.append(f'   снимать такую же — ~${_money(x["rent"])}/мес'
-                         + (f': ипотека дороже на ~${_money(diff)}/мес, зато квартира ваша' if diff > 30 else
-                            ": платёж как аренда — выгоднее брать"))
+            lines.append("   " + t("снимать такую же — ~${r}/мес", r=_money(x["rent"]))
+                         + (t(": ипотека дороже на ~${d}/мес, зато квартира ваша", d=_money(diff)) if diff > 30 else
+                            t(": платёж как аренда — выгоднее брать")))
 
     # торг
     bg = x.get("bargain")
     if bg:
         if bg["calm"]:
-            line = f'🤝 Торг: цена уже ниже рынка — просите ~${_money(bg["offer"])}, сильно давить не стоит'
+            line = t("🤝 Торг: цена уже ниже рынка — просите ~${v}, сильно давить не стоит", v=_money(bg["offer"]))
         else:
-            line = f'🤝 Торг: начните с ~${_money(bg["offer"])}, потолок ~${_money(bg["ceiling"])}'
+            line = t("🤝 Торг: начните с ~${a}, потолок ~${b}", a=_money(bg["offer"]), b=_money(bg["ceiling"]))
         if bg["args"]:
-            line += " · аргументы: " + ", ".join(bg["args"])
+            line += t(" · аргументы: {a}", a=", ".join(bg["args"]))
         lines.append(line)
 
     # вложение
     if x.get("rent"):
         pb = x.get("payback_years")
         dep = a["usd_deposit"]
-        cmp_dep = "лучше" if x["net_yield"] >= dep + 0.005 else ("как" if x["net_yield"] >= dep - 0.005 else "хуже")
-        lines.append(f'📈 Как вложение: сдавать ~${_money(x["rent"])}/мес → ~{f"{x['net_yield'] * 100:.1f}".replace(".", ",")}% в год чистыми, '
-                     f'{cmp_dep} вклада в $ ({dep * 100:.0f}%)' + (f', окупится за ~{pb:.0f} лет' if pb else ""))
+        cmp_dep = ("лучше" if x["net_yield"] >= dep + 0.005 else ("как" if x["net_yield"] >= dep - 0.005 else "хуже"))
+        tpl = {"лучше": "📈 Как вложение: сдавать ~${r}/мес → ~{y}% в год чистыми, лучше вклада в $ ({d}%)",
+               "как": "📈 Как вложение: сдавать ~${r}/мес → ~{y}% в год чистыми, как вклад в $ ({d}%)",
+               "хуже": "📈 Как вложение: сдавать ~${r}/мес → ~{y}% в год чистыми, хуже вклада в $ ({d}%)"}[cmp_dep]
+        lines.append(t(tpl, r=_money(x["rent"]), y=f"{x['net_yield'] * 100:.1f}".replace(".", ","), d=f"{dep * 100:.0f}")
+                     + (t(", окупится за ~{y} лет", y=f"{pb:.0f}") if pb else ""))
     v = x["values"]
-    lines.append(f'   через 5 лет квартира скорее ~${_money(_r500(v["base"][5]))} '
-                 f'(от ${_money(_r500(v["pess"][5]))} до ${_money(_r500(v["opt"][5]))})')
+    lines.append("   " + t("через 5 лет квартира скорее ~${b} (от ${p} до ${o})", b=_money(_r500(v["base"][5])),
+                          p=_money(_r500(v["pess"][5])), o=_money(_r500(v["opt"][5]))))
     # как считала — свёрнуто
     d = []
     if c:
-        d.append(f'Похожие: медиана ${_money(c["median_m2"])}/м², {c["n"]} объявл. ({c["label"]})')
+        d.append(t("Похожие: медиана ${m}/м², {n} объявл. ({label})", m=_money(c["median_m2"]), n=c["n"], label=c["label"]))
     if x.get("good_comp"):
         gc = x["good_comp"]
-        d.append(f'С хорошим ремонтом: ${_money(gc["median_m2"])}/м², {gc["n"]} объявл.')
+        d.append(t("С хорошим ремонтом: ${m}/м², {n} объявл.", m=_money(gc["median_m2"]), n=gc["n"]))
     if pdet:
         d.append(pdet)
     if x.get("official_m2"):
-        d.append(f'средняя по району: ${_money(x["official_m2"])}/м² (госоценка на 01.09.2026, новостройки и вторичка вместе)')
+        d.append(t("средняя по району: ${m}/м² (госоценка на 01.09.2026, новостройки и вторичка вместе)",
+                   m=_money(x["official_m2"])))
     if x.get("days_on_market") is not None:
-        t = f'На рынке ~{x["days_on_market"]:.0f} дн.'
+        dl = t("На рынке ~{n} дн.", n=f'{x["days_on_market"]:.0f}')
         pc = x.get("price_change")
         if pc:
-            t += f'; цена: ${_money(pc[0])} → ${_money(pc[1])} ({(pc[1] / pc[0] - 1) * 100:+.0f}%)'
-        d.append(t)
+            dl += t("; цена: ${a} → ${b} ({p}%)", a=_money(pc[0]), b=_money(pc[1]), p=f"{(pc[1] / pc[0] - 1) * 100:+.0f}")
+        d.append(dl)
     rm = a.get("renovation_m2") or {}
     if rm:
-        d.append(f'Ремонт с материалами (Ustabor, 2026): освежить ~${rm.get("average")}/м², '
-                 f'капитальный ~${rm.get("none")}/м², с нуля ~${rm.get("box")}/м²')
+        d.append(t("Ремонт с материалами (Ustabor, 2026): освежить ~${a}/м², капитальный ~${n}/м², с нуля ~${b}/м²",
+                   a=rm.get("average"), n=rm.get("none"), b=rm.get("box")))
     if m:
-        t = (f'Ипотека — типовые условия на вторичку: ~{m["rate"] * 100:.0f}% в сумах, взнос от 25%, '
-             f'{m["years"]} лет, переплата ~${_money(m["over_usd"])}')
+        ml = t("Ипотека — типовые условия на вторичку: ~{r}% в сумах, взнос от 25%, {y} лет, переплата ~${o}",
+               r=f'{m["rate"] * 100:.0f}', y=m["years"], o=_money(m["over_usd"]))
         ms = x.get("mortgage_soft")
         if ms:
-            soft_rate = f'{ms["rate"] * 100:.1f}'.replace(".", ",")
-            t += (f'. Льготная ({soft_rate}%, {ms["years"]} лет, до {ms_cap(a)} млн сум), если подходите: '
-                  f'≈ {_mln(ms["pay_uzs"])} млн сум/мес, взнос ${_money(ms["down"])}')
-        d.append(t + ". Платёж в сумах: если сум слабеет, в $ он со временем легче")
+            ml += t(". Льготная ({r}%, {y} лет, до {cap} млн сум), если подходите: ≈ {mln} млн сум/мес, взнос ${down}",
+                    r=f'{ms["rate"] * 100:.1f}'.replace(".", ","), y=ms["years"], cap=ms_cap(a),
+                    mln=_mln(ms["pay_uzs"]), down=_money(ms["down"]))
+        d.append(ml + t(". Платёж в сумах: если сум слабеет, в $ он со временем легче"))
     if x.get("rent"):
-        t = f'Аренда: {x["rent_src"]}; налог {a["rent_tax"] * 100:.0f}%, месяц простоя в год'
+        rl = t("Аренда: {src}; налог {tax}%, месяц простоя в год", src=x["rent_src"], tax=f'{a["rent_tax"] * 100:.0f}')
         if x.get("rent_ads"):
-            t += f'; в объявлениях похожие сдают за ~${_money(x["rent_ads"])} — взята осторожная оценка'
-        d.append(t)
+            rl += t("; в объявлениях похожие сдают за ~${v} — взята осторожная оценка", v=_money(x["rent_ads"]))
+        d.append(rl)
         inv, depo = x["invest"], x["deposit_usd"]
         base_cost = x.get("all_in") or price
-        d.append(f'Купить{" с ремонтом" if x.get("reno") else ""} и сдавать 3 года: ≈ '
-                 f'{inv[3]["base"] / base_cost * 100:+.0f}% (${_money(inv[3]["base"])}); вклад в $: '
-                 f'{depo[3] / price * 100:+.0f}%')
-    d.append(f'Цена через 1 / 3 / 5 лет (база): ${_money(v["base"][1])} / ${_money(v["base"][3])} / ${_money(v["base"][5])}')
-    d.append(f'Цены — предложения, не сделок; допущения на {a["as_of"]}')
+        d.append(t("Купить с ремонтом и сдавать 3 года: ≈ {p}% (${v}); вклад в $: {d}%" if x.get("reno") else
+                   "Купить и сдавать 3 года: ≈ {p}% (${v}); вклад в $: {d}%",
+                   p=f'{inv[3]["base"] / base_cost * 100:+.0f}', v=_money(inv[3]["base"]), d=f'{depo[3] / price * 100:+.0f}'))
+    d.append(t("Цена через 1 / 3 / 5 лет (база): ${a} / ${b} / ${c}", a=_money(v["base"][1]), b=_money(v["base"][3]),
+               c=_money(v["base"][5])))
+    d.append(t("Цены — предложения, не сделок; допущения на {d}", d=a["as_of"]))
     lines.append("")
-    lines.append("<blockquote expandable>🔍 <b>Как считала</b>\n" + "\n".join("• " + t for t in d) + "</blockquote>")
-    lines.append(f'<a href="{REPORT_URL}">Подробно о рынке и методике</a>')
+    lines.append(t("<blockquote expandable>🔍 <b>Как считала</b>") + "\n" + "\n".join("• " + y for y in d) + "</blockquote>")
+    lines.append(f'<a href="{REPORT_URL}">' + t("Подробно о рынке и методике") + "</a>")
     return "\n".join(lines)
 
 
@@ -930,9 +945,9 @@ def summary_text(store, cfg: dict, districts: list) -> str:
     a = assumptions(cfg)
     last = store.get_kv("market_scan_at")
     if not last:
-        return "📊 Среза рынка ещё нет — он появится после ближайшего прохода поиска."
-    lines = [f"📊 <b>Рынок по срезу Uybor</b> на {last[:10]}",
-             "Медиана $/м², вторичка · новостройки · аренда в месяц"]
+        return t("📊 Среза рынка ещё нет — он появится после ближайшего прохода поиска.")
+    lines = [t("📊 <b>Рынок по срезу Uybor</b> на {d}", d=last[:10]),
+             t("Медиана $/м², вторичка · новостройки · аренда в месяц")]
     for d in districts:
         rows = store.conn.execute(
             "SELECT op, new_building, price_usd/area FROM market "
@@ -942,15 +957,17 @@ def summary_text(store, cfg: dict, districts: list) -> str:
         rent = [r[2] for r in rows if r[0] == "rent"]
         def fmt(xs, dec=0):
             return (f"${xs:,.{dec}f}".replace(",", " ") if xs else "—")
-        lines.append(f"• {d}: {fmt(_median(sec))} ({len(sec)}) · {fmt(_median(new))} ({len(new)})"
-                     f" · {fmt(_median(rent), 1)}/м² ({len(rent)})")
+        lines.append(f"• {dist_(d)}: {fmt(_median(sec))} ({len(sec)}) · {fmt(_median(new))} ({len(new)})"
+                     f" · {fmt(_median(rent), 1)}/" + t("м²") + f" ({len(rent)})")
     sold = store.conn.execute(
         "SELECT COUNT(*) FROM market WHERE op='sale' AND removed_at IS NOT NULL").fetchone()[0]
-    lines.append(f"\nСнято с продажи с начала наблюдений: {sold}")
+    lines.append("\n" + t("Снято с продажи с начала наблюдений: {n}", n=sold))
     s = a["scenarios"]
-    lines.append(f'Сценарии на год (цена в $): спад {s["pess"][0] * 100:+.0f}%, '
-                 f'база {s["base"][0] * 100:+.0f}%, рост {s["opt"][0] * 100:+.0f}%')
-    lines.append(f'<a href="{REPORT_URL}">Полный отчёт о рынке</a>')
+    lines.append(t("Сценарии на год (цена в $): спад {p}%, база {b}%, рост {o}%", p=f'{s["pess"][0] * 100:+.0f}',
+                   b=f'{s["base"][0] * 100:+.0f}', o=f'{s["opt"][0] * 100:+.0f}'))
+    lines.append(f'<a href="{REPORT_URL}">' + t("Полный отчёт о рынке") + "</a>")
     if cfg.get("worker_url"):
-        lines.append(f'<a href="{cfg["worker_url"].rstrip("/")}/map">🗺 Карта цен: дорогие и недорогие части районов</a>')
+        lines.append(f'<a href="{cfg["worker_url"].rstrip("/")}/map">' +
+                     t("🗺 Карта цен: дорогие и недорогие части районов") + "</a>")
     return "\n".join(lines)
+

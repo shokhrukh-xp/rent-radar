@@ -945,9 +945,11 @@ def attach_dup(cfg, store, l, dup, ss=None):
         store.conn.commit()
         queue_pick(store, l, sc, why)
         return "queued"
-    head = (f"💸 <b>Та же квартира — дешевле на ${op - lp:,.0f}</b>\n"
-            f"Раньше присылала её за ${op:,.0f} ({rr.escape_html(o.get('site') or 'Uybor')}"
-            f"{', ' + KIND_RU[o['seller_kind']] if o.get('seller_kind') in KIND_RU else ''})").replace(",", " ")
+    from i18n import t
+    kind_ = (", " + t(KIND_RU[o["seller_kind"]])) if o.get("seller_kind") in KIND_RU else ""
+    head = (t("💸 <b>Та же квартира — дешевле на ${d}</b>", d=f"{op - lp:,.0f}".replace(",", " ")) + "\n"
+            + t("Раньше присылала её за ${p} ({site}{kind})", p=f"{op:,.0f}".replace(",", " "),
+                site=rr.escape_html(o.get("site") or "Uybor"), kind=kind_))
     ok = rr.send_card(cfg, l, rr.format_sale_card(store, l, cfg, head=head), ref="L:" + l["key"]) or None
     store.save(l, notified=ok is not None, dup_of=dup)
     if ok is not None:

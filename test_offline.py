@@ -2256,6 +2256,19 @@ xp = mk.analyze(rs_, lp, cfg_r)
 assert xp["reno"] == 4750 and "по фото ремонт хуже заявленного" in xp["bargain"]["args"]
 tp = mk.format_analysis(rs_, lp, cfg_r)
 assert "🛠 Ремонт по фото: без ремонта (видно: облезлые стены, старые окна)" in tp and "В объявлении — «хороший», на фото хуже" in tp
+# разбор и сводка — вручную на узбекском и английском: русского почти не остаётся, модель не нужна
+import i18n as _I18a
+try:
+    for lg_, word_ in (("en", "How I calculated"), ("uz", "Qanday hisobladim")):
+        _I18a.set_lang(lg_)
+        with mock.patch.object(_I18a, "ai", lambda c, text, lang=None, post=None: "TR:" + text):
+            ta_ = mk.format_analysis(rs_, lp, cfg_r)
+        assert word_ in ta_ and not _I18a.has_russian(ta_), ta_
+        assert "TR:облезлые" in ta_                                    # приметы ремонта от модели — переведены
+        su_ = mk.summary_text(rs_, cfg_r, ["Юнусабад"])
+        assert not _I18a.has_russian(su_), su_
+finally:
+    _I18a.set_lang("ru")
 # оценка через воркер: один раз на объявление, без воркера — ничего
 calls = []
 def fake_wp(c, path, payload, timeout=60):

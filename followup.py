@@ -9,6 +9,8 @@ import json
 from datetime import datetime, timedelta, timezone
 
 import concierge as cg
+import i18n
+from i18n import t
 
 TZ = cg.TZ
 EVERY = 300                       # проверка раз в 5 минут
@@ -44,7 +46,7 @@ def _send(cfg, text, rows=None, ref=None):
 
 
 def _short(o):
-    return cg._offer_tag(o) or f"вариант #{o['oid']}"
+    return cg.offer_tag_client(o) or t("вариант #{n}", n=o['oid'])
 
 
 # ------------------------------------------------------- молчащие маклеры --
@@ -62,15 +64,15 @@ def silent_brokers(cfg, store, now):
             continue
         if n >= MAX_PROMPTS:
             break
-        who = _rr().escape_html(o.get("broker_name") or "Маклер")
-        head = f"⏰ <b>{who}</b> молчит сутки по варианту #{o['oid']} ({_short(o)})."
+        who = _rr().escape_html(o.get("broker_name") or t("Маклер"))
+        head = t("⏰ <b>{who}</b> молчит сутки по варианту #{n} ({tag}).", who=who, n=o['oid'], tag=_short(o))
         res = cg.remind_broker(cfg, store, o["oid"])          # одно вежливое напоминание — сама, без кнопок
         if "напомнила" in res:
-            text = head + " Тихонько напомнила — один раз, надоедать не буду 🙂"
+            text = head + t(" Тихонько напомнила — один раз, надоедать не буду 🙂")
         elif "в чате" in res:
             text = ""                                          # текст напоминания уже прислала — отправить самим
         else:
-            text = head + " Написать ему ещё раз Telegram мне не даёт — если нужно, напомните сами."
+            text = head + t(" Написать ему ещё раз Telegram мне не даёт — если нужно, напомните сами.")
         if not text or _send(cfg, text, ref=f"O:{o['oid']}"):
             cg._set_extra(store, o["oid"], remind_prompt=now.isoformat())
             n += 1
@@ -94,8 +96,8 @@ def _viewing_line(at, v, o):
     rr = _rr()
     ex = o.get("extra") or {}
     where = ", ".join(x for x in (ex.get("address"), ex.get("landmark")) if x)
-    t = "время уточнить" if v.get("notime") else f"{at:%H:%M}"
-    return (f"• <b>{t}</b> — #{o['oid']} {_short(o)}"
+    hm = t("время уточнить") if v.get("notime") else f"{at:%H:%M}"
+    return (f"• <b>{hm}</b> — #{o['oid']} {_short(o)}"
             + (f"\n   🗺 {rr.escape_html(where)}" if where else "")
             + (f"\n   👤 {rr.escape_html(o.get('broker_name') or '')}" if o.get("broker_name") else ""))
 
@@ -110,15 +112,17 @@ def viewing_reminders(cfg, store, now):
             continue
         if not v.get("notime") and not v.get("pre") and at - timedelta(hours=2) <= now < at:
             mins = max(5, int((at - now).total_seconds() // 60))
-            if _send(cfg, f"⏰ Через {mins // 60} ч {mins % 60:02d} мин просмотр — не опаздываем! 😉\n\n" + _viewing_line(at, v, o),
+            if _send(cfg, t("⏰ Через {h} ч {m} мин просмотр — не опаздываем! 😉", h=mins // 60, m=f"{mins % 60:02d}")
+                     + "\n\n" + _viewing_line(at, v, o),
                      ref=f"O:{oid}"):
                 cg._set_extra(store, oid, viewing={**v, "pre": True})
                 n += 1
             continue
         after = at + (timedelta(hours=8) if v.get("notime") else timedelta(hours=1))
         if not v.get("after") and now >= after and 9 <= loc.hour < 22:
-            if _send(cfg, f"🏠 Ну что, как вам вариант #{oid} ({_short(o)})? Ответьте на это сообщение своими словами: "
-                          "понравилась, думаете или не то. Не состоялся — напишите, на когда перенести.",
+            if _send(cfg, t("🏠 Ну что, как вам вариант #{n} ({tag})? Ответьте на это сообщение своими словами: "
+                            "понравилась, думаете или не то. Не состоялся — напишите, на когда перенести.",
+                            n=oid, tag=_short(o)),
                      ref=f"O:{oid}"):
                 cg._set_extra(store, oid, viewing={**v, "after": True})
                 n += 1
@@ -135,8 +139,9 @@ def morning_note(cfg, store, now):
               if at.astimezone(TZ).date() == loc.date() and at > now - timedelta(hours=1)]
     if not todays:
         return False
-    return _send(cfg, "☀️ <b>Доброе утро! Сегодня идём смотреть</b>\n\n" + "\n".join(_viewing_line(*x) for x in todays)
-                 + "\n\nЗа 2 часа напомню ещё раз — я пунктуальная 😉")
+    return _send(cfg, t("☀️ <b>Доброе утро! Сегодня идём смотреть</b>") + "\n\n"
+                 + "\n".join(_viewing_line(*x) for x in todays)
+                 + "\n\n" + t("За 2 часа напомню ещё раз — я пунктуальная 😉"))
 
 
 # ------------------------------------------------------------ вечерняя сводка --
@@ -172,49 +177,56 @@ def digest_data(store, sale_store, now):
     return d
 
 
+MON_EN = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October",
+          "November", "December"]
+
+
+def day_month(loc) -> str:
+    """«15 октября» / «15-oktabr» / «15 October» — на языке клиента."""
+    if i18n.LANG == "uz":
+        return f"{loc.day}-{cg.MON_UZ[loc.month - 1]}"
+    if i18n.LANG == "en":
+        return f"{loc.day} {MON_EN[loc.month - 1]}"
+    return f"{loc.day} {cg.MON_GEN_RU[loc.month - 1]}"
+
+
 def digest_text(d, now):
     loc = now.astimezone(TZ)
     activity = (d["contacted_today"] + d["offers_today"] + d["answers_today"] + d["listings_today"]
                 + len(d["tomorrow"]) + d["pending"] + d["silent"])
     if not activity:
         return None, None
-    lines = [f"🌙 <b>Итоги дня</b> — {loc.day} {cg.MON_GEN_RU[loc.month - 1]}. Вот что успели:", ""]
+    lines = [t("🌙 <b>Итоги дня</b> — {date}. Вот что успели:", date=day_month(loc)), ""]
     if d["contacted_today"] or d["contacted_total"]:
-        lines.append(f"📇 Маклерам написали: {d['contacted_today']} сегодня, всего {d['contacted_total']}")
+        lines.append(t("📇 Маклерам написали: {a} сегодня, всего {b}", a=d['contacted_today'], b=d['contacted_total']))
     if d["offers_today"]:
-        lines.append(f"🏠 Новых вариантов от маклеров: {d['offers_today']}")
+        lines.append(t("🏠 Новых вариантов от маклеров: {n}", n=d['offers_today']))
     if d["pending"]:
-        lines.append(f"👀 Ждут вашего решения: {d['pending']}")
+        lines.append(t("👀 Ждут вашего решения: {n}", n=d['pending']))
     if d["answers_today"]:
-        lines.append(f"💬 Маклеры ответили на уточнения: {d['answers_today']}")
+        lines.append(t("💬 Маклеры ответили на уточнения: {n}", n=d['answers_today']))
     if d["silent"]:
-        lines.append(f"⏳ Молчат больше суток: {d['silent']}")
+        lines.append(t("⏳ Молчат больше суток: {n}", n=d['silent']))
     if d["shortlist"]:
-        lines.append(f"📋 В шортлисте: {d['shortlist']}")
+        lines.append(t("📋 В шортлисте: {n}", n=d['shortlist']))
     if d.get("site_seen"):
-        lines.append(f"🔎 Сайты и каналы: новых объявлений {d['site_seen']}, подошло {d.get('site_fit', 0)}, "
-                     f"прислала {d['listings_today']}")
+        lines.append(t("🔎 Сайты и каналы: новых объявлений {a}, подошло {b}, прислала {c}",
+                       a=d['site_seen'], b=d.get('site_fit', 0), c=d['listings_today']))
     elif d["listings_today"]:
-        lines.append(f"🔎 С сайтов прислала: {d['listings_today']}")
+        lines.append(t("🔎 С сайтов прислала: {n}", n=d['listings_today']))
     if d["tomorrow"]:
-        lines += ["", "📅 <b>Завтра просмотры</b>"] + [_viewing_line(*x) for x in d["tomorrow"]]
+        lines += ["", t("📅 <b>Завтра просмотры</b>")] + [_viewing_line(*x) for x in d["tomorrow"]]
     tip = ""                                   # один следующий шаг — самый полезный
     if d["pending"]:
-        tip = (f"Разберите {d['pending']} {cg.plural(d['pending'], 'вариант', 'варианта', 'вариантов')} — "
-               "ответьте на карточки своими словами: «нравится», «потом» или «не то», а дальше я сама.")
+        tip = t("Разберите {n} {w} — ответьте на карточки своими словами: «нравится», «потом» или «не то», "
+                "а дальше я сама.", n=d['pending'], w=cg.plural(d['pending'], 'вариант', 'варианта', 'вариантов'))
     elif not d["contacted_total"]:
-        tip = "Давайте начнём с маклеров — скажите «напиши маклерам», пришлю 5 со вписанным запросом 🙂"
+        tip = t("Давайте начнём с маклеров — скажите «напиши маклерам», пришлю 5 со вписанным запросом 🙂")
     elif not d["contacted_today"] and d["contacted_total"] < 60:
-        tip = "Завтра можно написать ещё маклерам — скажите «напиши маклерам» (до 15 в день, и номер в безопасности)."
+        tip = t("Завтра можно написать ещё маклерам — скажите «напиши маклерам» (до 15 в день, и номер в безопасности).")
     if tip:
         lines += ["", "👉 " + tip]
-    rows = []
-    if d["pending"]:
-        rows.append([{"text": f"🏠 Варианты ({d['pending']})", "callback_data": "cmd:/offers"}])
-    if d["shortlist"]:
-        rows.append([{"text": "📋 Шортлист", "callback_data": "s:show"}])
-    if not d["pending"]:
-        rows.append([{"text": "📇 Маклерам", "callback_data": "b"}])
+    rows = []                                  # кнопок клиенту нет — следующий шаг словами (tip)
     return "\n".join(lines), rows
 
 
@@ -247,14 +259,14 @@ def broker_offer(cfg, store, sale_store, now):
         shown = sale_store.conn.execute("SELECT COUNT(*) FROM listings WHERE notified=1 AND first_seen>=?",
                                         (st["at"],)).fetchone()[0]
         if fp.get("at", "") >= st["at"] and not fp.get("fit") and not (sale_store.get_kv("sale_pick") or []):
-            why = "🙈 Пробежалась по всем сайтам и каналам — под ваши условия сейчас ничего нет."
+            why = t("🙈 Пробежалась по всем сайтам и каналам — под ваши условия сейчас ничего нет.")
         elif age_h >= 48 and shown < 3:
-            why = f"🙈 За 2 дня на сайтах нашлось совсем мало подходящего ({shown})."
+            why = t("🙈 За 2 дня на сайтах нашлось совсем мало подходящего ({n}).", n=shown)
     elif st.get("deal") == "rent" and age_h >= 24:
         sent = store.conn.execute("SELECT COUNT(*) FROM listings WHERE notified=1 AND first_seen>=?",
                                   (st["at"],)).fetchone()[0]
         if not sent:
-            why = "🙈 За сутки на сайтах не нашлось подходящей аренды."
+            why = t("🙈 За сутки на сайтах не нашлось подходящей аренды.")
     if not why or not 9 <= now.astimezone(TZ).hour < 22:
         return False
     cg.offer_brokers(cfg, store, why)

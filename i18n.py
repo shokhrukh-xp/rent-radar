@@ -115,10 +115,10 @@ add("на {pct} дороже похожих{near}{with_reno}", "o'xshashlaridan 
     "{pct} more than similar{near}{with_reno}")
 add("на {pct} дешевле похожих{near}{with_reno}", "o'xshashlaridan {pct} arzonroq{near}{with_reno}",
     "{pct} less than similar{near}{with_reno}")
-add(" рядом", " yaqin atrofda", " nearby")
-add(" даже с ремонтом", " hatto ta'mir bilan", " even with renovation")
-add(" с учётом ремонта", " ta'mirni hisobga olganda", " including renovation")
-add(" с таким же ремонтом", " xuddi shunday ta'mirli", " with the same renovation")
+add(" рядом", " (yaqin atrofda)", " nearby")
+add(" даже с ремонтом", " (hatto ta'mir bilan)", " even with renovation")
+add(" с учётом ремонта", " (ta'mirni hisobga olganda)", " including renovation")
+add(" с таким же ремонтом", " (xuddi shunday ta'mirli)", " with the same renovation")
 add("как у похожих", "o'xshashlari kabi", "same as similar")
 add(" — торгуйтесь", " — savdolashing", " — negotiate")
 add("мало похожих объявлений — оценивайте на месте", "o'xshash e'lonlar kam — joyida baholang",
@@ -131,7 +131,7 @@ add("таких", "bunday", "such flats")
 add("на {pct} дешевле похожих{same} ({med}) — проверьте адрес, документы и состояние",
     "o'xshashlaridan {pct} arzon{same} ({med}) — manzil, hujjatlar va holatini tekshiring",
     "{pct} cheaper than similar{same} ({med}) — check the address, documents and condition")
-add(" с таким же ремонтом", " xuddi shunday ta'mirli", " with the same renovation")
+add(" с таким же ремонтом", " (xuddi shunday ta'mirli)", " with the same renovation")
 add("{base}, но бывшее общежитие", "{base}, lekin sobiq yotoqxona", "{base}, but a former dormitory")
 add("{why}; проверьте кадастр и приватизацию", "{why}; kadastr va xususiylashtirishni tekshiring",
     "{why}; check the cadastre and privatisation")
@@ -273,7 +273,7 @@ add("вся продажа", "barcha sotuv", "all sales")
 import i18n_texts as _tx  # noqa: E402
 for _d in (_tx.HELP, _tx.WELCOME, _tx.VIEW_HINT, _tx.GUIDE, _tx.GUIDE_ON, _tx.MANUAL):
     add(_d["ru"], _d["uz"], _d["en"])
-for _ru, _uz, _en in _tx.SHORT:
+for _ru, _uz, _en in _tx.SHORT + _tx.MORE:
     add(_ru, _uz, _en)
 
 

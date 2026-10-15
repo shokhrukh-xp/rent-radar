@@ -4449,10 +4449,11 @@ def send_site_cards(cfg, sst, items, title="", more=0, more_cb="R:pick", limit=5
             log.info("[продажа] без фото — не показываю: %s", l.get("key"))
     sent = 0
     for i, l in enumerate(ready, 1):
-        head = f"🔎 <b>{escape_html(title)}</b> · {i} из {len(ready)}" if title and len(ready) > 1 else \
-            (f"🔎 <b>{escape_html(title)}</b>" if title else "")
+        ttl = escape_html(t(title)) if title else ""
+        head = f"🔎 <b>{ttl}</b> · " + t("{i} из {n}", i=i, n=len(ready)) if title and len(ready) > 1 else \
+            (f"🔎 <b>{ttl}</b>" if title else "")
         if more and i == len(ready):                 # кнопок нет — подсказка словами
-            head += f"\nЕсть ещё {more} — скажите, если хотите посмотреть"
+            head += "\n" + t("Есть ещё {n} — скажите, если хотите посмотреть", n=more)
         if send_card(cfg, l, format_sale_card(sst, l, cfg, head=head), ref="L:" + l["key"]):
             sent += 1
         time.sleep(1)
@@ -4461,20 +4462,22 @@ def send_site_cards(cfg, sst, items, title="", more=0, more_cb="R:pick", limit=5
 
 def sale_criteria_text(ss: dict) -> str:
     rooms = "–".join(str(r) for r in (ss.get("rooms") or []))
-    rooms = f"{rooms} комн" if rooms else "любая комнатность"
-    districts = ", ".join(ss.get("districts") or []) or "любые районы"
+    rooms = t("{r} комн", r=rooms) if rooms else t("любая комнатность")
+    districts = ", ".join(dist(d) for d in ss.get("districts") or []) or t("любые районы")
     nr = ss.get("near") or {}
     if nr.get("src") == "центр":
-        districts = "центр города и рядом с ним"
+        districts = t("центр города и рядом с ним")
     elif nr.get("lat") is not None:
-        districts = f'до {str(round(nr["km"], 1)).replace(".0", "").replace(".", ",")} км от «{nr["label"]}»'
+        districts = t("до {km} км от «{label}»", km=str(round(nr["km"], 1)).replace(".0", "").replace(".", ","),
+                      label=nr["label"])
     if ss.get("owner_only", True):
-        sellers = (f'Только собственники: у продавца не больше {ss.get("max_owner_ads", 2)} '
-                   f'объявлений и нет признаков агентства.')
+        sellers = t("Только собственники: у продавца не больше {n} объявлений и нет признаков агентства.",
+                    n=ss.get("max_owner_ads", 2))
     else:
-        sellers = "Продавцы — собственники и маклеры/агентства; в карточке помечено, кто продаёт."
-    return (f'{rooms} · до ${_money(ss.get("max_price_usd", 0))} · {districts}\n'
-            f'{sellers} Источники — Uybor, Realt24, Joymee, Realting, Yangiuylar и Telegram-каналы.')
+        sellers = t("Продавцы — собственники и маклеры/агентства; в карточке помечено, кто продаёт.")
+    return (t("{rooms} · до ${max} · {districts}", rooms=rooms, max=_money(ss.get("max_price_usd", 0)),
+              districts=districts) + "\n" + sellers + " "
+            + t("Источники — Uybor, Realt24, Joymee, Realting, Yangiuylar и Telegram-каналы."))
 
 
 def sale_fingerprint(ss: dict) -> str:
@@ -4610,13 +4613,13 @@ def run_sale_search(cfg: dict, store, settings: dict, force: bool = False) -> in
     first = not intro_sent or criteria_changed
     if first:
         days = ss.get("notify_max_age_days", 14)
-        found = (f"За последние {days} дней нашлось подходящих: {len(unique)}. Самые выгодные пришлю "
-                 f"сразу, остальные — лучшими карточками с фото, по одной."
+        found = (t("За последние {d} дней нашлось подходящих: {n}. Самые выгодные пришлю сразу, остальные — "
+                   "лучшими карточками с фото, по одной.", d=days, n=len(unique))
                  if unique else
-                 f"За последние {days} дней подходящих нет — но я на посту, пришлю, как только появятся 👀")
-        title = "Условия поиска обновлены" if intro_sent else "Поиск квартиры для покупки включён"
+                 t("За последние {d} дней подходящих нет — но я на посту, пришлю, как только появятся 👀", d=days))
+        title = t("Условия поиска обновлены") if intro_sent else t("Поиск квартиры для покупки включён")
         intro = (f"🏷 <b>{title}</b>\n" + sale_criteria_text(ss) + "\n\n" + found
-                 + "\nКак идёт поиск — меню ☰ → «Мой поиск»")
+                 + "\n" + t("Как идёт поиск — спросите «как идёт поиск?»"))
         if not send_telegram(cfg, intro):
             return 0      # Telegram недоступен — всё повторим в следующий проход
         store.set_kv("sale_intro_sent", True)
@@ -5060,9 +5063,9 @@ def run():
                 n = run_sale_search(effective_sale_cfg(cfg, store), sale_store, settings, force=force_sale)
                 if force_flag == "button":
                     st = sale_sources.day_stats(sale_store)
-                    send_telegram(cfg, f"🔄 Пробежалась по всем сайтам! Сегодня просмотрено {st.get('seen', 0)}, "
-                                       f"подошло {st.get('fit', 0)}; в подборке ждут "
-                                       f"{len(sale_sources.pick_pending(sale_store))}.")
+                    send_telegram(cfg, t("🔄 Пробежалась по всем сайтам! Сегодня просмотрено {a}, подошло {b}; "
+                                         "в подборке ждут {c}.", a=st.get('seen', 0), b=st.get('fit', 0),
+                                         c=len(sale_sources.pick_pending(sale_store))))
                 if n:
                     log.info("[продажа] новых: %d", n)
             except Exception as e:      # поиск покупки не должен ронять радар
