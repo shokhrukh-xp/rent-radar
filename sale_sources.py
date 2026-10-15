@@ -791,7 +791,8 @@ def score(store, l, cfg, ss):
         why.append(f"перевыложено, на рынке ~{dom:.0f} дн. — можно торговаться")
     elif dom > 60:
         why.append("долго продаётся — можно торговаться")
-    strong = (gap is not None and gap <= -0.08 and "dorm" not in (x.get("flags") or [])) \
+    good = (x.get("verdict") or ("",))[0] == "🟢"      # «хорошая цена» — тот же порог, что в карточке
+    strong = (good and gap is not None and "dorm" not in (x.get("flags") or [])) \
         or bool(pc and pc[1] <= pc[0] * 0.95)
     return round(max(0, min(100, s))), why, strong, x
 

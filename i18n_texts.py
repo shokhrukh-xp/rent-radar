@@ -498,6 +498,7 @@ MORE = [
      "district average $/m² (CERR/CB, 2026) × area"),
     (", −{p}% за общежитие (допущение)", ", yotoqxona uchun −{p}% (taxmin)", ", −{p}% for a dormitory (assumption)"),
     ("м²", "m²", "m²"),
+    (", обычно ${a}–{b}", ", odatda ${a}–{b}", ", usually ${a}–{b}"),
     # сводка рынка
     ("📊 Среза рынка ещё нет — он появится после ближайшего прохода поиска.",
      "📊 Bozor kesimi hali yo'q — u keyingi qidiruvdan so'ng paydo bo'ladi.",

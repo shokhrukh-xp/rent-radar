@@ -1995,9 +1995,11 @@ assert rr.sale_reject(la, ssx, xs, cfg) == ("", False) and la["seller_kind"] == 
 # оценка: собственник + ипотека выше; ниже рынка — «сильный»
 sc_j, why_j, strong_j, _ = SS.score(xs, lj, cfg, ssx)
 assert "собственник" in why_j and "можно в ипотеку" in why_j and not strong_j
-with mock.patch("market.analyze", lambda *a: {"gap": -0.12, "flags": []}):
+with mock.patch("market.analyze", lambda *a: {"gap": -0.12, "flags": [], "verdict": ("🟢", "Хорошая цена", "")}):
     sc2, why2, strong2, _ = SS.score(xs, lj, cfg, ssx)
 assert strong2 and sc2 > sc_j and "-12% к рынку" in why2[0]
+with mock.patch("market.analyze", lambda *a: {"gap": -0.12, "flags": [], "verdict": ("🟡", "Цена в рынке", "")}):
+    assert not SS.score(xs, lj, cfg, ssx)[2]          # −12%, но в пределах обычного разброса похожих — не «сразу»
 # дубль с другого сайта: та же площадь, этаж, район, цена ±5%
 xs.save(dict(lj, key="sale:uybor:9", site="Uybor", price_usd=45500, phones=[]), notified=True)
 assert SS.structural_dup(xs, lj) == "sale:uybor:9"
@@ -3026,3 +3028,49 @@ with mock.patch.object(_ss_p.requests, "get", lambda u, **k: _RI(IMGS[u])):
     assert _ss_p.photo_dup(pst_, yu) is None                       # рендеры ЖК не сравниваем
 pdb_.unlink(missing_ok=True)
 print("OK — дубли по фото: перевыложенная маклером квартира узнаётся по снимкам, разные квартиры не склеиваются")
+
+# ============ «в центре»: без точной точки большой район, который лишь задевает круг, — не берём ============
+_gz_saved = list(_geo_t.GAZ["pts"])
+try:
+    _geo_t.GAZ["pts"] = ([(41.36 + i * 1e-4, 69.39, "Мирзо-Улугбек", "sale", 0, 0, 50, 60000, None, f"k{i}") for i in range(30)]
+                         + [(41.312 + i * 1e-4, 69.283, "Мирзо-Улугбек", "sale", 0, 0, 50, 60000, None, f"q{i}") for i in range(5)]
+                         + [(41.30 + i * 1e-4, 69.28, "Мирабад", "sale", 0, 0, 50, 60000, None, f"m{i}") for i in range(30)])
+    _geo_t._SHARE.clear()
+    near_c = {"lat": 41.31267, "lon": 69.28327, "label": "центр", "km": 3.6, "districts": ["Мирабад", "Мирзо-Улугбек"]}
+    why_ = _geo_t.too_far({"district": "Мирзо-Улугбек", "geo": {"src": "район"}}, near_c)
+    assert "в основном дальше" in why_, why_
+    assert _geo_t.too_far({"district": "Мирабад", "geo": {"src": "район"}}, near_c) == ""
+    assert _geo_t.too_far({"district": "Мирзо-Улугбек", "geo": {"lat": 41.315, "lon": 69.29, "src": "сайт"}}, near_c) == ""
+finally:
+    _geo_t.GAZ["pts"] = _gz_saved; _geo_t._SHARE.clear()
+assert _geo_t.generic_place("Мечеть") and _geo_t.generic_place("Мебельный магазин") and not _geo_t.generic_place("школа 64")
+assert not _geo_t.generic_place("Рисовый базар") and not _geo_t.generic_place("Массив ТТЗ-2")
+print("OK — «в центре»: большой район без точки не проходит, ориентиры без названия («Мечеть») не ищем на карте")
+
+# ============ оценка цены: ближайшие похожие (kNN), не больше 3 от одного продавца, разброс P20–P80 ============
+import market as _mk2
+_gz2 = list(_geo_t.GAZ["pts"])
+try:
+    base_ = (41.30, 69.28)
+    pts_ = [(base_[0] + i * 0.0009, base_[1], "Мирабад", "sale", 0, 0, 50 + (i % 5), (1500 + (i % 7) * 20) * (50 + (i % 5)),
+             None, f"sale:uybor:{i}", f"u{i}") for i in range(14)]
+    # один застройщик/агентство выложил 10 одинаково дешёвых квартир совсем рядом
+    pts_ += [(base_[0] + 0.0001, base_[1] + 0.0001 * j, "Мирабад", "sale", 0, 0, 50, 900 * 50, None, f"sale:uybor:a{j}", "AG")
+             for j in range(10)]
+    _geo_t.GAZ["pts"] = pts_
+    kst_ = rr.Store(Path("/tmp/test_knn.db"))
+    lk = {"key": "sale:uybor:me", "area": 50, "price_usd": 70000, "district": "Мирабад",
+          "geo": {"lat": base_[0], "lon": base_[1], "src": "сайт", "label": ""}}
+    ck = _mk2.comparables(kst_, lk)
+    assert ck["n"] == 15 and 1400 < ck["median_m2"] < 1700, ck        # агентство — не больше 3 из 15
+    assert ck["p20"] <= ck["median_m2"] <= ck["p80"] and ck["p20"] < ck["p80"], ck
+    # −12% к медиане, но внутри обычного разброса похожих — «в рынке», а не «хорошая цена»
+    xk = _mk2.analyze(kst_, dict(lk, price_usd=ck["median_m2"] * 0.87 * 50), cfg)
+    if xk.get("gap") is not None and xk["gap"] <= -0.12 and (xk["m2"] >= (xk["comp"].get("p20") or 0)):
+        assert xk["verdict"][1] != "Хорошая цена", xk["verdict"]
+    xg = _mk2.analyze(kst_, dict(lk, price_usd=ck["median_m2"] * 0.6 * 50), cfg)
+    assert xg["verdict"][1] in ("Хорошая цена", "Подозрительно дёшево", "Сравнить не с чем"), xg["verdict"]
+finally:
+    _geo_t.GAZ["pts"] = _gz2
+    Path("/tmp/test_knn.db").unlink(missing_ok=True)
+print("OK — оценка цены: ближайшие похожие с весами, без засилья одного продавца, «хорошая цена» — только за пределами разброса")

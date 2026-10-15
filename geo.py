@@ -229,7 +229,7 @@ def load(store, rebuild=False):
                 pass
         GAZ["gaz"] = gaz
         GAZ["pts"] = [r for r in conn.execute(
-            "SELECT lat, lng, district, op, new_building, dorm, area, price_usd, repair, key FROM market "
+            "SELECT lat, lng, district, op, new_building, dorm, area, price_usd, repair, key, user_id FROM market "
             "WHERE lat IS NOT NULL AND removed_at IS NULL AND area > 0").fetchall() if in_city(r[0], r[1])]
         GAZ["at"] = time.time()
         GAZ["db"] = _db_name(conn)
@@ -419,7 +419,43 @@ def too_far(l: dict, near: dict):
         return "место не указано"
     if near.get("districts") and l["district"] not in near["districts"]:
         return f"район {l['district']} — далеко от «{near.get('label')}»"
+    share = district_share(l["district"], near)
+    if share is not None and share < DISTRICT_SHARE_MIN:
+        # район лишь задевает круг (Мирзо-Улугбек тянется на 10+ км от центра): без точки — не берём
+        return f"место не указано, а {l['district']} в основном дальше {near.get('km', 2):g} км от «{near.get('label')}»"
     return ""
+
+
+DISTRICT_SHARE_MIN = 0.5
+_SHARE = {}
+
+
+def district_share(district: str, near: dict):
+    """Какая доля объявлений района (по срезу) попадает в круг клиента; None — мало данных."""
+    k = (district, round(near["lat"], 3), round(near["lon"], 3), near.get("km", 2), len(GAZ["pts"]))
+    if k in _SHARE:
+        return _SHARE[k]
+    pts = [(r[0], r[1]) for r in GAZ["pts"] if r[2] == district and r[3] == "sale"]
+    out = None
+    if len(pts) >= 20:
+        r_ = near.get("km", 2)
+        out = sum(1 for la, lo in pts if km(near["lat"], near["lon"], la, lo) <= r_) / len(pts)
+    _SHARE[k] = out
+    return out
+
+
+GENERIC_PLACE = {"mechet", "masjid", "shkala", "shkali", "detsad", "sad", "bazar", "rinak", "rinka", "magazin",
+                 "bolnitsa", "palikliniki", "paliklinika", "park", "astanavka", "metra", "makro", "karzinka",
+                 "supermarket", "apteka", "bank", "kafe", "restaran", "mektab", "bagcha", "dakan", "hakimiyat",
+                 "mebelniy", "mebel", "tsentr", "markaz"}
+
+
+def generic_place(name: str) -> bool:
+    """«Мечеть», «Школа», «Мебельный магазин» — ориентир без названия: таких по городу сотни."""
+    toks = skel(name).split()
+    if any(x.isdigit() for x in toks):             # «школа 64», «ТТЗ-2» — конкретное место
+        return False
+    return not [x for x in toks if x not in STOP and x not in GENERIC_PLACE]
 
 
 # ------------------------------------------------------------ карта цен ----

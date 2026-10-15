@@ -3775,21 +3775,28 @@ def sale_reject(l: dict, ss: dict, store, cfg) -> tuple:
         geo.locate(l)
     except Exception as e:
         log.info("[место] %s: %s", l.get("key"), e)
+    a = age_days(l.get("created_at") or "")      # дешёвые проверки — до поиска места моделью
+    if a is not None and a > ss.get("notify_max_age_days", 14):
+        return f"объявлению {a:.0f} дн.", False
+    low = f"{l.get('title', '')} {l.get('text', '')}".lower()
+    hit = next((w for w in SALE_NOT_FLAT_WORDS if w in low), "")
+    if hit:
+        return f"продаётся не квартира («{hit}»)", False
     near = ss.get("near") or {}
     if near.get("lat") is not None:          # клиент ищет у ориентира — радиус вместо района
+        if not ((l.get("geo") or {}).get("src") not in (None, "район")):
+            # точки нет — ищем так же, как для карточки (описание читает модель), иначе в фильтре
+            # квартира «где-то в районе», а в карточке потом оказывается за 10 км
+            try:
+                l.pop("geo", None)
+                ensure_place(cfg, store, l)
+            except Exception as e:
+                log.info("[место] %s: %s", l.get("key"), e)
         far = geo.too_far(l, near)
         if far:
             return far, False
     elif ss.get("districts") and l.get("district") not in ss["districts"]:
         return f"район {l.get('district') or 'не указан'}", False
-    a = age_days(l.get("created_at") or "")
-    if a is not None and a > ss.get("notify_max_age_days", 14):
-        return f"объявлению {a:.0f} дн.", False
-
-    low = f"{l.get('title', '')} {l.get('text', '')}".lower()
-    hit = next((w for w in SALE_NOT_FLAT_WORDS if w in low), "")
-    if hit:
-        return f"продаётся не квартира («{hit}»)", False
 
     why = classify_sale_seller(l, ss, store, cfg)
     if not ss.get("owner_only", True):
@@ -3965,8 +3972,8 @@ def ensure_place(cfg, store, l: dict):
                                             "photos": [], "deal": "sale"}, timeout=40)
         facts = (r or {}).get("offer") or {}
         for name, approx in ((facts.get("landmark"), 0.6), (facts.get("address"), 0.4)):
-            if not name:
-                continue
+            if not name or geo.generic_place(str(name)):
+                continue                             # «Мечеть», «школа», «базар» — такие есть в каждом квартале
             pt = geo.point_for(str(name))
             if not pt:
                 try:
@@ -4142,7 +4149,8 @@ def format_sale_card(store, l: dict, cfg: dict, head: str = "", note: str = "") 
     c = x.get("comp")
     if c:
         det.append(t("Сравнивала с {n} объявл.: {label}, медиана ${m}/м²", n=c["n"], label=escape_html(c["label"]),
-                     m=_money(c["median_m2"])))
+                     m=_money(c["median_m2"]))
+                   + (t(", обычно ${a}–{b}", a=_money(c["p20"]), b=_money(c["p80"])) if c.get("p20") else ""))
     if x.get("days_on_market") is not None and x.get("price_change"):
         pc = x["price_change"]
         det.append(t("Цена менялась: ${a} → ${b}", a=_money(pc[0]), b=_money(pc[1])))

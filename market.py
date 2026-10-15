@@ -16,6 +16,7 @@ Ra'no · рыночный анализ вариантов на покупку.
 """
 
 import logging
+import math
 import re
 import statistics
 import time
@@ -463,6 +464,32 @@ def is_dorm(l: dict) -> bool:
     return any(w in text for w in DORM_WORDS)
 
 
+KNN_K, KNN_MIN, KNN_MAX_KM, KNN_SPREAD, KNN_PER_SELLER = 15, 8, 3.0, 0.35, 3
+# вердикт «хорошая цена / дорого»: асking-цены похожих разбросаны (ошибка оценки ~14%), поэтому нужен
+# и заметный разрыв, и выход за 20-й/80-й перцентиль похожих. При ±10% без перцентилей так помечалось 60% рынка.
+VERDICT_GAP, VERDICT_Q = 0.12, 0.20
+
+
+def _wmedian(vals):
+    """Взвешенная медиана: [(значение, вес)]."""
+    vs = sorted(vals)
+    tot = sum(w for _, w in vs)
+    acc = 0.0
+    for v, w in vs:
+        acc += w
+        if acc >= tot / 2:
+            return v
+    return vs[-1][0]
+
+
+def _band(xs):
+    """20-й и 80-й перцентили $/м² похожих — «обычно стоят от … до …»."""
+    v = sorted(xs)
+    if len(v) < 5:
+        return {}
+    return {"p20": v[int(len(v) * VERDICT_Q)], "p80": v[min(len(v) - 1, int(len(v) * (1 - VERDICT_Q)))]}
+
+
 def comparables(store, l: dict, min_n: int = 6, repair=None):
     """Медиана $/м² похожих активных объявлений о продаже.
     Бывшее общежитие сравниваем только с общежитиями: это другой рынок
@@ -495,6 +522,32 @@ def comparables(store, l: dict, min_n: int = 6, repair=None):
     rep = {"good": t(", хороший ремонт"), "average": t(", средний ремонт"), "box": t(", коробка")}.get(repair, "")
     g = l.get("geo") or {}
     if g and g.get("src") != "район" and geo.GAZ["pts"]:
+        # ближайшие похожие (kNN): ближе и похожей площади — весомее, от одного продавца — не больше 3.
+        # Бэктест на срезе 15.10.2026 (1400 квартир, без своих объявлений продавца): ошибка оценки
+        # 13,8% против 15,7% у кругов 1–2 км, в пределах ±10% — 41% против 36%.
+        cand = sorted(((geo.km(g["lat"], g["lon"], r[0], r[1]), r) for r in geo.neighbors(g["lat"], g["lon"], KNN_MAX_KM)
+                       if r[9] != own and r[5] == dorm and r[4] == nb and (not codes or r[8] in codes)
+                       and (1 - KNN_SPREAD) * area <= r[6] <= (1 + KNN_SPREAD) * area), key=lambda z: z[0])
+        per, sel = {}, []
+        for dk, r in cand:
+            u = r[10] if len(r) > 10 else r[9]
+            if per.get(u, 0) >= KNN_PER_SELLER:
+                continue
+            per[u] = per.get(u, 0) + 1
+            sel.append((dk, r))
+            if len(sel) >= KNN_K:
+                break
+        if len(sel) >= max(min_n, KNN_MIN):
+            vals = [(r[7] / r[6], 1 / (0.3 + dk) / (1 + 3 * abs(math.log(r[6] / area)))) for dk, r in sel]
+            far = max(dk for dk, _ in sel)
+            rad = f"{max(0.5, math.ceil(far * 2) / 2):g}".replace(".", ",")
+            where = t(" от «{label}»", label=g["label"]) if g.get("label") else ""
+            rng = t("{a} м²", a=f"{min(r[6] for _, r in sel):.0f}–{max(r[6] for _, r in sel):.0f}")
+            return {"median_m2": _wmedian(vals), "n": len(sel), "near_km": float(rad.replace(",", ".")),
+                    **_band([v for v, _ in vals]),
+                    "label": t("в радиусе {rad} км{where}, {kind}{rep}, {rng}", rad=rad, where=where, kind=kind,
+                               rep=rep, rng=rng)}
+    if g and g.get("src") != "район" and geo.GAZ["pts"]:
         # сначала соседи: в одном районе есть и дорогие, и дешёвые части
         where = t(" от «{label}»", label=g["label"]) if g.get("label") else ""
         for radius, spread in ((1.0, 0.3), (1.0, 0.5), (1.5, 0.5), (2.0, 0.5)):
@@ -504,7 +557,7 @@ def comparables(store, l: dict, min_n: int = 6, repair=None):
             if len(vals) >= min_n:
                 rng = f"{(1 - spread) * area:.0f}–{(1 + spread) * area:.0f} м²"
                 rad = f"{radius:g}".replace(".", ",")
-                return {"median_m2": _median(vals), "n": len(vals), "near_km": radius,
+                return {"median_m2": _median(vals), "n": len(vals), "near_km": radius, **_band(vals),
                         "label": t("в радиусе {rad} км{where}, {kind}{rep}, {rng}", rad=rad, where=where, kind=kind,
                                    rep=rep, rng=rng)}
     d = l.get("district")
@@ -515,7 +568,7 @@ def comparables(store, l: dict, min_n: int = 6, repair=None):
             where = dist_(d) if dist else dist_("весь Ташкент")
             what = kind if (seg or dorm) else t("вся продажа")
             rng = t("{a} м²", a=f"{(1 - spread) * area:.0f}–{(1 + spread) * area:.0f}")
-            return {"median_m2": _median(vals), "n": len(vals), "label": f"{where}, {what}{rep}, {rng}"}
+            return {"median_m2": _median(vals), "n": len(vals), **_band(vals), "label": f"{where}, {what}{rep}, {rng}"}
     return None
 
 
@@ -723,9 +776,13 @@ def analyze(store, l: dict, cfg: dict) -> dict:
     pct = f"{abs(gap) * 100:.0f}%" if gap is not None else ""
     with_reno = (t(" даже с ремонтом") if gap < 0 else t(" с учётом ремонта")) if use_all_in else \
         (t(" с таким же ремонтом") if out.get("comp_same_repair") else "")
-    if gap is not None and gap >= 0.10:
+    cmp_ = (out.get("good_comp") if use_all_in else out.get("comp")) or {}
+    m2_ = (out["all_in"] if use_all_in else price) / area if area else None
+    beyond_lo = not cmp_.get("p20") or (m2_ is not None and m2_ < cmp_["p20"])
+    beyond_hi = not cmp_.get("p80") or (m2_ is not None and m2_ > cmp_["p80"])
+    if gap is not None and gap >= VERDICT_GAP and beyond_hi:
         verdict = ("🔴", t("Дорого"), t("на {pct} дороже похожих{near}{with_reno}", pct=pct, near=near, with_reno=with_reno))
-    elif gap is not None and gap <= -0.10:
+    elif gap is not None and gap <= -VERDICT_GAP and beyond_lo:
         verdict = ("🟢", t("Хорошая цена"), t("на {pct} дешевле похожих{near}{with_reno}", pct=pct, near=near,
                                              with_reno=with_reno))
     elif gap is None and out.get("comp_unreliable") is not None and out["comp_unreliable"] < 0:
@@ -892,7 +949,8 @@ def format_analysis(store, l: dict, cfg: dict) -> str:
     # как считала — свёрнуто
     d = []
     if c:
-        d.append(t("Похожие: медиана ${m}/м², {n} объявл. ({label})", m=_money(c["median_m2"]), n=c["n"], label=c["label"]))
+        d.append(t("Похожие: медиана ${m}/м², {n} объявл. ({label})", m=_money(c["median_m2"]), n=c["n"], label=c["label"])
+                 + (t(", обычно ${a}–{b}", a=_money(c["p20"]), b=_money(c["p80"])) if c.get("p20") else ""))
     if x.get("good_comp"):
         gc = x["good_comp"]
         d.append(t("С хорошим ремонтом: ${m}/м², {n} объявл.", m=_money(gc["median_m2"]), n=gc["n"]))
