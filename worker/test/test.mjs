@@ -594,7 +594,13 @@ assert.equal(await handleUpdate(env, { update_id: ++bu, business_message: { busi
 const qn = (await env.DB.prepare("SELECT upd FROM queue").all()).results.map(r => JSON.parse(r.upd));
 assert.ok(qn.some(u => u.business_message?.chat?.id === 9001) && qn.some(u => u.business_connection?.id === "BC1"));
 { const m = msg("не хочу давать доступ к чатам"); m.update_id = ++bu;
-  assert.equal(await handleUpdate(env, m), "biz_decline"); }
+  assert.equal(await handleUpdate(env, m), "biz_decline");
+  const row = await env.DB.prepare("SELECT v FROM kv WHERE k='ui'").first();     // только что предложила подключить —
+  const u = JSON.parse(row.v); u.biz_offered_at = Date.now() / 1000;             // короткое «нет» тоже отказ
+  await env.DB.prepare("UPDATE kv SET v=? WHERE k='ui'").bind(JSON.stringify(u)).run();
+  const m2 = msg("нет"); m2.update_id = ++bu;
+  assert.equal(await handleUpdate(env, m2), "biz_decline");
+  u.biz_offered_at = 0; await env.DB.prepare("UPDATE kv SET v=? WHERE k='ui'").bind(JSON.stringify(u)).run(); }
 for (const t of ["Как подключить тебя к моему телеграму?", "/connect"]) {
   const m = msg(t); m.update_id = ++bu;
   assert.equal(await handleUpdate(env, m), "biz_guide");

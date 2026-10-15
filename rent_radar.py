@@ -1260,7 +1260,7 @@ HELP_TEXT = """🏠 <b>Ra'no</b> — ваш ИИ-ассистент по пои�
 
 Маклерам: скажите «напиши маклерам» — пришлю 5 маклеров под ваш запрос. Нажмёте на имя — откроется чат с ним, текст уже вписан, останется «Отправить».
 
-Хотите, чтобы маклеры отвечали прямо вам в Telegram, а я читала их ответы и сама уточняла детали? Напишите «подключить телеграм» — пришлю инструкцию на минуту. Не хотите давать доступ к чатам — «без подключения»: ответы маклеров будете пересылать мне, а уточнения я подготовлю текстом."""
+Хотите, чтобы маклеры отвечали прямо вам в Telegram, а я читала их ответы и сама уточняла детали? Напишите «подключить телеграм» — пришлю инструкцию на минуту. Не хотите давать доступ к чатам — так и скажите, предложу другой способ."""
 
 DISTRICT_LIST = sorted(DISTRICTS)
 PRICE_PRESETS = [300, 400, 500, 700, 1000, 1500]
@@ -1544,6 +1544,14 @@ def handle_command(text: str, settings: dict, store, cfg: dict):
             return "Текст запроса ещё не готов — расскажите, что ищем, и я его соберу ✍️", None
         return f"📝 <b>Текущий запрос маклерам</b>\n\n<code>{escape_html(t)}</code>", None
     if cmd in ("/brokers", "/makler", "/outreach"):
+        if not concierge.broker_mode(store):        # сначала предлагаем подключить Telegram — маклеров пришлю после
+            store.set_kv("brokers_pending", True)
+            store.set_kv("biz_offered_at", time.time())
+            send_telegram(cfg, "📇 Маклеров подберу — а сначала давайте подключим меня к вашему Telegram, "
+                               "так удобнее всего.\n\n" + concierge.biz_guide(cfg, store) +
+                               "\n\nКак подключите — сразу пришлю маклеров.")
+            push_snapshot(cfg, store, settings, force=True)
+            return "", None
         return send_broker_batch(cfg, store, settings), None   # ссылки с вписанным текстом, без кнопок
     if cmd in ("/find", "/top", "/search"):
         run_search(cfg, store, settings)
@@ -2194,8 +2202,7 @@ def send_broker_batch(cfg, store, settings, n=OUTREACH_BATCH) -> str:
     lines += ["", ("Как отправите — я увижу сама и буду следить за ответами: соберу карточки и уточню детали." if biz else
                    "Маклеры ответят вам или сразу мне. Ответили вам — перешлите их сообщения мне "
                    "(держите сообщение → «Переслать» → Ra'no), сделаю карточки."
-                   + ("" if mode == "manual" else " Хотите, чтобы я читала ответы сама, — «подключить телеграм»; "
-                      "не хотите давать доступ — «без подключения»."))
+                   + ("" if mode == "manual" else " Хотите, чтобы я читала ответы сама, — «подключить телеграм»."))
               + more]
     day["n"] += len(pick)
     store.set_kv("outreach_day", day)
@@ -2703,8 +2710,7 @@ def via_screen(cfg, store) -> dict:
     lines += ["", "Скажите «напиши маклерам» — пришлю 5 маклеров со вписанным запросом (до 15 в день, чтобы Telegram "
               "не счёл это спамом). Маклер ответил в WhatsApp — перешлите мне, сделаю карточку."]
     if not concierge.broker_mode(store):
-        lines.append("Чтобы я сама читала ответы маклеров в ваших чатах — напишите «подключить телеграм». "
-                     "Без доступа к чатам — «без подключения», будем через пересылку.")
+        lines.append("Чтобы я сама читала ответы маклеров в ваших чатах — напишите «подключить телеграм».")
     rows = []
     if pool:
         rows.append([{"text": f"🏠 Варианты ({pool})", "callback_data": "cmd:/offers"}])
@@ -2779,7 +2785,7 @@ def ui_snapshot(cfg, store, settings) -> dict:
             "screens": screens, "ctx": ctx,
             "free": cfg.get("free_offers", 2), "deal": deal,
             "brokers": brokers, "brokers_total": len(ranked), "biz": concierge.biz_ready(store),
-            "broker_mode": concierge.broker_mode(store),
+            "broker_mode": concierge.broker_mode(store), "biz_offered_at": store.get_kv("biz_offered_at") or 0,
             "header": outreach_header(store, deal, text, len(ranked)) if ranked else "",
             "brokers_empty": outreach_empty_text(store, deal) if not ranked else ""}
 
@@ -3145,6 +3151,15 @@ def handle_business_update(cfg, store, upd) -> bool:
         elif not (prev.get("enabled") and prev.get("can_reply")):
             req = concierge.compose_request(cfg, store)
             store.set_kv("request_text", req)
+            store.set_kv("biz_offered_at", 0)
+            if store.get_kv("brokers_pending"):          # просили маклеров — присылаю сразу после подключения
+                store.set_kv("brokers_pending", False)
+                send_telegram(cfg, f"✅ <b>{a} подключена к вашему Telegram.</b> Ваши чаты, кроме маклерских, не читаю. "
+                                   "Вот маклеры 👇")
+                t = send_broker_batch(cfg, store, default_settings())
+                if t:
+                    send_telegram(cfg, t)
+                return True
             send_telegram(cfg, f"✅ <b>{a} подключена к вашему Telegram.</b>\n\n"
                                "Как это работает: вы отправляете маклеру запрос — я вижу его ответ, собираю карточку "
                                "с картой и сама уточняю фото, адрес и цену. Другие ваши чаты не читаю.\n\n"
@@ -3450,9 +3465,15 @@ def process_commands(cfg: dict, store, long_poll: int = 0) -> dict:
             continue
         if msg.get("_biz_decline"):          # «не хочу давать доступ» — работаем через пересылку
             store.set_kv("broker_mode", "manual")
+            store.set_kv("biz_offered_at", 0)
             send_telegram(cfg, concierge.MANUAL_HOWTO if not concierge.biz_ready(store) else
                           "Ra'no сейчас подключена к вашему Telegram. Чтобы отключить: Настройки → Telegram для "
                           "бизнеса → Чат-боты → Ra'no → «Отключить бота». Дальше буду работать через пересылку.")
+            if store.get_kv("brokers_pending") and not concierge.biz_ready(store):
+                store.set_kv("brokers_pending", False)
+                t = send_broker_batch(cfg, store, settings)
+                if t:
+                    send_telegram(cfg, t)
             push_snapshot(cfg, store, settings, force=True)
             continue
         if msg.get("_link"):                 # воркер: владелец прислал ссылку на объявление

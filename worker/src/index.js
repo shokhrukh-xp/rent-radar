@@ -793,7 +793,7 @@ export async function showOffers(env, chat, all = false) {
       : "\nСкажите «напиши маклерам» — подберу маклеров под ваш запрос, текст им уже будет вписан.";
     const biz = ui.biz ? "" : ui.broker_mode === "manual"
       ? "\nМаклер ответил вам — перешлите мне его сообщения, сделаю карточку."
-      : "\nЧтобы я сама читала ответы маклеров в ваших чатах — «подключить телеграм». Без доступа к чатам — «без подключения».";
+      : "\nЧтобы я сама читала ответы маклеров в ваших чатах — «подключить телеграм».";
     await say(env, chat, (waiting ? "Пока тихо — новых карточек нет 🌙" : "Пока тихо — новых вариантов нет 🌙") +
       (ui.shortlist ? ` В шортлисте — ${ui.shortlist}, скажите «шортлист».` : "") + hint + biz + waitNote);
     return;
@@ -1422,7 +1422,10 @@ export async function handleUpdate(env, upd) {
   }
 
   // «подключи к моему телеграму» — пошаговая инструкция Telegram для бизнеса (текст и проверка — в Python)
-  if (BIZ_NO.test(text)) {
+  // короткое «нет / не хочу» сразу после предложения подключить Telegram — тоже отказ от доступа
+  const uiB = await kvGet(env, "ui", null);
+  const justOffered = uiB?.biz_offered_at && Date.now() / 1000 - uiB.biz_offered_at < 3600;
+  if (BIZ_NO.test(text) || (justOffered && /^(нет|не|не хочу|не надо|не буду|не стоит|пока нет|не готов[а-я]*|yo['ʻ’]?q|kerak emas|xohlamayman)[.!,)]*$/i.test(text))) {
     upd.message = { ...msg, _biz_decline: true };
     await queueAndWake(env, upd);
     return "biz_decline";

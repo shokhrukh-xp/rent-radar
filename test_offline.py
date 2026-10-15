@@ -2761,6 +2761,14 @@ with mock.patch.object(rr, "tg_call", bz_tg):
               cg._biz_voice(cg.details_question(dict(o_, oid=1, status="new"), bcfg, "buy"), bcfg),
               cg.compose_request(bcfg, bz).split("Мне помогает")[0]]:
         assert not FEM.search(t), t
+    # просили маклеров до подключения → после подключения присылаю сразу
+    bz.set_kv("brokers_pending", True); bz.set_kv("biz_conn", {}); bz.set_kv("outreach_day", {})
+    bz.conn.execute("UPDATE brokers SET status='new' WHERE bid LIKE 'm%'"); bz.conn.commit()
+    BZ.clear()
+    rr.handle_business_update(bcfg, bz, {"business_connection": {"id": "BC1", "user": {"id": 500}, "user_chat_id": 500,
+                                         "is_enabled": True, "rights": {"can_reply": True}}})
+    assert any("Вот маклеры" in pl.get("text", "") for m, pl in BZ) and any(
+        "Маклеры под ваш запрос" in pl.get("text", "") for m, pl in BZ) and not bz.get_kv("brokers_pending")
     # отключили — больше не пишем маклерам из аккаунта клиента
     rr.handle_business_update(bcfg, bz, {"business_connection": {"id": "BC1", "user": {"id": 500}, "user_chat_id": 500,
                                          "is_enabled": False, "rights": {"can_reply": True}}})
@@ -2795,15 +2803,19 @@ with mock.patch.object(rr, "tg_call", lambda c, m, p, **k: MN.append((m, p)) or 
         mock.patch.object(rr, "push_snapshot", lambda *a, **k: True):
     rr.concierge._BIZ_STORE["store"] = mn
     assert cg.broker_mode(mn) == ""
-    rr.handle_command("/brokers", rr.default_settings(), mn, mcfg)
-    first = [p for m, p in MN if "Маклеры под ваш запрос" in p.get("text", "")][-1]["text"]
-    assert "без подключения" in first and "WhatsApp" in first and "Переслать" in first          # выбор — словами
-    # «не хочу давать доступ» → режим пересылки, понятная инструкция
+    rr.handle_command("/brokers", rr.default_settings(), mn, mcfg)                      # по умолчанию — подключить Telegram
+    g = MN[-1][1]["text"]
+    assert "Telegram для бизнеса" in g and "предложу другой способ" in g and "без подключения" not in g
+    assert not [p for m, p in MN if "Маклеры под ваш запрос" in p.get("text", "")] and mn.get_kv("brokers_pending")
+    # «не хочу давать доступ» → второй способ: инструкция по пересылке и сразу маклеры
+    MN.clear()
     with mock.patch.object(rr, "fetch_updates", lambda c, st, lp=0: ({"result": [{"update_id": 1, "message": {
             "chat": {"id": 600}, "text": "не хочу давать доступ", "_biz_decline": True}}]}, "tg_offset")):
         rr.process_commands(mcfg, mn)
-    assert mn.get_kv("broker_mode") == "manual" and cg.broker_mode(mn) == "manual"
-    assert "Переслать" in MN[-1][1]["text"] and "ничего от вашего имени не пишу" in MN[-1][1]["text"]
+    assert mn.get_kv("broker_mode") == "manual" and cg.broker_mode(mn) == "manual" and not mn.get_kv("brokers_pending")
+    assert any("ничего от вашего имени не пишу" in p.get("text", "") for m, p in MN)
+    first = [p for m, p in MN if "Маклеры под ваш запрос" in p.get("text", "")][-1]["text"]
+    assert "WhatsApp" in first and "Переслать" in first and "подключить телеграм" not in first
     assert "t.me/rano_smart_bot" in cg.compose_request(mcfg, mn)                                  # маклер может писать в бота
     MN.clear()
     rr.handle_command("/brokers", rr.default_settings(), mn, mcfg)
