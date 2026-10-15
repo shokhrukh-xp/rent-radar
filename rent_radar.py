@@ -3042,7 +3042,7 @@ def handle_business_update(cfg, store, upd) -> bool:
         elif not can_reply:
             send_telegram(cfg, f"⚠️ Почти готово: {a} подключена, но без права отвечать — уточнять у маклеров "
                                "не смогу.\nОткройте Настройки → Telegram для бизнеса → Чат-боты → "
-                               f"@{cfg.get('bot_username') or 'rano_smart_bot'} и включите <b>ответ на сообщения</b>.")
+                               f"@{cfg.get('bot_username') or 'rano_smart_bot'} и включите <b>Управление сообщениями</b> (Manage Messages).")
         elif not (prev.get("enabled") and prev.get("can_reply")):
             req = concierge.compose_request(cfg, store)
             store.set_kv("request_text", req)

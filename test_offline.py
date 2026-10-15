@@ -2678,13 +2678,13 @@ bz.conn.execute("INSERT INTO brokers(bid, source, name, phone, tg, status) VALUE
 bz.conn.commit()
 assert "rano_smart_bot" in cg.compose_request(bcfg, bz)                          # не подключено — ссылка на бота
 guide = cg.biz_guide(bcfg, bz)
-assert "Telegram для бизнеса" in guide and "Чат-боты" in guide and "@rano_smart_bot" in guide and "Новые чаты" in guide
+assert "Telegram для бизнеса" in guide and "Чат-боты" in guide and "rano_smart_bot" in guide and "Новые чаты" in guide
 with mock.patch.object(rr, "tg_call", bz_tg):
     rr.concierge._BIZ_STORE["store"] = bz
     # подключили без права отвечать — подсказываем, что включить
     rr.handle_business_update(bcfg, bz, {"business_connection": {"id": "BC1", "user": {"id": 500}, "user_chat_id": 500,
                                          "is_enabled": True, "rights": {}}})
-    assert "ответ на сообщения" in BZ[-1][1]["text"] and not cg.biz_ready(bz)
+    assert "Управление сообщениями" in BZ[-1][1]["text"] and not cg.biz_ready(bz)
     rr.handle_business_update(bcfg, bz, {"business_connection": {"id": "BC1", "user": {"id": 500}, "user_chat_id": 500,
                                          "is_enabled": True, "rights": {"can_reply": True}}})
     assert cg.biz_ready(bz) and "подключена к вашему Telegram" in BZ[-1][1]["text"]
