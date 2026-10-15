@@ -168,7 +168,7 @@ assert cmd("/photos", s)[0] == "✅ Фото включены" and s["photos"] i
 assert cmd("/pause", s)[0].startswith("⏸") and s["paused"] is True
 assert cmd("/resume", s)[0].startswith("▶️") and s["paused"] is False
 assert "Статус" in cmd("/status", s)[0]
-assert cmd("/qwerty", s)[1] == "M"          # неизвестная команда → меню
+assert cmd("/qwerty", s)[1] is None and "своими словами" in cmd("/qwerty", s)[0]   # кнопок-меню нет
 assert cmd("обычный текст", s) == ("", None)
 
 eff = rr.effective_cfg(cfg, s)
@@ -1102,9 +1102,7 @@ with mock.patch.object(rr, "tg_call", fake2):
     SENT2.clear()
     rr.handle_command("/app", rr.default_settings(), ms2, cfg)
     assert any("remove_keyboard" in pl.get("reply_markup", "") for _, pl in SENT2)
-    SENT2.clear()
-    rr.handle_command("/steps", rr.default_settings(), ms2, cfg)
-    assert any("Анкета" in str(pl.get("text", "")) for _, pl in SENT2)
+    assert "своими словами" in rr.handle_command("/steps", rr.default_settings(), ms2, cfg)[0]   # анкеты кнопками нет
 # кнопка меню «Параметры»: sendData нет → параметры приходят как /start p<код>
 # (код ниже собран encodeStart() из docs/index.html — держать словари синхронными)
 CODE = "p1CBBBDBCEDCBDAkEGDAAcIAAWqDQQZAAAA"
@@ -1880,12 +1878,11 @@ with mock.patch.object(rr, "tg_call", ftg):
     FU.clear()
     assert fu.silent_brokers(cfg, fs, T(3)) == 0
     assert fu.silent_brokers(cfg, fs, T(10)) == 1
-    msg = FU[-1][1]
-    assert "Аброр" in msg["text"] and f"o:rem:{a1}" in msg["reply_markup"]
-    assert fu.silent_brokers(cfg, fs, T(11)) == 0                 # не повторяем
-    FU.clear()
-    cg.handle_offer_cb(f"o:rem:{a1}", cfg, fs, 5)
+    msg = FU[-1][1]                                               # напомнила сама, один раз — без кнопок
+    assert "Аброр" in msg["text"] and "напомнила" in msg["text"] and "reply_markup" not in msg
     assert any("Напоминаю" in pl.get("text", "") and str(pl["chat_id"]) == "4242" for m, pl in FU)
+    assert fu.silent_brokers(cfg, fs, T(11)) == 0                 # не повторяем
+    assert "Уже напоминала" in cg.remind_broker(cfg, fs, a1)
     # просмотр завтра 18:00: утро — сводка, за 2 часа — напоминание, после — «как прошёл?»
     cg.set_viewing(cfg, fs, a2, T(18, d=1).isoformat(), "завтра 18:00")
     cg.enrich_offer(cfg, fs, a2, {"address": "ул. Шота Руставели 12"})
@@ -1912,7 +1909,7 @@ with mock.patch.object(rr, "tg_call", ftg):
     dg = FU[-1][1]["text"]
     assert "Итоги дня" in dg and "написали: 1 сегодня" in dg and "Ждут вашего решения: 1" in dg
     assert "Завтра просмотры" in dg and "11:00" in dg and "Разберите" in dg
-    assert "cmd:/offers" in FU[-1][1]["reply_markup"]
+    assert "ответьте на карточки" in dg and "reply_markup" not in FU[-1][1]
     assert not fu.evening_digest(cfg, fs, None, T(21))             # уже было сегодня
     # пустой день — без сводки
     es = rr.Store(Path("/tmp/test_fu2.db")); 
@@ -2070,7 +2067,7 @@ with mock.patch.object(rr, "SALE_DB_PATH", xdb):
 assert "Ищет Ra'no" in scr["text"] and "Realt24" in scr["text"] and "новых объявлений 40" in scr["text"]
 assert "нужна ипотека" in scr["text"] and "R:check" in json.dumps(scr["kb"])
 v = rr.via_screen(cfg, ys)
-assert "Через маклеров" in v["text"] and '"b"' in json.dumps(v["kb"]) and "10–15 в день" in v["text"]
+assert "Через маклеров" in v["text"] and "напиши маклерам" in v["text"] and "до 15 в день" in v["text"]
 ys.set_kv("fresh_start", True)                                                # после сброса — сначала параметры
 assert "Сначала расскажите" in rr.rano_screen(cfg, ys)["text"]
 with mock.patch.object(rr, "tg_call", xtg):
@@ -2107,11 +2104,11 @@ with mock.patch.object(rr, "tg_call", ztg):
     ZT.clear()
     assert fu.broker_offer(cfg, zs, zsale, noon)                                       # пусто → предлагаем
     o = ZT[-1][1]
-    assert "ничего нет" in o["text"] and "q:show" in o["reply_markup"] and "q:later" in o["reply_markup"]
+    assert "ничего нет" in o["text"] and "напиши маклерам" in o["text"] and "reply_markup" not in o   # словами
     assert not fu.broker_offer(cfg, zs, zsale, noon)                                   # один раз
     ZT.clear()
     t, _ = cg.handle_request_cb("q:show", cfg, zs, rr.default_settings())
-    assert "Готовый запрос маклерам" in ZT[-1][1]["text"] and "q:ok" in ZT[-1][1]["reply_markup"]
+    assert "Готовый запрос маклерам" in ZT[-1][1]["text"] and "напиши маклерам" in ZT[-1][1]["text"]
     assert "ищу дальше сама" in cg.handle_request_cb("q:later", cfg, zs, rr.default_settings())[0]
     # посуточно — сразу маклеры
     ZT.clear()
@@ -2772,3 +2769,14 @@ with mock.patch.object(rr, "tg_call", bz_tg):
 rr.concierge._BIZ_STORE["store"] = None
 bzd.unlink(missing_ok=True)
 print("OK — Telegram для бизнеса: подключение с проверкой прав, только чаты с запросом, вариант в карточку, сама уточняет недостающее")
+
+# ============ клиенту кнопок не шлём ни из одного места: управление словами ============
+ocfg = dict(cfg, telegram_chat_id="500")
+kb_ = json.dumps({"inline_keyboard": [[{"text": "x", "callback_data": "y"}]]})
+assert "reply_markup" not in rr._owner_no_buttons(ocfg, {"chat_id": 500, "text": "t", "reply_markup": kb_})
+assert rr._owner_no_buttons(ocfg, {"chat_id": 777, "text": "t", "reply_markup": kb_})["reply_markup"] == kb_   # маклеру можно
+rm_ = json.dumps({"remove_keyboard": True})
+assert rr._owner_no_buttons(ocfg, {"chat_id": 500, "text": "t", "reply_markup": rm_})["reply_markup"] == rm_
+assert "Кнопок больше нет" in rr.VIEW_HINT and "своими словами" in rr.WELCOME_TEXT + rr.HELP_TEXT
+assert "напиши маклерам" in rr.HELP_TEXT and "пару нажатий" not in rr.WELCOME_TEXT
+print("OK — без кнопок: клиенту клавиатуры не уходят, подсказки — какими словами сказать")

@@ -226,7 +226,7 @@ let got = await drain();
 assert.deepEqual(got.map(u => u.message.text), ["/offers", "/brokers"]);
 sent.length = 0;
 await handleUpdate(env, msg(BTN.more));
-assert.ok(JSON.stringify(sent.at(-1).reply_markup).includes("cmd:/add"));
+assert.ok(!sent.at(-1).reply_markup && /напиши маклерам/.test(texts().at(-1)));
 await handleUpdate(env, msg(BTN.search));
 assert.match(texts().at(-1), /Сейчас ищем|Ищу двумя способами/);
 // «⋯ Ещё» → шортлист: колбэк превращается в команду для Python
@@ -279,25 +279,14 @@ assert.equal((await drain()).at(-1).message.text, "/offers all");
 // «Мимо» → причины сразу; выбор причины уходит Python
 sent.length = 0;
 await handleUpdate(env, { update_id: ++uid, callback_query: { id: "n1", data: "t:n:8", message: { message_id: 6, chat: { id: +OWNER } } } });
-assert.ok(JSON.stringify(sent.at(-1).reply_markup).includes("t:r:8:p"));
+assert.ok(!sent.at(-1).reply_markup);                                          // кнопок клиенту нет
 await handleUpdate(env, { update_id: ++uid, callback_query: { id: "n2", data: "t:r:8:p", message: { message_id: 7, chat: { id: +OWNER } } } });
 assert.equal((await drain()).at(-1).callback_query.data, "t:r:8:p");
-// рассылка по одному: следующий маклер — сразу, статус уходит Python с пометкой _worker_done
+// маклеры — всегда через Python: одно сообщение со ссылками, текст запроса уже вписан, без кнопок
 sent.length = 0;
 await handleUpdate(env, msg(BTN.brokers));
-assert.match(texts().at(-2), /Рассылка/); assert.match(texts().at(-1), /📇 <b>А<\/b>[\s\S]*в очереди ещё 1/);
-await handleUpdate(env, { update_id: ++uid, callback_query: { id: "w1", data: "bw:tel:1", message: { message_id: 8, chat: { id: +OWNER } } } });
-assert.match(texts().at(-1), /📇 <b>Б<\/b>[\s\S]*Написано 1/);
-assert.ok(sent.some(x => x.m === "editMessageReplyMarkup" && x.message_id === 8));
-await handleUpdate(env, { update_id: ++uid, callback_query: { id: "w2", data: "bx:tel:2", message: { message_id: 9, chat: { id: +OWNER } } } });
-assert.match(texts().at(-1), /Всех прошли: написали 1, пропустили 1/);
-got = await drain();
-assert.deepEqual(got.map(u => [u.callback_query.data, u.callback_query._worker_done]), [["bw:tel:1", true], ["bx:tel:2", true]]);
-// запрос поменялся после снимка — к Python, чтобы ссылки не ушли со старым текстом
-{ const row = await env.DB.prepare("SELECT v FROM kv WHERE k=?").bind("iv:" + OWNER).first();
-  const ivx = JSON.parse(row.v); ivx.sentAt = Date.now() + 60e3;
-  await env.DB.prepare("UPDATE kv SET v=? WHERE k=?").bind(JSON.stringify(ivx), "iv:" + OWNER).run(); }
-await handleUpdate(env, msg(BTN.brokers));
+assert.equal((await drain()).at(-1).message.text, "/brokers");
+await handleUpdate(env, msg("/brokers"));
 assert.equal((await drain()).at(-1).message.text, "/brokers");
 
 // ── шортлист, цены рынка, Uybor, текст запроса, справка — тоже сразу из снимка
@@ -360,7 +349,7 @@ assert.match(sent.filter(x => x.m === "answerCallbackQuery").at(-1).text, /нр�
 assert.equal((await drain()).at(-1).callback_query._toast_done, true);
 // две кнопки поиска — экраны сразу из снимка
 await handleUpdate(env, msg(BTN.rano));
-assert.match(texts().at(-1), /Ищет Ra'no/); assert.ok(JSON.stringify(sent.at(-1).reply_markup).includes("R:check"));
+assert.match(texts().at(-1), /Ищет Ra'no/); assert.ok(!sent.at(-1).reply_markup);
 await handleUpdate(env, msg(BTN.via));
 assert.match(texts().at(-1), /Через маклеров/);
 assert.equal((await drain()).length, 0);
@@ -610,3 +599,13 @@ for (const t of ["Как подключить тебя к моему телег�
 }
 assert.ok(!BIZ_ASK.test("хочу 2 комнаты рядом с метро, подключен газ"));
 console.log("OK — Telegram для бизнеса: подключение и сообщения из чатов клиента — в Python, инструкция по запросу словами");
+
+// ── клиенту кнопок не шлём: tg() снимает inline-клавиатуру для чата владельца
+{
+  const before = sent.length;
+  await (await import("../src/index.js")).tg(env, "sendMessage", { chat_id: +OWNER, text: "x",
+    reply_markup: { inline_keyboard: [[{ text: "a", callback_data: "b" }]] } });
+  const last = sent.at(-1);
+  assert.ok(sent.length > before && !last.reply_markup);
+}
+console.log("OK — без кнопок у клиента");

@@ -576,6 +576,11 @@ async function botToken(env) {
   return tokenCache;
 }
 export async function tg(env, method, body) {
+  // клиенту кнопок не шлём: управление — словами (ссылки в тексте остаются)
+  if (body && method !== "editMessageReplyMarkup" && env.OWNER_CHAT && String(body.chat_id) === String(env.OWNER_CHAT)
+      && body.reply_markup?.inline_keyboard?.length) {
+    body = { ...body }; delete body.reply_markup;
+  }
   const r = await fetch(`https://api.telegram.org/bot${await botToken(env)}/${method}`, {
     method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
   return r.json().catch(() => ({ ok: false }));
@@ -782,15 +787,13 @@ export async function showOffers(env, chat, all = false) {
   const waitNote = waiting ? `\n\n⏳ Ещё ${waiting} сообщ. от маклеров разбираю — карточки будут через минуту-две.` : "";
   if (waiting) await wake(env);
   if (!ui.offers_total) {
-    const rows = [];
-    if (ui.shortlist) rows.push([{ text: `📋 Шортлист (${ui.shortlist})`, callback_data: "s:show" }]);
-    rows.push([{ text: ui.written ? "📇 Написать ещё маклерам" : "📇 Разослать запрос маклерам", callback_data: "b" }]);
     const hint = ui.written
-      ? `\nВы написали ${ui.written} маклерам — как ответят, принесу их варианты сюда карточками.\n` +
-        "Если кто-то ответил вам в WhatsApp — перешлите мне, сделаю такую же карточку с разбором цены."
-      : "\nЧтобы они появились, давайте разошлём запрос маклерам — это пара нажатий.";
+      ? `\nВы написали ${ui.written} маклерам — как ответят, принесу их варианты сюда карточками. ` +
+        "Скажите «напиши маклерам» — подберу ещё."
+      : "\nСкажите «напиши маклерам» — подберу маклеров под ваш запрос, текст им уже будет вписан.";
+    const biz = ui.biz ? "" : "\nЧтобы я сама читала ответы маклеров в ваших чатах — напишите «подключить телеграм».";
     await say(env, chat, (waiting ? "Пока тихо — новых карточек нет 🌙" : "Пока тихо — новых вариантов нет 🌙") +
-      (ui.shortlist ? ` В шортлисте — ${ui.shortlist}.` : "") + hint + waitNote, { reply_markup: { inline_keyboard: rows } });
+      (ui.shortlist ? ` В шортлисте — ${ui.shortlist}, скажите «шортлист».` : "") + hint + biz + waitNote);
     return;
   }
   // карточки вариантов — альбомом (карта + фото маклера), их собирает Python
@@ -798,16 +801,8 @@ export async function showOffers(env, chat, all = false) {
 }
 
 export async function startOutreach(env, chat) {
-  const ui = await kvGet(env, "ui", null);
-  const iv = await kvGet(env, ivKey(chat), null);
-  // нет снимка или запрос поменялся после него — ссылки со старым текстом слать нельзя
-  if (!ui || (iv && iv.sentAt && iv.sentAt > (ui.at || 0))) return asCommand(env, chat, "/brokers");
-  // Ra'no подключена к Telegram клиента: подбор и ссылки с вписанным запросом — в Python, без кнопок
-  if (ui.biz) return asCommand(env, chat, "/brokers");
-  if (!ui.brokers || !ui.brokers.length) { await say(env, chat, ui.brokers_empty || "Маклеров под ваш запрос пока не нашла — ищу дальше."); return; }
-  await kvSet(env, "out", { sent: 0, skipped: 0, done: [], at: Date.now() });
-  await say(env, chat, ui.header, { parse_mode: "HTML" });
-  await nextBroker(env, chat);
+  // подбор маклеров и ссылки с вписанным запросом — в Python, одним сообщением, без кнопок
+  return asCommand(env, chat, "/brokers");
 }
 
 async function nextBroker(env, chat) {
@@ -837,8 +832,8 @@ async function startAddMode(env, chat) {
   await kvSet(env, ivKey(chat), iv);
   await say(env, chat, "💬 Маклер написал вам в WhatsApp, а не мне? Не ревную 😄 Перешлите или вставьте сюда " +
     "его сообщение — текст и фото, можно по частям. Сделаю карточку, как для остальных: " +
-    "карта, фото, цена и разбор — всё в одном месте. Потом ответьте на карточку: «в шортлист» или «мимо».",
-    { reply_markup: { inline_keyboard: [[{ text: "✅ Готово", callback_data: "cmd:/done" }]] } });
+    "карта, фото, цена и разбор — всё в одном месте. Когда всё перешлёте — напишите «готово».\n\n" +
+    "А чтобы маклеры отвечали в Telegram и я читала их сама — напишите «подключить телеграм».");
 }
 
 // ───────────────────────────── «будильник» для Python ─────────────────────────────
@@ -879,16 +874,16 @@ async function queueAndWake(env, upd, chat, note) {
 const GREET = {
   ru: "Привет! Я Ra'no 👋 — ИИ-ассистент, которая обожает квартиры в Ташкенте: аренда и покупка.\n\n" +
     "Ищу двумя способами:\n🔎 Сначала сама — каждый день прочёсываю сайты и Telegram-каналы, выгодное приношу сразу.\n" +
-    "📇 Если на сайтах пусто — подключу маклеров: составлю запрос, вы отправите его в пару нажатий.\n" +
+    "📇 Если на сайтах пусто — подберу маклеров: нажмёте на имя, запрос уже вписан, останется «Отправить».\n" +
     "К каждому варианту — честный разбор цены: дешевле рынка или кто-то загнул 😉\n\n" +
     "С чего начнём? Напишите своими словами, что ищете, — например: «купить двушку в центре до $50 000, нужна ипотека».",
   uz: "Salom! Men Ra'no 👋 — Toshkentdagi kvartiralarni juda yaxshi ko'radigan AI-yordamchiman: ijara va sotib olish.\n\n" +
     "🔎 O'zim har kuni saytlar va Telegram-kanallarni ko'rib chiqaman, zo'r variantlarni darhol olib kelaman.\n" +
-    "📇 Saytlarda bo'lmasa — maklerlarni ulayman: so'rov tuzaman, siz uni bir-ikki bosishda yuborasiz.\n" +
+    "📇 Saytlarda bo'lmasa — maklerlarni tanlayman: ismini bosasiz, so'rov tayyor yozilgan, faqat «Yuborish»ni bosasiz.\n" +
     "Har bir variantga — halol narx tahlili 😉\n\n" +
     "Nima qidirayotganingizni yozing — masalan: «markazda 2 xonali, $50 000 gacha, ipoteka kerak».",
   en: "Hi! I'm Ra'no, an AI assistant for finding a home in Tashkent. Tell me in your own words what you're looking for — " +
-    "e.g. \"buy a 2-room flat in the centre up to $50,000, mortgage needed\". Everything else is in the buttons below.",
+    "e.g. \"buy a 2-room flat in the centre up to $50,000, mortgage needed\". No buttons to learn — just write to me.",
 };
 // Профиль бота: «О боте» (до 120 символов) и экран до Start (до 512) — русский по умолчанию, узбекский отдельно
 export const AVATAR_URL = "https://raw.githubusercontent.com/shokhrukh-xp/rent-radar/main/docs/brand/rano_avatar_navy.jpg";
@@ -902,7 +897,7 @@ export const PROFILE = {
     "": "Привет! Я Ra'no 👋 — ИИ-ассистент, которая обожает квартиры в Ташкенте: аренда и покупка.\n\n" +
       "🔎 Сначала ищу сама — каждый день смотрю Uybor, Realt24, Joymee, Realting, Yangiuylar и Telegram-каналы. " +
       "Выгодное приношу сразу, остальное — вечером, без повторов.\n" +
-      "📇 На сайтах пусто — подключу маклеров: запрос готовлю я, вы отправляете в пару нажатий.\n" +
+      "📇 На сайтах пусто — подберу маклеров: нажмёте на имя, запрос уже вписан, останется «Отправить».\n" +
       "📊 К каждому варианту — честный разбор цены: дешевле рынка или кто-то загнул 😉\n\n" +
       "Маклерам: жмите Start и присылайте варианты — передам клиенту сразу 🙌",
     uz: "Salom! Men Ra'no 👋 — Toshkentdagi kvartiralarni juda yaxshi ko'radigan AI-yordamchiman: ijara va sotib olish.\n\n" +
@@ -1156,7 +1151,10 @@ export async function interviewTurn(env, chat, text, card = null) {
   const act = await chatAction(env, chat, intent, res.raw?.items, ui, iv, reply);
   if (act) return act;
   if (intent === "add_offer") return startAddMode(env, chat);
-  if (intent === "show_offers") { await kvSet(env, ivKey(chat), iv); return showOffers(env, chat); }
+  if (intent === "show_offers") {                // «покажи все / ещё» — остальные варианты маклеров
+    await kvSet(env, ivKey(chat), iv);
+    return showOffers(env, chat, /(все|всё|ещё|еще|остальн|hammasi|yana)/i.test(text));
+  }
   if (intent === "brokers") { await kvSet(env, ivKey(chat), iv); return startOutreach(env, chat); }
   if (INTENT_CMD[intent]) {
     await kvSet(env, ivKey(chat), iv);
@@ -1248,10 +1246,10 @@ export async function handleUpdate(env, upd) {
       iv.mode = kind === "view" ? "await_view" : "await_note"; iv.oid = +oid; iv.modeAt = Date.now();
       await kvSet(env, ivKey(chat), iv);
       await tg(env, "answerCallbackQuery", { callback_query_id: cb.id });
-      await say(env, chat, kind === "view"
+      await say(env, chat, (kind === "view"
         ? `📅 Когда идём смотреть вариант #${oid}? Напишите день и время — например «завтра 18:00», «сб 11:30» или «12 октября в 15».`
-        : `📝 Что запомнить про вариант #${oid}? Что понравилось, что смутило, о чём договорились — пишите, всё сохраню.`,
-        { reply_markup: { inline_keyboard: [[{ text: "Отмена", callback_data: "o:cancel:0" }]] } });
+        : `📝 Что запомнить про вариант #${oid}? Что понравилось, что смутило, о чём договорились — пишите, всё сохраню.`)
+        + " Передумали — напишите «отмена».");
       return "await";
     }
     if (data === "o:cancel:0") {
@@ -1413,7 +1411,8 @@ export async function handleUpdate(env, upd) {
   if (text === BTN.offers || /^\/(offers|varianty)(@\w+)?$/i.test(text)) return (await showOffers(env, chat), "ui");
   if (text === BTN.brokers || /^\/(brokers|makler|outreach)(@\w+)?$/i.test(text)) return (await startOutreach(env, chat), "ui");
   if (text === BTN.more) {
-    await say(env, chat, "Что ещё умею:", { reply_markup: { inline_keyboard: MORE_MENU_ROWS() } });
+    await say(env, chat, "Кнопок больше нет — просто скажите, что нужно: «мой поиск», «шортлист», «напиши маклерам», " +
+      "«цены рынка», «маклер ответил в WhatsApp», «подключить телеграм». Полный список — /help.");
     return "more";
   }
 
@@ -1428,6 +1427,11 @@ export async function handleUpdate(env, upd) {
   const forwarded = !!(msg.forward_origin || msg.forward_from || msg.forward_sender_name || msg.forward_from_chat);
   const ivNow = await kvGet(env, ivKey(chat), null);
   const adding = ivNow && ivNow.mode === "add" && Date.now() - (ivNow.addAt || 0) < 15 * 60e3;
+  if (adding && /^(готово|всё|все|done|tayyor|bo['ʻ’]?ldi)[.!]?$/i.test(text)) {   // кнопки «Готово» больше нет
+    ivNow.mode = ""; await kvSet(env, ivKey(chat), ivNow);
+    await say(env, chat, "✅ Готово! Карточки соберу через минуту. Захотите что-то поменять в поиске — просто напишите.");
+    return "add_mode";
+  }
   if (!text.startsWith("/") && (forwarded || msg.photo || msg.document || adding)) {
     if (adding) { ivNow.addAt = Date.now(); await kvSet(env, ivKey(chat), ivNow); }
     upd.message = { ...msg, _owner_offer: true };
@@ -1501,8 +1505,8 @@ export async function handleUpdate(env, upd) {
     }
     if (!w) {
       iv.modeAt = Date.now(); await kvSet(env, ivKey(chat), iv);
-      await say(env, chat, "Не поняла дату 🙈 Напишите, например: «завтра 18:00», «сб 11:30» или «12 октября в 15».",
-        { reply_markup: { inline_keyboard: [[{ text: "Отмена", callback_data: "o:cancel:0" }]] } });
+      await say(env, chat, "Не поняла дату 🙈 Напишите, например: «завтра 18:00», «сб 11:30» или «12 октября в 15». " +
+        "Передумали — напишите «отмена».");
       return "await";
     }
     iv.mode = ""; await kvSet(env, ivKey(chat), iv);

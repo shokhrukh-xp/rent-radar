@@ -30,12 +30,17 @@ def _day_start_utc(now):
     return loc.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc).isoformat()
 
 
-def _send(cfg, text, rows=None):
+def _send(cfg, text, rows=None, ref=None):
+    """Клиенту — без кнопок (rows не используются). ref — о каком варианте сообщение: тогда ответ на него
+    словами («понравилась», «перенеси») воркер поймёт как про этот вариант."""
     rr = _rr()
     p = {"chat_id": cfg["telegram_chat_id"], "text": text, "parse_mode": "HTML"}
-    if rows:
-        p["reply_markup"] = json.dumps({"inline_keyboard": rows}, ensure_ascii=False)
-    return rr.tg_call(cfg, "sendMessage", p) is not None
+    r = rr.tg_call(cfg, "sendMessage", p)
+    if r is not None and ref:
+        mid = ((r or {}).get("result") or {}).get("message_id")
+        if mid:
+            rr.remember_card(cfg, [mid], ref, text)
+    return r is not None
 
 
 def _short(o):
@@ -58,11 +63,15 @@ def silent_brokers(cfg, store, now):
         if n >= MAX_PROMPTS:
             break
         who = _rr().escape_html(o.get("broker_name") or "Маклер")
-        if _send(cfg, f"⏰ <b>{who}</b> не ответил(а) за сутки по варианту #{o['oid']} ({_short(o)}).\n"
-                      "Напомнить? Отправлю одно короткое вежливое сообщение — надоедать не буду 🙂",
-                 [[{"text": "🔔 Напомнить", "callback_data": f"o:rem:{o['oid']}"},
-                   {"text": "Не надо", "callback_data": f"o:quiet:{o['oid']}"}],
-                  [{"text": "📂 Карточка", "callback_data": f"s:o:{o['oid']}"}]]):
+        head = f"⏰ <b>{who}</b> молчит сутки по варианту #{o['oid']} ({_short(o)})."
+        res = cg.remind_broker(cfg, store, o["oid"])          # одно вежливое напоминание — сама, без кнопок
+        if "напомнила" in res:
+            text = head + " Тихонько напомнила — один раз, надоедать не буду 🙂"
+        elif "в чате" in res:
+            text = ""                                          # текст напоминания уже прислала — отправить самим
+        else:
+            text = head + " Написать ему ещё раз Telegram мне не даёт — если нужно, напомните сами."
+        if not text or _send(cfg, text, ref=f"O:{o['oid']}"):
             cg._set_extra(store, o["oid"], remind_prompt=now.isoformat())
             n += 1
     return n
@@ -102,18 +111,15 @@ def viewing_reminders(cfg, store, now):
         if not v.get("notime") and not v.get("pre") and at - timedelta(hours=2) <= now < at:
             mins = max(5, int((at - now).total_seconds() // 60))
             if _send(cfg, f"⏰ Через {mins // 60} ч {mins % 60:02d} мин просмотр — не опаздываем! 😉\n\n" + _viewing_line(at, v, o),
-                     [[{"text": "📂 Карточка", "callback_data": f"s:o:{oid}"}]]):
+                     ref=f"O:{oid}"):
                 cg._set_extra(store, oid, viewing={**v, "pre": True})
                 n += 1
             continue
         after = at + (timedelta(hours=8) if v.get("notime") else timedelta(hours=1))
         if not v.get("after") and now >= after and 9 <= loc.hour < 22:
-            if _send(cfg, f"🏠 Ну что, как вам вариант #{oid} ({_short(o)})? Рассказывайте!",
-                     [[{"text": "👍 Нравится", "callback_data": f"o:seen:{oid}:g"},
-                       {"text": "🤔 Думаю", "callback_data": f"o:seen:{oid}:m"},
-                       {"text": "👎 Не то", "callback_data": f"o:seen:{oid}:n"}],
-                      [{"text": "📅 Не состоялся — перенести", "callback_data": f"o:view:{oid}"}],
-                      [{"text": "📝 Заметка", "callback_data": f"o:note:{oid}"}]]):
+            if _send(cfg, f"🏠 Ну что, как вам вариант #{oid} ({_short(o)})? Ответьте на это сообщение своими словами: "
+                          "понравилась, думаете или не то. Не состоялся — напишите, на когда перенести.",
+                     ref=f"O:{oid}"):
                 cg._set_extra(store, oid, viewing={**v, "after": True})
                 n += 1
     return n
@@ -195,11 +201,11 @@ def digest_text(d, now):
     tip = ""                                   # один следующий шаг — самый полезный
     if d["pending"]:
         tip = (f"Разберите {d['pending']} {cg.plural(d['pending'], 'вариант', 'варианта', 'вариантов')} — "
-               "пара нажатий: 👍 / 🕐 / 👎, а дальше я сама.")
+               "ответьте на карточки своими словами: «нравится», «потом» или «не то», а дальше я сама.")
     elif not d["contacted_total"]:
-        tip = "Давайте начнём с рассылки маклерам — без неё им просто не о чем нам писать 🙂"
+        tip = "Давайте начнём с маклеров — скажите «напиши маклерам», пришлю 5 со вписанным запросом 🙂"
     elif not d["contacted_today"] and d["contacted_total"] < 60:
-        tip = "Завтра можно написать ещё 10 маклерам — по 10–15 в день, и номер в безопасности."
+        tip = "Завтра можно написать ещё маклерам — скажите «напиши маклерам» (до 15 в день, и номер в безопасности)."
     if tip:
         lines += ["", "👉 " + tip]
     rows = []

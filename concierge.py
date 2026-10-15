@@ -229,7 +229,7 @@ def handle_anketa_cb(data, cfg, store, message_id=None):
 
     if rest == "cancel":
         store.set_kv("anketa", {})
-        rr.send_telegram(cfg, "Анкета отменена. Начать заново — /anketa")
+        rr.send_telegram(cfg, "Хорошо, остановилась. Начать заново — напишите, что ищете, или /new")
         return "Отменено", True
     if rest == "back":
         ans = a.get("ans", {})
@@ -573,8 +573,8 @@ def request_message(cfg, store):
         "chat_id": cfg["telegram_chat_id"], "parse_mode": "HTML",
         "text": "📝 <b>Готовый запрос маклерам</b>\n\n"
                 f"<code>{rr.escape_html(text)}</code>\n\n"
-                "Гляньте, всё ли так 👀 Можно утвердить или переписать своими словами.",
-        "reply_markup": json.dumps(kb, ensure_ascii=False)})
+                "Гляньте, всё ли так 👀 Поправить — просто скажите, что изменить. Всё верно — скажите "
+                "«напиши маклерам», подберу маклеров с этим текстом."})
 
 
 def offer_brokers(cfg, store, why):
@@ -585,11 +585,9 @@ def offer_brokers(cfg, store, why):
     store.set_kv("search_start", st)
     rr.tg_call(cfg, "sendMessage", {
         "chat_id": cfg["telegram_chat_id"],
-        "text": why + "\n\nДавайте подключим маклеров? Я уже подготовила текст запроса — "
-                      "гляньте, и в пару нажатий разошлём. А на сайтах я продолжу искать сама 👀",
-        "reply_markup": json.dumps({"inline_keyboard": [
-            [{"text": "📇 Да, показать текст запроса", "callback_data": "q:show"}],
-            [{"text": "Пока не надо, ищи сама", "callback_data": "q:later"}]]}, ensure_ascii=False)})
+        "text": why + "\n\nДавайте подключим маклеров? Скажите «напиши маклерам» — пришлю 5 маклеров "
+                      "под ваш запрос: нажмёте на имя, текст уже вписан, останется «Отправить». "
+                      "А на сайтах я продолжу искать сама 👀"})
 
 
 def finish_anketa(cfg, store):
@@ -1048,15 +1046,16 @@ def show_offers(cfg, store, batch=None):
             rows.append([{"text": f"📋 Шортлист ({sl})", "callback_data": "s:show"}])
         if not written:                      # ещё никому не писали — главное действие одно
             rows.append([{"text": "📇 Разослать запрос маклерам", "callback_data": "b"}])
-            hint = "\nЧтобы они появились, давайте разошлём запрос маклерам — это пара нажатий."
+            hint = "\nСкажите «напиши маклерам» — подберу маклеров под ваш запрос, текст им уже будет вписан."
         else:                                # писали — ждём; подсказка про WhatsApp только здесь
             rows.append([{"text": "📇 Написать ещё маклерам", "callback_data": "b"}])
-            hint = (f"\nВы написали {written} маклерам — как ответят, принесу их варианты сюда карточками.\n"
-                    "Если кто-то ответил вам в WhatsApp — перешлите мне, "
+            hint = (f"\nВы написали {written} маклерам — как ответят, принесу их варианты сюда карточками. "
+                    "Скажите «напиши маклерам» — подберу ещё. Кто-то ответил вам в WhatsApp — перешлите мне, "
                     "сделаю такую же карточку с разбором цены.")
         rr.tg_call(cfg, "sendMessage", {
             "chat_id": cfg["telegram_chat_id"],
-            "text": ("Пока тихо — новых вариантов нет 🌙" + (f" В шортлисте — {sl}." if sl else "") + hint),
+            "text": ("Пока тихо — новых вариантов нет 🌙" + (f" В шортлисте — {sl}, скажите «шортлист»." if sl else "")
+                     + hint),
             "reply_markup": json.dumps({"inline_keyboard": rows}, ensure_ascii=False)})
         return 0
     for i, o in enumerate(pool[:batch]):
@@ -1079,7 +1078,7 @@ def _more_teaser(cfg, remaining):
     rr.tg_call(cfg, "sendMessage", {
         "chat_id": cfg["telegram_chat_id"],
         "text": (f"✅ Это самые близкие к вашим параметрам.\n\n"
-                 f"Маклеры прислали ещё <b>{remaining} {word}</b> — показываю?"),
+                 f"Маклеры прислали ещё <b>{remaining} {word}</b> — скажите «покажи все», пришлю."),
         "parse_mode": "HTML",
         "reply_markup": json.dumps(kb, ensure_ascii=False)})
 
@@ -1299,7 +1298,7 @@ def shortlist_items(store, cfg, sort="n"):
                      "stage": st, "note": price_note(o, idx)})
     title = (f"📋 <b>Шортлист</b> — {len(rows)} {plural(len(rows), 'вариант', 'варианта', 'вариантов')} "
              f"({SORTS.get(sort, SORTS['n'])[0]})\n"
-             f"<i>Нажмите номер — открою карточку: уточнить, назначить просмотр, заметка.</i>\n"
+             f"<i>Назовите номер — открою карточку: уточнить, назначить просмотр, заметка.</i>\n"
              if rows else "")
     return title, rows, sum(1 for o in items if askable(o))
 

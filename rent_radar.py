@@ -1144,8 +1144,26 @@ def tg_call_files(cfg, method: str, data: dict, files: dict, timeout: int = 90):
         return None
 
 
+def _owner_no_buttons(cfg, payload):
+    """Клиенту кнопок не шлём — управление словами. Ссылки в тексте остаются; убрать кнопки (пустая
+    клавиатура) и remove_keyboard — можно."""
+    rm = payload.get("reply_markup")
+    if not rm or str(payload.get("chat_id")) != str(cfg.get("telegram_chat_id")):
+        return payload
+    try:
+        kb = json.loads(rm) if isinstance(rm, str) else rm
+    except ValueError:
+        return payload
+    if isinstance(kb, dict) and kb.get("inline_keyboard"):
+        payload = dict(payload)
+        payload.pop("reply_markup", None)
+    return payload
+
+
 def tg_call(cfg, method: str, payload: dict, timeout: int = 20, quiet: bool = False):
     api = f'https://api.telegram.org/bot{cfg["telegram_bot_token"]}/{method}'
+    if method != "editMessageReplyMarkup":
+        payload = _owner_no_buttons(cfg, payload)
     try:
         r = requests.post(api, data=payload, timeout=timeout)
         if r.status_code != 200:
@@ -1225,10 +1243,10 @@ WELCOME_TEXT = (
     "Привет! Я <b>Ra'no</b> 👋 — ИИ-ассистент, которая обожает квартиры в Ташкенте: аренда и покупка.\n\n"
     "Ищу двумя способами:\n"
     "🔎 Сначала сама — каждый день прочёсываю сайты и Telegram-каналы, выгодное приношу сразу.\n"
-    "📇 Если на сайтах пусто — подключу маклеров: составлю запрос, вы отправите его в пару нажатий.\n"
+    "📇 Если на сайтах пусто — подберу маклеров: нажмёте на имя, запрос уже вписан, останется «Отправить».\n"
     "К каждому варианту — честный разбор цены: дешевле рынка или кто-то загнул 😉\n\n"
     "С чего начнём? Напишите своими словами, что ищете, — например: «купить двушку в центре до $50 000, "
-    "нужна ипотека» 👇")
+    "нужна ипотека».")
 
 HELP_TEXT = """🏠 <b>Ra'no</b> — ваш ИИ-ассистент по поиску жилья.
 
@@ -1239,6 +1257,8 @@ HELP_TEXT = """🏠 <b>Ra'no</b> — ваш ИИ-ассистент по пои�
 
 Каждый вариант приходит альбомом: первым — карта, где квартира, дальше фото, под ними — разбор цены.
 Могу ещё: разобрать ссылку на объявление, сделать карточку из пересланного сообщения маклера, написать маклерам, показать цены рынка. Напоминаю сама — о просмотрах и если маклер молчит.
+
+Маклерам: скажите «напиши маклерам» — пришлю 5 маклеров под ваш запрос. Нажмёте на имя — откроется чат с ним, текст уже вписан, останется «Отправить».
 
 Хотите, чтобы маклеры отвечали прямо вам в Telegram, а я читала их ответы и сама уточняла детали? Напишите «подключить телеграм» — пришлю инструкцию на минуту."""
 
@@ -1384,7 +1404,13 @@ VIEWS = {
 }
 
 
+VIEW_HINT = ("Кнопок больше нет — просто напишите, что поменять, например: «бюджет до 700», "
+             "«только Мирабад и Юнусабад», «2–3 комнаты», «пауза». Что я умею — /help.")
+
+
 def render_view(cfg, settings, view: str, message_id=None) -> bool:
+    """Старые экраны с кнопками больше не показываем: подсказываем, как сказать словами."""
+    return send_telegram(cfg, VIEW_HINT)
     text_fn, kb_fn = VIEWS.get(view, VIEWS["M"])
     payload = {
         "chat_id": cfg["telegram_chat_id"],
@@ -1500,12 +1526,10 @@ def handle_command(text: str, settings: dict, store, cfg: dict):
     if cmd in ("/anketa", "/start_search", "/profile"):
         concierge.send_app_button(
             cfg, store,
-            "📋 Опишите своими словами, что ищете, — я уточню остальное.\n"
-            "Если хочется по старинке, пошагово кнопками — /steps")
+            "📋 Опишите своими словами, что ищете, — я уточню остальное.")
         return "", None
     if cmd == "/steps":
-        concierge.start_anketa(cfg, store)
-        return "", None
+        return "📋 Пошаговой анкеты с кнопками больше нет — опишите своими словами, что ищете, я уточню остальное.", None
     if cmd in ("/shortlist", "/short"):
         concierge.show_shortlist(cfg, store)
         return "", None
@@ -1517,14 +1541,10 @@ def handle_command(text: str, settings: dict, store, cfg: dict):
     if cmd in ("/request", "/text"):
         t = store.get_kv("request_text")
         if not t:
-            return "Текст запроса ещё не готов — пройдите /anketa", None
+            return "Текст запроса ещё не готов — расскажите, что ищем, и я его соберу ✍️", None
         return f"📝 <b>Текущий запрос маклерам</b>\n\n<code>{escape_html(t)}</code>", None
     if cmd in ("/brokers", "/makler", "/outreach"):
-        if concierge.biz_ready(store):              # Ra'no в Telegram клиента — ссылки с вписанным текстом
-            t = send_broker_batch(cfg, store, settings)
-            return t, None
-        send_broker_cards(cfg, store, settings)
-        return "", None
+        return send_broker_batch(cfg, store, settings), None   # ссылки с вписанным текстом, без кнопок
     if cmd in ("/find", "/top", "/search"):
         run_search(cfg, store, settings)
         return "", None
@@ -1566,7 +1586,8 @@ def handle_command(text: str, settings: dict, store, cfg: dict):
                         or any(v in p for v in vs)), None)
             (chosen if hit else unknown).append(hit or part.strip())
         if not chosen:
-            return "Не узнал: " + ", ".join(unknown) + ". Выберите кнопками:", "D"
+            return ("Не узнал: " + ", ".join(unknown) + ". Напишите районы через запятую, например "
+                    "«Мирабад, Юнусабад».", None)
         settings["districts"] = sorted(set(chosen))
         reply = "✅ Районы: " + ", ".join(settings["districts"])
         if unknown:
@@ -1590,7 +1611,7 @@ def handle_command(text: str, settings: dict, store, cfg: dict):
         return "▶️ Уведомления снова работают", None
 
     if t.startswith("/"):
-        return "Не знаю такую команду.", "M"
+        return "Не знаю такую команду — пишите своими словами, я пойму. Что умею — /help.", None
     return "", None
 
 
@@ -2124,7 +2145,7 @@ OUTREACH_DAY_MAX = 15       # и не больше в день: бережём �
 
 
 def send_broker_batch(cfg, store, settings, n=OUTREACH_BATCH) -> str:
-    """Ra'no подключена к Telegram клиента: подбирает маклеров и присылает одним сообщением ссылки —
+    """Подбирает маклеров и присылает одним сообщением ссылки —
     нажали на имя, открылся чат с маклером, запрос уже вписан, осталось «Отправить». Что ушло — Ra'no видит
     сама (handle_business_update), дальше ведёт переписку. Кнопок нет."""
     text = store.get_kv("request_text") or concierge.compose_request(cfg, store)
@@ -2142,6 +2163,7 @@ def send_broker_batch(cfg, store, settings, n=OUTREACH_BATCH) -> str:
         return outreach_empty_text(store, deal)
     pick = pool[:min(n, room)]
     want = request_districts(store)
+    biz = concierge.biz_ready(store)
     lines = [f"📇 <b>Маклеры под ваш запрос</b> — {len(pick)} из {len(pool)}",
              "Нажмите на имя — откроется чат с маклером, запрос уже вписан. Осталось нажать «Отправить».", ""]
     for i, b in enumerate(pick, 1):
@@ -2157,12 +2179,20 @@ def send_broker_batch(cfg, store, settings, n=OUTREACH_BATCH) -> str:
             from urllib.parse import quote
             link = f"https://t.me/+{digits}?text={quote(text)}"
             bits.append("по номеру — если чат не откроется, значит, номер скрыт")
+            if not biz:                               # без подключения Telegram ответы всё равно приходят вам
+                bits.append("WA")
         name = escape_html((b.get("name") or "Маклер").strip()[:40])
-        lines.append(f'{i}. <a href="{link}">{name}</a>' + (" — " + escape_html(" · ".join(bits)) if bits else ""))
+        wa = ""
+        if "WA" in bits:
+            bits.remove("WA")
+            wa = f' · <a href="{wa_link(b["phone"], text)}">WhatsApp</a>'
+        lines.append(f'{i}. <a href="{link}">{name}</a>' + (" — " + escape_html(" · ".join(bits)) if bits else "") + wa)
         store.broker_status(b["bid"], "offered")       # показан — второй раз не предложим
     left = len(pool) - len(pick)
-    lines += ["", "Как отправите — я увижу сама и буду следить за ответами: соберу карточки и уточню детали."
-              + (f" Ещё {left} — напишите «ещё маклеров»." if left and room - len(pick) > 0 else "")]
+    more = f" Ещё {left} — напишите «ещё маклеров»." if left and room - len(pick) > 0 else ""
+    lines += ["", ("Как отправите — я увижу сама и буду следить за ответами: соберу карточки и уточню детали." if biz else
+                   "Маклеры ответят вам — перешлите их сообщения мне, сделаю карточки. А чтобы я читала ответы сама, "
+                   "напишите «подключить телеграм».") + more]
     day["n"] += len(pick)
     store.set_kv("outreach_day", day)
     msg = "\n".join(lines)
@@ -2509,7 +2539,7 @@ def handle_rent_link(cfg, store, sst, l, note=""):
 def send_similar_rent(cfg, store, sst, l) -> int:
     found = sale_sources.similar_rent(store, sst, l)
     if not found:
-        send_telegram(cfg, "🔎 Похожей аренды за последний месяц не нашла. Нажмите «🎯 Искать такие» — буду ловить новые.")
+        send_telegram(cfg, "🔎 Похожей аренды за последний месяц не нашла. Ответьте на карточку «ищи такие» — буду ловить новые.")
         return 0
     n, items = 0, found[:6]
     for i, o in enumerate(items, 1):                 # каждая — отдельной карточкой со своими фото
@@ -2536,7 +2566,7 @@ def send_similar_rent(cfg, store, sst, l) -> int:
 def send_similar(cfg, sst, l) -> int:
     found = sale_sources.similar(sst, l)
     if not found:
-        send_telegram(cfg, "🔎 Похожих за последние полтора месяца не нашла. Нажмите «🎯 Искать такие» — "
+        send_telegram(cfg, "🔎 Похожих за последние полтора месяца не нашла. Ответьте на карточку «ищи такие» — "
                            "буду ловить новые и пришлю, как только появятся.")
         return 0
     for o in found:                       # чтобы 📷/👍 по номеру работали и для объявлений из среза Uybor
@@ -2641,7 +2671,8 @@ def rano_screen(cfg, store) -> dict:
              f"Сегодня: новых объявлений {st.get('seen', 0)}, подошло {st.get('fit', 0)}",
              f"Прислала сразу: {st.get('instant', 0)} · в подборке ждут: {pend}",
              f"Всего прислала: {sent_total}", "",
-             "Самые выгодные (ниже рынка, снижена цена) несу сразу. Остальные — в 19:30: лучшие, каждая своей карточкой с фото ✨"]
+             "Самые выгодные (ниже рынка, снижена цена) несу сразу. Остальные — в 19:30: лучшие, каждая своей карточкой с фото ✨",
+             "", "Можно сказать: «покажи подборку», «проверь сайты сейчас», «цены рынка», «шортлист», «поменяй поиск»."]
     rows = []
     if pend:
         rows.append([{"text": f"📬 Показать подборку сейчас ({pend})", "callback_data": "R:pick"}])
@@ -2665,7 +2696,10 @@ def via_screen(cfg, store) -> dict:
              f"🏠 Ждут вашего решения: {pool} · 📋 в шортлисте: {sl}"]
     if waiting:
         lines.append(f"⏳ Ждём ответа на уточнение: {waiting}")
-    lines += ["", "Пишите маклерам понемногу — 10–15 в день, и ваш номер не попадёт в спам 😉"]
+    lines += ["", "Скажите «напиши маклерам» — пришлю 5 маклеров со вписанным запросом (до 15 в день, чтобы Telegram "
+              "не счёл это спамом). Маклер ответил в WhatsApp — перешлите мне, сделаю карточку."]
+    if not concierge.biz_ready(store):
+        lines.append("Чтобы я сама читала ответы маклеров в ваших чатах — напишите «подключить телеграм».")
     rows = []
     if pool:
         rows.append([{"text": f"🏠 Варианты ({pool})", "callback_data": "cmd:/offers"}])
@@ -2790,7 +2824,7 @@ def run_search(cfg, store, settings, limit=5, days=7) -> str:
 
     if not ok:
         send_telegram(cfg, f"🔍 За последние {days} дн. подходящих вариантов нет.\n"
-                           f"Просмотрено {len(pool)}. Попробуйте ослабить фильтры в /menu.")
+                           f"Просмотрено {len(pool)}. Можно ослабить условия — напишите, например, «бюджет до 800» или «любой район».")
         return ""
 
     head = [f"🔎 <b>Лучшее сейчас</b> — {min(limit, len(ok))} из {len(ok)} подходящих "
@@ -3108,7 +3142,9 @@ def handle_business_update(cfg, store, upd) -> bool:
             send_telegram(cfg, f"✅ <b>{a} подключена к вашему Telegram.</b>\n\n"
                                "Как это работает: вы отправляете маклеру запрос — я вижу его ответ, собираю карточку "
                                "с картой и сама уточняю фото, адрес и цену. Другие ваши чаты не читаю.\n\n"
-                               "Ваш запрос маклерам (нажмите, чтобы скопировать):\n"
+                               "Скажите «напиши маклерам» — пришлю 5 маклеров под ваш запрос. Нажмёте на имя — "
+                               "откроется чат, текст уже вписан, останется «Отправить». Дальше я сама.\n\n"
+                               "Вот что они получат:\n"
                                f"<code>{escape_html(req)}</code>")
         return True
     m = upd.get("business_message") or upd.get("edited_business_message")
@@ -3447,9 +3483,7 @@ def process_commands(cfg: dict, store, long_poll: int = 0) -> dict:
             store.set_kv("awaiting_text", False)
             push_snapshot(cfg, store, settings, force=True)
             tg_call(cfg, "sendMessage", {"chat_id": cfg["telegram_chat_id"],
-                                         "text": "✅ Текст запроса сохранён.",
-                                         "reply_markup": json.dumps({"inline_keyboard": [[
-                                             {"text": "📇 Разослать маклерам", "callback_data": "b"}]]}, ensure_ascii=False)})
+                                         "text": "✅ Текст запроса сохранён. Скажите «напиши маклерам» — подберу маклеров с этим текстом."})
             changed = True
             continue
         if not text:
