@@ -2754,6 +2754,16 @@ with mock.patch.object(rr, "tg_call", bz_tg):
     stop = rr.handle_command("/brokers", rr.default_settings(), bz, bcfg)[0]
     assert "на сегодня хватит" in stop and bz.conn.execute(
         "SELECT COUNT(*) FROM brokers WHERE status='offered'").fetchone()[0] == 15
+    # из аккаунта клиента — без рода: клиент может быть и мужчиной, и женщиной
+    FEM = re.compile(r"\b(?:я\s+)?(?:передала|нашла|посмотрела|отправила|спросила|уточнила|видела|поняла|"
+                     r"записала|напомнила|получила|готова|рада|сама|ассистент(?:ка)?|помощница)\b", re.I)
+    o_ = {"rooms": 2, "district": "Мирабад", "price_usd": 0, "floor": None, "area": None, "photos": [], "extra": {}}
+    for t in [cg.biz_followup_text(o_, "buy"), cg.biz_followup_text(o_, "rent"),
+              *(cg._biz_voice(cg.decline_text(bcfg, c), bcfg) for c, *_ in cg.DECLINE_REASONS),
+              cg._biz_voice(cg.remind_text(dict(o_, oid=1), bcfg), bcfg),
+              cg._biz_voice(cg.details_question(dict(o_, oid=1, status="new"), bcfg, "buy"), bcfg),
+              cg.compose_request(bcfg, bz).split("Мне помогает")[0]]:
+        assert not FEM.search(t), t
     # отключили — больше не пишем маклерам из аккаунта клиента
     rr.handle_business_update(bcfg, bz, {"business_connection": {"id": "BC1", "user": {"id": 500}, "user_chat_id": 500,
                                          "is_enabled": False, "rights": {"can_reply": True}}})
