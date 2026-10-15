@@ -581,7 +581,19 @@ console.log("OK — ориентир клиента (near) и карта цен:
   got = await drain();
   assert.ok(got.at(-1).callback_query.data.startsWith("L:a:") || got.at(-1).callback_query.data.startsWith("o:ask:"));
   geminiQueue.push({ reply: "ок", ready: false, set: [], intent: "card", card_act: "like" });
-  await handleUpdate(env, msg("в шортлист"));                                      // непонятно какую — спросит
-  assert.match(texts().at(-1), /Ответьте на её карточку/);
+  await handleUpdate(env, msg("эта норм"));                                        // две свежие — переспросит по-человечески
+  assert.match(texts().at(-1), /Про какую квартиру\?[\s\S]*Мирабад[\s\S]*Чиланзар/);
+  geminiQueue.push({ reply: "ок", ready: false, set: [], intent: "card", card_act: "like,ask", note_text: "документы" });
+  await handleUpdate(env, msg("нравится, узнай про документы", OWNER, { reply_to_message: { message_id: 503 } }));
+  got = await drain();                                                              // два действия одним сообщением
+  assert.deepEqual(got.slice(-2).map(u => u.callback_query.data), ["L:s:sale:joymee:9", "L:a:sale:joymee:9"]);
+  assert.match(texts().at(-1), /шортлист[\s\S]*Уточняю по .* \(документы\)/);
+  // одна свежая карточка — понятно и без ответа на сообщение
+  await env.DB.prepare("UPDATE kv SET v=? WHERE k='cards_recent'").bind(JSON.stringify([
+    { ids: [700, 701], ref: "L:sale:uybor:5", line: "1-комн · Юнусабад · $41 000", at: Date.now() }])).run();
+  geminiQueue.push({ reply: "ок", ready: false, set: [], intent: "card", card_act: "skip", reason: "c" });
+  await handleUpdate(env, msg("не, ремонт убитый"));
+  got = await drain();
+  assert.equal(got.at(-1).callback_query.data, "L:n:sale:uybor:5");
   sent.length = 0; }
-console.log("OK — карточки без кнопок: ответом на карточку — в шортлист, мимо (с причиной), просмотр, заметка, уточнить");
+console.log("OK — квартиры словами: ответом, по номеру/описанию или сразу после карточки; несколько действий разом; переспрашивает, если неясно");

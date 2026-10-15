@@ -914,7 +914,7 @@ with mock.patch.object(rr, "tg_call", fake_tg):
     assert cg.show_shortlist(cfg, cs) == 2                               # шортлист — карточками, без списка
     sl_cards = [pl for m, pl in SENT if "Шортлист</b> · " in tx_(pl)]
     assert len(sl_cards) == 2 and "1 из 2" in tx_(sl_cards[0])
-    assert "уточни у всех" in tx_(sl_cards[0])   # подсказка словами
+    assert "своими словами" in tx_(sl_cards[0])   # подсказка — без заученных фраз
     SENT.clear()
     toast, _ = cg.handle_offer_cb(f"o:ask:{oid1}", cfg, cs, 1)
     assert "Отправлено: 1" in toast
@@ -1762,7 +1762,7 @@ with mock.patch.object(rr, "tg_call", lambda c, m, pl, **k: (W.append((m, pl)), 
     cg.show_offers(cfg, ws)
     assert "написали 1 маклерам" in W[-1][1]["text"] and "перешлите" in W[-1][1]["text"]
 for t in (rr.HELP_TEXT,):
-    assert "в шортлист" in t and "ответьте на его карточку" in t and "/new" not in t and "/brokers" not in t
+    assert "своими словами" in t and "заучивать не нужно" in t and "/new" not in t and "/brokers" not in t
     assert "Внизу три кнопки" not in t
 wdb.unlink(missing_ok=True)
 print("OK — без команд и кнопок: справка словами, понятные подсказки, маклер не получает приветствие дважды")

@@ -1017,7 +1017,7 @@ def notify_offer(cfg, store, oid, pos=None, total=None):
         text = offer_card(store, cfg, oo, pos=pos, total=total)
     if not o["photos"]:
         text += "\n📷 Маклер не прислал фото — без них не сравнить, попрошу при уточнении"
-    text += "\n<i>Ответьте на карточку: «в шортлист», «позже» или «мимо» (можно с причиной: «мимо, дорого»)</i>"
+    text += "\n<i>Как вам? Ответьте на сообщение своими словами</i>"
     rr.send_card(cfg, offer_media(cfg, o), text, ref=f"O:{oid}")
 
 
@@ -1343,7 +1343,7 @@ def offer_caption(store, cfg, o, head=""):
         if rr.tg_len(text) <= rr.CAPTION_MAX:
             break
     if not o.get("photos") and not (o.get("extra") or {}).get("site_key"):
-        text += "\n📷 Фото нет — напишите «уточни», попрошу у маклера"
+        text += "\n📷 Фото нет — скажите, и попрошу у маклера"
     return text, kb
 
 
@@ -1511,8 +1511,8 @@ def handle_offer_cb(data, cfg, store, message_id=None):
 
 
 SL_PAGE = 10
-SL_HINT = ("Ответьте на карточку словами: «уточни», «просмотр в сб 11:00», «заметка: торг 2000», "
-           "«нравится» или «убрать»")
+SL_HINT = ("Что уточнить, когда смотреть, что понравилось — пишите своими словами, "
+           "про конкретную квартиру — ответом на её сообщение")
 
 
 def show_shortlist(cfg, store, message_id=None, offset=0):
@@ -1529,7 +1529,7 @@ def show_shortlist(cfg, store, message_id=None, offset=0):
     for i, o in enumerate(page, offset + 1):
         head = f"📋 <b>Шортлист</b> · {i} из {len(items)}"
         if i == offset + 1:                       # кнопок нет — одна подсказка на первой карточке
-            head += "\n<i>" + SL_HINT + (f"; «уточни у всех» — спрошу {n_ask} сразу" if n_ask > 1 else "") + "</i>"
+            head += "\n<i>" + SL_HINT + (f". Могу спросить маклеров сразу по всем ({n_ask})" if n_ask > 1 else "") + "</i>"
         text, _ = offer_caption(store, cfg, o, head=head)
         rr.send_card(cfg, offer_media(cfg, o), text, ref=f"O:{o['oid']}")
         time.sleep(1)

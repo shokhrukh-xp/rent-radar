@@ -197,14 +197,19 @@ intent — что клиент хочет сделать этим сообщен
   brokers — разослать запрос / написать маклерам;
   add_offer — добавить вариант, который ему прислали в WhatsApp («мне скинули квартиру, добавь»);
   market — цены рынка; request_text — показать текст запроса маклерам; help — что ты умеешь;
-  card — действие с конкретным вариантом (карточкой): клиент ответил на карточку (в данных есть card) или
-    говорит про неё по номеру из recent_cards («вторую в шортлист», «последнюю — мимо»). Поля:
-    card_act: like («в шортлист», «нравится», «беру», «👍»), skip («мимо», «не то», «убери»),
-      later («позже», «потом посмотрю»), ask («уточни», «узнай про документы», «спроси фото»),
-      view (просмотр: дату и время — в note_text как сказал клиент, например «завтра 18:00»),
-      note (заметка: её текст — в note_text), similar («похожие»), search_like («ищи такие же»);
-    reason (для skip, если назвал): p — дорого, d — район/место, c — состояние/ремонт, a — площадь/планировка;
-    items — номер из recent_cards, только если клиент сам указал карточку словами; при card — не нужен.
+  card — клиент говорит о конкретной квартире из присланных: нравится / не подходит / уточнить / посмотреть
+    вживую / заметка / найти похожие. Он ответил на её сообщение (в данных есть card) или говорит о ней иначе.
+    Клиент пишет как удобно, своими словами — никаких «правильных» фраз нет, понимай по смыслу:
+    «норм вариант» / «вот эта ничего» / «оставь её» → like; «не, не то» / «дороговато» / «первый этаж не хочу» → skip;
+    «а документы там чистые?» / «спроси, торг есть?» → ask; «давай глянем её в субботу» → view; «потом решу» → later.
+    Поля: card_act — одно или несколько через запятую, по порядку: like | skip | later | ask | view | note | similar | search_like
+      («нравится, узнай про документы» → "like,ask»; «посмотрим в субботу в 11» → "view");
+    note_text — для view: когда смотреть как сказал клиент («суббота 11:00»); для note: что записать;
+      для ask: что именно спросить, если сказал;
+    reason для skip, если понятно почему: p — дорого, d — место, c — состояние/ремонт, a — площадь/планировка;
+    items — какой вариант из recent_cards имеется в виду, если card нет: по номеру («вторая»), по порядку
+      («последняя», «предыдущая») или по описанию («та, что на Чиланзаре», «за 64 тысячи») — сравни с line.
+      Если card есть — items не нужен. Если не понятно, о какой квартире речь, — items пустой.
   Для всего, кроме search и restart, set оставь пустым, а reply — одной короткой фразой-подводкой
   («Показываю 👇», «Бегу проверять сайты 🏃‍♀️»): само действие выполнит система сразу после твоего ответа.
 
@@ -1012,18 +1017,27 @@ export async function cardByMessage(env, mid) {
   return [...list].reverse().find(c => (c.ids || []).includes(+mid)) || null;
 }
 
-/** «В шортлист», «мимо», «уточни», «просмотр завтра 18:00», «заметка: …» — ответом на карточку или по номеру. */
+/** Клиент своими словами говорит о квартире из присланных: ответом на её сообщение, по номеру,
+ *  по описанию или сразу после неё. Одно сообщение — можно несколько действий («нравится, узнай про документы»). */
 export async function cardAction(env, chat, raw, card, recent, iv, text) {
-  const nums = (raw.items || []).map(x => parseInt(x, 10)).filter(n => n > 0);
-  const target = card || (nums[0] ? recent[nums[0] - 1] : null) || (recent.length && !nums.length && /последн|эт[ау]\b|её|ее/i.test(text) ? recent.at(-1) : null);
+  const nums = (raw.items || []).map(x => parseInt(x, 10)).filter(n => n > 0 && n <= recent.length);
+  const fresh = recent.length && Date.now() - (recent.at(-1).at || 0) < 30 * 60e3;
+  // кто о какой: ответ на сообщение → номер/описание → единственная свежая карточка
+  const lone = fresh && recent.filter(c => Date.now() - (c.at || 0) < 30 * 60e3).length === 1;
+  const target = card || (nums[0] ? recent[nums[0] - 1] : null) || (lone ? recent.at(-1) : null);
   const note = t => { iv.hist.push({ r: "u", t: String(text).slice(0, 500) }, { r: "s", t }); iv.hist = iv.hist.slice(-20); };
   if (!target) {
-    await say(env, chat, "Про какую квартиру? Ответьте на её карточку (свайп влево по сообщению) и напишите, что сделать 🙂", { reply_markup: OWNER_KB });
+    const opts = recent.slice(-3).reverse().map(c => `• ${c.line}`).join("\n");
+    await say(env, chat, recent.length
+      ? `Про какую квартиру? 🙂 Можно ответить на её сообщение или просто назвать — например:\n${opts}`
+      : "Пока не присылала вариантов — как найду, принесу 🙂", { reply_markup: OWNER_KB });
+    iv.hist.push({ r: "u", t: String(text).slice(0, 500) }, { r: "s", t: "переспросила, о какой квартире речь" });
+    iv.hist = iv.hist.slice(-20); await kvSet(env, ivKey(chat), iv);
     return "card";
   }
   const [kind, ...rest] = target.ref.split(":");
   const ref = rest.join(":");
-  const act = String(raw.card_act || "").toLowerCase();
+  const acts = String(raw.card_act || "").toLowerCase().split(/[,\s]+/).filter(Boolean);
   const reason = /^[pdca]$/.test(raw.reason || "") ? raw.reason : "x";
   const what = target.line ? `«${target.line}»` : "вариант";
   const queueCb = data => queueAndWake(env, { callback_query: { id: "chat", data, _toast_done: true, _from_chat: true,
@@ -1031,6 +1045,8 @@ export async function cardAction(env, chat, raw, card, recent, iv, text) {
   const queueMsg = extra => queueAndWake(env, { message: { message_id: 0, chat: { id: +chat || chat, type: "private" },
     from: { id: +chat || chat }, date: Math.floor(Date.now() / 1000), text: String(text).slice(0, 500), ...extra } });
   const L = kind === "L", O = kind === "O";
+  const outs = [];
+  for (const act of (acts.length ? acts : [""])) {
   let out = "";
   if (act === "like") { await queueCb(L ? `L:s:${ref}` : `o:like:${ref}`); out = `👍 Добавила в шортлист ${what}`; }
   else if (act === "skip") {
@@ -1038,10 +1054,10 @@ export async function cardAction(env, chat, raw, card, recent, iv, text) {
     await queueCb(L ? `L:n:${ref}` : `o:skip:${ref}:${reason}`);
     out = `👎 Убрала ${what}` + (L ? " — похожие больше не покажу" : " — маклеру отвечу вежливо");
   } else if (act === "later") { if (O) await queueCb(`t:l:${ref}`); out = `🕐 Хорошо, ${what} — на потом`; }
-  else if (act === "ask") { await queueCb(L ? `L:a:${ref}` : `o:ask:${ref}`); out = `📨 Уточняю по ${what} — ответ принесу сюда`; }
+  else if (act === "ask") { await queueCb(L ? `L:a:${ref}` : `o:ask:${ref}`); out = `📨 Уточняю по ${what}` + (raw.note_text ? ` (${String(raw.note_text).slice(0, 80)})` : "") + " — ответ принесу сюда"; }
   else if (act === "view") {
     const w = parseWhen(raw.note_text || text);
-    if (!w) out = "Когда идём смотреть? Напишите ответом на карточку, например: «просмотр завтра 18:00» 🙂";
+    if (!w) out = `Когда хотите смотреть ${what}? Напишите день и время, как удобно 🙂`;
     else {
       await queueMsg({ _view: { ...(L ? { key: ref } : { oid: +ref }), at: w.at, label: w.label, notime: w.notime } });
       out = `📅 Записала просмотр ${what}: <b>${w.label}</b>. Утром в этот день напомню` + (w.notime ? "." : ", а за 2 часа — ещё раз.");
@@ -1053,10 +1069,12 @@ export async function cardAction(env, chat, raw, card, recent, iv, text) {
   } else if ((act === "similar" || act === "search_like") && L) {
     await queueCb(`L:${act === "similar" ? "sim" : "like"}:${ref}`);
     out = act === "similar" ? "🔎 Ищу похожие — пришлю карточками" : "🎯 Настраиваю поиск на такие же";
-  } else out = "Что сделать с этой квартирой? Можно: «в шортлист», «мимо», «уточни», «просмотр завтра 18:00», «заметка: …»";
-  note(`с карточкой ${target.line || target.ref}: ${act || "?"}`);
+  } else out = "Поняла, что это про " + what + " — а что с ней сделать? Скажите как есть: нравится, не то, что уточнить или когда смотреть 🙂";
+  outs.push(out);
+  }
+  note(`с вариантом ${target.line || target.ref}: ${acts.join(", ") || "?"}`);
   await kvSet(env, ivKey(chat), iv);
-  await say(env, chat, out, { parse_mode: "HTML", reply_markup: OWNER_KB });
+  await say(env, chat, outs.join("\n"), { parse_mode: "HTML", reply_markup: OWNER_KB });
   return "card";
 }
 
