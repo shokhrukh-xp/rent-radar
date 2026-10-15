@@ -272,13 +272,10 @@ assert.equal((await post("/svc/snapshot", { offers: [
 await env.DB.prepare("DELETE FROM kv WHERE k='py_alive'").run();       // Python спит
 sent.length = 0;
 await handleUpdate(env, msg(BTN.offers));
-assert.equal(sent.filter(x => x.m === "sendMediaGroup").length, 1);       // вариант с фото — альбомом
-assert.ok(sent.some(x => x.text === "🏠 Вариант 2 из 3" && x.reply_markup.inline_keyboard[0][2].callback_data === "t:n:8"));
-assert.ok(sent.some(x => /ещё <b>1<\/b>/.test(x.text || "")));          // честная подводка к третьему
-assert.equal((await drain()).length, 0);                                  // Python не понадобился
+assert.equal((await drain()).at(-1).message.text, "/offers");               // карточки-альбомы с картой собирает Python
 sent.length = 0;
 await handleUpdate(env, { update_id: ++uid, callback_query: { id: "o2", data: "off2", message: { message_id: 5, chat: { id: +OWNER } } } });
-assert.equal(sent.filter(x => x.m === "sendMessage" && /Вариант/.test(x.text || "")).length, 2);
+assert.equal((await drain()).at(-1).message.text, "/offers all");
 // «Мимо» → причины сразу; выбор причины уходит Python
 sent.length = 0;
 await handleUpdate(env, { update_id: ++uid, callback_query: { id: "n1", data: "t:n:8", message: { message_id: 6, chat: { id: +OWNER } } } });
@@ -367,7 +364,7 @@ assert.match(texts().at(-1), /Ищет Ra'no/); assert.ok(JSON.stringify(sent.at
 await handleUpdate(env, msg(BTN.via));
 assert.match(texts().at(-1), /Через маклеров/);
 assert.equal((await drain()).length, 0);
-assert.deepEqual(OWNER_KB.keyboard.map(r => r.map(b => b.text)), [[BTN.rano, BTN.via], [BTN.more]]);
+assert.deepEqual(OWNER_KB, { remove_keyboard: true });                       // кнопок внизу нет — всё словами
 // объявление с сайта → в шортлист: подсказка сразу, сохранит Python
 await handleUpdate(env, { update_id: ++uid, callback_query: { id: "L1", data: "L:s:sale:joymee:77", message: { message_id: 60, chat: { id: +OWNER } } } });
 assert.match(sent.filter(x => x.m === "answerCallbackQuery").at(-1).text, /шортлист/);
@@ -555,3 +552,36 @@ console.log("OK — каналы от пользователей: ссылка �
   r = await worker.fetch(new Request("https://w.example/svc/pricemap", { method: "POST", body: "{}" }), env, { waitUntil() {} });
   assert.equal(r.status, 401); }                                          // писать карту — только с ключом
 console.log("OK — ориентир клиента (near) и карта цен: /map, /map.json, запись только с ключом");
+
+// ── карточки-альбомы: управление словами — ответом на карточку или по номеру
+{ await drain(); sent.length = 0;
+  let r = await post("/svc/cards", { ids: [501, 502, 503], ref: "L:sale:joymee:9", line: "2-комн · 46 м² · Чиланзар · $66 000" });
+  assert.equal((await r.json()).ok, true);
+  await post("/svc/cards", { ids: [510, 511], ref: "O:31", line: "3-комн · Мирабад · $90 000" });
+  geminiQueue.push({ reply: "ок", ready: false, set: [], intent: "card", card_act: "like" });
+  await handleUpdate(env, msg("в шортлист", OWNER, { reply_to_message: { message_id: 502 } }));   // ответ на любое фото альбома
+  let got = await drain();
+  assert.equal(got.at(-1).callback_query.data, "L:s:sale:joymee:9");
+  assert.match(texts().at(-1), /Добавила в шортлист «2-комн · 46 м² · Чиланзар · \$66 000»/);
+  geminiQueue.push({ reply: "ок", ready: false, set: [], intent: "card", card_act: "skip", reason: "p" });
+  await handleUpdate(env, msg("мимо, дорого", OWNER, { reply_to_message: { message_id: 510 } }));
+  got = await drain();
+  assert.equal(got.at(-1).callback_query.data, "o:skip:31:p");
+  assert.deepEqual(sent.filter(x => x.m === "deleteMessages").at(-1).message_ids, [510, 511]);   // карточку убрала из чата
+  geminiQueue.push({ reply: "ок", ready: false, set: [], intent: "card", card_act: "view", note_text: "завтра 18:00" });
+  await handleUpdate(env, msg("просмотр завтра в 18", OWNER, { reply_to_message: { message_id: 501 } }));
+  got = await drain();
+  assert.equal(got.at(-1).message._view.key, "sale:joymee:9"); assert.match(got.at(-1).message._view.at, /T18:00:00\+05:00$/);
+  geminiQueue.push({ reply: "ок", ready: false, set: [], intent: "card", card_act: "note", note_text: "двор хороший" });
+  await handleUpdate(env, msg("заметка: двор хороший", OWNER, { reply_to_message: { message_id: 510 } }));
+  got = await drain();
+  assert.deepEqual(got.at(-1).message._note, { oid: 31, text: "двор хороший" });
+  geminiQueue.push({ reply: "ок", ready: false, set: [], intent: "card", card_act: "ask", items: ["1"] });
+  await handleUpdate(env, msg("по первой уточни документы"));                      // по номеру из последних карточек
+  got = await drain();
+  assert.ok(got.at(-1).callback_query.data.startsWith("L:a:") || got.at(-1).callback_query.data.startsWith("o:ask:"));
+  geminiQueue.push({ reply: "ок", ready: false, set: [], intent: "card", card_act: "like" });
+  await handleUpdate(env, msg("в шортлист"));                                      // непонятно какую — спросит
+  assert.match(texts().at(-1), /Ответьте на её карточку/);
+  sent.length = 0; }
+console.log("OK — карточки без кнопок: ответом на карточку — в шортлист, мимо (с причиной), просмотр, заметка, уточнить");

@@ -908,7 +908,7 @@ def attach_dup(cfg, store, l, dup, ss=None):
     head = (f"💸 <b>Та же квартира — дешевле на ${op - lp:,.0f}</b>\n"
             f"Раньше присылала её за ${op:,.0f} ({rr.escape_html(o.get('site') or 'Uybor')}"
             f"{', ' + KIND_RU[o['seller_kind']] if o.get('seller_kind') in KIND_RU else ''})").replace(",", " ")
-    ok = rr.send_card(cfg, l, rr.format_sale_card(store, l, cfg, head=head), kb=rr.sale_kb(l["key"], "self")) or None
+    ok = rr.send_card(cfg, l, rr.format_sale_card(store, l, cfg, head=head), ref="L:" + l["key"]) or None
     store.save(l, notified=ok is not None, dup_of=dup)
     if ok is not None:
         remember_shown(store, l, why)

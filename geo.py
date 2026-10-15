@@ -442,3 +442,117 @@ def price_grid(conn, cell_km=0.7, min_n=3) -> dict:
                                         for d, v in dist.items() if len(v) >= 10},
             "city_m2": round(statistics.median([p / ar for *_, ar, p, d in rows])) if rows else None,
             "cell_km": cell_km}
+
+
+# ------------------------------------------------- карта места для карточки ----
+
+TILE_URL = "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
+TILE_UA = "rano-bot/1.0 (+https://t.me/rano_smart_bot; apartment search assistant)"
+
+
+def _tile_xy(lat, lon, z):
+    n = 2 ** z
+    x = (lon + 180.0) / 360.0 * n
+    y = (1 - math.asinh(math.tan(math.radians(lat))) / math.pi) / 2 * n
+    return x, y
+
+
+def _tile(z, x, y):
+    """Тайл OSM с кэшем на диске (правила OSM: свой User-Agent, не качать одно и то же)."""
+    import os
+    import tempfile
+    import requests
+    path = os.path.join(tempfile.gettempdir(), "rano_tiles", str(z), str(x), f"{y}.png")
+    if os.path.exists(path) and time.time() - os.path.getmtime(path) < 30 * 86400:
+        with open(path, "rb") as f:
+            return f.read()
+    r = requests.get(TILE_URL.format(z=z, x=x, y=y), headers={"User-Agent": TILE_UA}, timeout=15)
+    r.raise_for_status()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "wb") as f:
+        f.write(r.content)
+    return r.content
+
+
+def static_map(lat, lon, approx_km=None, w=800, h=560):
+    """Картинка-карта: где квартира. Точный адрес — метка; место по ориентиру — круг «где-то здесь».
+    Возвращает JPEG или None (нет Pillow / сети)."""
+    try:
+        from io import BytesIO
+        from PIL import Image, ImageDraw
+    except ImportError:
+        return None
+    z = 15                                           # 15 — видно улицы и знакомые места вокруг
+    cx, cy = _tile_xy(lat, lon, z)
+    px, py = cx * 256, cy * 256                      # центр в пикселях мира
+    x0, y0 = px - w / 2, py - h / 2
+    img = Image.new("RGB", (w, h), (235, 235, 235))
+    try:
+        for tx in range(int(x0 // 256), int((x0 + w) // 256) + 1):
+            for ty in range(int(y0 // 256), int((y0 + h) // 256) + 1):
+                t = Image.open(BytesIO(_tile(z, tx, ty))).convert("RGB")
+                img.paste(t, (int(tx * 256 - x0), int(ty * 256 - y0)))
+    except Exception as e:
+        log.info("[карта] тайлы не скачались: %s", e)
+        return None
+    d = ImageDraw.Draw(img, "RGBA")
+    mx, my = w / 2, h / 2
+    if approx_km:
+        m_per_px = 156543.03 * math.cos(math.radians(lat)) / 2 ** z
+        r = max(40, min(220, approx_km * 1000 / m_per_px))
+        d.ellipse((mx - r, my - r, mx + r, my + r), fill=(47, 111, 222, 60), outline=(47, 111, 222, 230), width=4)
+        d.ellipse((mx - 7, my - 7, mx + 7, my + 7), fill=(47, 111, 222, 255), outline=(255, 255, 255, 255), width=3)
+    else:                                            # метка-«капля»
+        d.ellipse((mx - 17, my - 52, mx + 17, my - 18), fill=(220, 53, 69, 255), outline=(255, 255, 255, 255), width=4)
+        d.polygon([(mx - 12, my - 26), (mx + 12, my - 26), (mx, my)], fill=(220, 53, 69, 255))
+        d.ellipse((mx - 6, my - 41, mx + 6, my - 29), fill=(255, 255, 255, 255))
+    d.rectangle((w - 150, h - 18, w, h), fill=(255, 255, 255, 200))
+    d.text((w - 146, h - 15), "(c) OpenStreetMap", fill=(60, 60, 60, 255))
+    out = BytesIO()
+    img.save(out, "JPEG", quality=85, optimize=True)
+    return out.getvalue()
+
+
+_REV_LAST = [0.0]
+
+
+def reverse(lat, lon) -> str:
+    """Улица и махалля по координатам (OSM Nominatim): «ул. Мукими», «ул. Укувчилар, махалля А.Фитрат».
+    Кэш на диске, не чаще запроса в секунду (правила Nominatim). '' — не знаем."""
+    import json
+    import os
+    import tempfile
+    import requests
+    key = f"{float(lat):.4f},{float(lon):.4f}"
+    path = os.path.join(tempfile.gettempdir(), "rano_rev.json")
+    try:
+        cache = json.load(open(path, encoding="utf-8"))
+    except (OSError, ValueError):
+        cache = {}
+    if key in cache:
+        return cache[key]
+    wait = 1.1 - (time.time() - _REV_LAST[0])
+    if wait > 0:
+        time.sleep(wait)
+    _REV_LAST[0] = time.time()
+    try:
+        r = requests.get("https://nominatim.openstreetmap.org/reverse",
+                         params={"format": "jsonv2", "lat": lat, "lon": lon, "zoom": 17, "addressdetails": 1,
+                                 "accept-language": "ru"},
+                         headers={"User-Agent": TILE_UA}, timeout=15)
+        a = (r.json() or {}).get("address") or {} if r.status_code == 200 else {}
+    except Exception as e:
+        log.info("[место] адрес по точке: %s", e)
+        return ""
+    road = a.get("road") or ""
+    road = re.sub(r"^(.*?)\s+(улица|ulitsasi|ko['ʻ’]?chasi)$", r"ул. \1", road, flags=re.I)
+    road = re.sub(r"^(.*?)\s+(проспект|prospekti)$", r"пр. \1", road, flags=re.I)
+    hood = a.get("neighbourhood") or a.get("quarter") or a.get("suburb") or ""
+    hood = re.sub(r"^(.*?)\s+махалля$", r"махалля \1", hood)
+    out = ", ".join(x for x in (road, hood) if x)[:60]
+    cache[key] = out
+    try:
+        json.dump(cache, open(path, "w", encoding="utf-8"), ensure_ascii=False)
+    except OSError:
+        pass
+    return out

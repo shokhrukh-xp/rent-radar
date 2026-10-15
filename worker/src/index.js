@@ -196,12 +196,22 @@ intent — что клиент хочет сделать этим сообщен
   sl_item — открыть вариант из шортлиста по номеру (номер в items);
   brokers — разослать запрос / написать маклерам;
   add_offer — добавить вариант, который ему прислали в WhatsApp («мне скинули квартиру, добавь»);
-  market — цены рынка; request_text — показать текст запроса маклерам; help — что ты умеешь.
+  market — цены рынка; request_text — показать текст запроса маклерам; help — что ты умеешь;
+  card — действие с конкретным вариантом (карточкой): клиент ответил на карточку (в данных есть card) или
+    говорит про неё по номеру из recent_cards («вторую в шортлист», «последнюю — мимо»). Поля:
+    card_act: like («в шортлист», «нравится», «беру», «👍»), skip («мимо», «не то», «убери»),
+      later («позже», «потом посмотрю»), ask («уточни», «узнай про документы», «спроси фото»),
+      view (просмотр: дату и время — в note_text как сказал клиент, например «завтра 18:00»),
+      note (заметка: её текст — в note_text), similar («похожие»), search_like («ищи такие же»);
+    reason (для skip, если назвал): p — дорого, d — район/место, c — состояние/ремонт, a — площадь/планировка;
+    items — номер из recent_cards, только если клиент сам указал карточку словами; при card — не нужен.
   Для всего, кроме search и restart, set оставь пустым, а reply — одной короткой фразой-подводкой
   («Показываю 👇», «Бегу проверять сайты 🏃‍♀️»): само действие выполнит система сразу после твоего ответа.
 
 Что у тебя есть (блок «Сейчас у бота» в запросе) — это правда, опирайся ТОЛЬКО на неё:
   last_pick — последняя подборка с сайтов с номерами, как их видел клиент; shortlist — шортлист с номерами;
+  card — карточка варианта, на которую клиент ответил (если ответил); recent_cards — последние карточки
+  в чате с номерами n по порядку (последняя — с наибольшим n);
   pick_pending — сколько новых ждут подборки; today — сколько объявлений просмотрела и подошло сегодня.
   Никогда не говори, что что-то показала, отправила, нашла или «открываю», если этого нет в данных или
   если это не делает выбранный intent. Если клиент ссылается на то, чего нет (номер больше списка,
@@ -237,7 +247,10 @@ export const SCHEMA = {
       },
     },
     clear: { type: "array", items: { type: "string" } },
-    intent: { type: "string", description: "search | restart | search_now | show_pick | show_item | rano_status | via_status | show_offers | shortlist | sl_item | brokers | add_offer | market | help | request_text" },
+    intent: { type: "string", description: "search | restart | search_now | show_pick | show_item | rano_status | via_status | show_offers | shortlist | sl_item | brokers | add_offer | market | help | request_text | card" },
+    card_act: { type: "string", description: "для intent=card: like | skip | later | ask | view | note | similar | search_like" },
+    reason: { type: "string", description: "для card_act=skip: p | d | c | a" },
+    note_text: { type: "string", description: "для card_act=note — текст заметки; для view — когда смотреть" },
     items: { type: "array", items: { type: "string" }, description: "номера пунктов для show_item / sl_item" },
   },
   required: ["reply", "ready", "set"],
@@ -524,9 +537,8 @@ const say = (env, chat, text, extra = {}) => tg(env, "sendMessage", { chat_id: c
 export const BTN = { rano: "🔎 Ищет Ra'no", via: "📇 Через маклеров", more: "⋯ Ещё",
   search: "🔎 Мой поиск", offers: "🏠 Варианты", brokers: "📇 Маклерам",      // старые кнопки — тоже понимаем
   what: "🏠 Что ищет клиент" };
-export const OWNER_KB = { keyboard: [[{ text: BTN.rano }, { text: BTN.via }], [{ text: BTN.more }]],
-  resize_keyboard: true, is_persistent: true,
-  input_field_placeholder: "Напишите, что ищете, или перешлите вариант" };
+// кнопок внизу больше нет — всё словами (старые кнопки у клиента пропадут с первым же ответом)
+export const OWNER_KB = { remove_keyboard: true };
 export const BROKER_KB = { keyboard: [[{ text: BTN.what }]], resize_keyboard: true, is_persistent: true,
   input_field_placeholder: "Пришлите вариант: фото, адрес, этаж, цена" };
 let ORIGIN = "";                         // адрес воркера — для ссылки на карту цен
@@ -692,11 +704,11 @@ async function showMySearch(env, chat, L) {
   const iv = await kvGet(env, ivKey(chat), null);
   if (!iv || !essentialsOk(iv.ans || {})) return startInterview(env, chat, false, L);
   const note = iv.ans.note ? `\nПожелания: ${iv.ans.note}` : "";
-  await say(env, chat, `🔎 Сейчас ищем: ${summary(iv.ans)}.${note}\n\n` +
-    "Хотите что-то поменять — просто скажите, например: «бюджет 60 тысяч» или «добавь Юнусабад». Я не обижусь 😉", {
-    reply_markup: { inline_keyboard: [
-      [{ text: "📇 Разослать маклерам", callback_data: "cmd:/brokers" }, { text: "📝 Текст запроса", callback_data: "cmd:/request" }],
-      [{ text: "🔄 Начать поиск заново", callback_data: "q:again" }]] } });
+  const ui = await kvGet(env, "ui", null);
+  const st = ui?.screens?.["/rano"]?.text ? "\n\n" + ui.screens["/rano"].text : "";
+  await say(env, chat, `🔎 <b>Мой поиск</b>: ${summary(iv.ans)}.${note}${st}\n\n` +
+    "Поменять — просто напишите: «бюджет 60 тысяч», «добавь Юнусабад», «рядом с метро Ойбек». " +
+    "Ещё можно: «покажи шортлист», «напиши маклерам», «начать заново».", { parse_mode: "HTML", reply_markup: OWNER_KB });
 }
 
 // ── «Варианты» и «Маклерам» — сразу, из снимка, который присылает Python ──
@@ -732,20 +744,8 @@ export async function showOffers(env, chat, all = false) {
       (ui.shortlist ? ` В шортлисте — ${ui.shortlist}.` : "") + hint + waitNote, { reply_markup: { inline_keyboard: rows } });
     return;
   }
-  const batch = all ? ui.offers.length : Math.max(1, ui.free || 2);
-  for (const o of ui.offers.slice(0, batch)) {
-    if (o.photos && o.photos.length) {
-      const media = o.photos.map((f, i) => ({ type: "photo", media: f, ...(i === 0 ? { caption: o.text.slice(0, 1000), parse_mode: "HTML" } : {}) }));
-      await tg(env, "sendMediaGroup", { chat_id: chat, media });
-      await say(env, chat, "Ну как вам? 👀", { reply_markup: triageKb(o.oid) });
-    } else {
-      await say(env, chat, o.text, { parse_mode: "HTML", reply_markup: triageKb(o.oid) });
-    }
-  }
-  const rest = ui.offers_total - Math.min(batch, ui.offers_total);
-  if (rest > 0) await say(env, chat, `Маклеры прислали ещё <b>${rest}</b> — показываю?`, { parse_mode: "HTML",
-    reply_markup: { inline_keyboard: [[{ text: `Показать ещё ${rest} →`, callback_data: "off2" }]] } });
-  else if (waitNote) await say(env, chat, waitNote.trim());
+  // карточки вариантов — альбомом (карта + фото маклера), их собирает Python
+  return asCommand(env, chat, all ? "/offers all" : "/offers");
 }
 
 export async function startOutreach(env, chat) {
@@ -767,7 +767,7 @@ async function nextBroker(env, chat) {
     const more = (ui.brokers_total || 0) - st.done.length;
     if (more > 0) {                                   // в снимке кончились — Python пришлёт ещё
       await wake(env);
-      await say(env, chat, `Ещё ${more} маклеров — подгружаю следующую порцию, это минута-две. Загляните в «📇 Через маклеров» чуть позже.`);
+      await say(env, chat, `Ещё ${more} маклеров — подгружаю следующую порцию, это минута-две. Напишите «напиши маклерам» чуть позже.`);
     } else {
       await say(env, chat, `✅ Всех прошли: написали ${st.sent}, пропустили ${st.skipped}. ` +
         "Новые маклеры появляются сами — загляните через пару часов, подкину ещё.");
@@ -786,7 +786,7 @@ async function startAddMode(env, chat) {
   await kvSet(env, ivKey(chat), iv);
   await say(env, chat, "💬 Маклер написал вам в WhatsApp, а не мне? Не ревную 😄 Перешлите или вставьте сюда " +
     "его сообщение — текст и фото, можно по частям. Сделаю карточку, как для остальных: " +
-    "цена, район, разбор, кнопки «В шортлист / Мимо» — всё в одном месте.",
+    "карта, фото, цена и разбор — всё в одном месте. Потом ответьте на карточку: «в шортлист» или «мимо».",
     { reply_markup: { inline_keyboard: [[{ text: "✅ Готово", callback_data: "cmd:/done" }]] } });
 }
 
@@ -1005,13 +1005,71 @@ async function chatAction(env, chat, intent, items, ui, iv, reply) {
   return intent;
 }
 
-export async function interviewTurn(env, chat, text) {
+/** Карточка, на которую ответили: по id любого сообщения альбома. */
+export async function cardByMessage(env, mid) {
+  if (!mid) return null;
+  const list = (await kvGet(env, "cards_recent", null)) || [];
+  return [...list].reverse().find(c => (c.ids || []).includes(+mid)) || null;
+}
+
+/** «В шортлист», «мимо», «уточни», «просмотр завтра 18:00», «заметка: …» — ответом на карточку или по номеру. */
+export async function cardAction(env, chat, raw, card, recent, iv, text) {
+  const nums = (raw.items || []).map(x => parseInt(x, 10)).filter(n => n > 0);
+  const target = card || (nums[0] ? recent[nums[0] - 1] : null) || (recent.length && !nums.length && /последн|эт[ау]\b|её|ее/i.test(text) ? recent.at(-1) : null);
+  const note = t => { iv.hist.push({ r: "u", t: String(text).slice(0, 500) }, { r: "s", t }); iv.hist = iv.hist.slice(-20); };
+  if (!target) {
+    await say(env, chat, "Про какую квартиру? Ответьте на её карточку (свайп влево по сообщению) и напишите, что сделать 🙂", { reply_markup: OWNER_KB });
+    return "card";
+  }
+  const [kind, ...rest] = target.ref.split(":");
+  const ref = rest.join(":");
+  const act = String(raw.card_act || "").toLowerCase();
+  const reason = /^[pdca]$/.test(raw.reason || "") ? raw.reason : "x";
+  const what = target.line ? `«${target.line}»` : "вариант";
+  const queueCb = data => queueAndWake(env, { callback_query: { id: "chat", data, _toast_done: true, _from_chat: true,
+    message: { message_id: 0, chat: { id: +chat || chat } } } });
+  const queueMsg = extra => queueAndWake(env, { message: { message_id: 0, chat: { id: +chat || chat, type: "private" },
+    from: { id: +chat || chat }, date: Math.floor(Date.now() / 1000), text: String(text).slice(0, 500), ...extra } });
+  const L = kind === "L", O = kind === "O";
+  let out = "";
+  if (act === "like") { await queueCb(L ? `L:s:${ref}` : `o:like:${ref}`); out = `👍 Добавила в шортлист ${what}`; }
+  else if (act === "skip") {
+    await tg(env, "deleteMessages", { chat_id: chat, message_ids: target.ids });
+    await queueCb(L ? `L:n:${ref}` : `o:skip:${ref}:${reason}`);
+    out = `👎 Убрала ${what}` + (L ? " — похожие больше не покажу" : " — маклеру отвечу вежливо");
+  } else if (act === "later") { if (O) await queueCb(`t:l:${ref}`); out = `🕐 Хорошо, ${what} — на потом`; }
+  else if (act === "ask") { await queueCb(L ? `L:a:${ref}` : `o:ask:${ref}`); out = `📨 Уточняю по ${what} — ответ принесу сюда`; }
+  else if (act === "view") {
+    const w = parseWhen(raw.note_text || text);
+    if (!w) out = "Когда идём смотреть? Напишите ответом на карточку, например: «просмотр завтра 18:00» 🙂";
+    else {
+      await queueMsg({ _view: { ...(L ? { key: ref } : { oid: +ref }), at: w.at, label: w.label, notime: w.notime } });
+      out = `📅 Записала просмотр ${what}: <b>${w.label}</b>. Утром в этот день напомню` + (w.notime ? "." : ", а за 2 часа — ещё раз.");
+    }
+  } else if (act === "note") {
+    const t = String(raw.note_text || text).trim();
+    await queueMsg({ _note: { ...(L ? { key: ref } : { oid: +ref }), text: t } });
+    out = `📝 Записала к ${what}: ${t.slice(0, 120)}`;
+  } else if ((act === "similar" || act === "search_like") && L) {
+    await queueCb(`L:${act === "similar" ? "sim" : "like"}:${ref}`);
+    out = act === "similar" ? "🔎 Ищу похожие — пришлю карточками" : "🎯 Настраиваю поиск на такие же";
+  } else out = "Что сделать с этой квартирой? Можно: «в шортлист», «мимо», «уточни», «просмотр завтра 18:00», «заметка: …»";
+  note(`с карточкой ${target.line || target.ref}: ${act || "?"}`);
+  await kvSet(env, ivKey(chat), iv);
+  await say(env, chat, out, { parse_mode: "HTML", reply_markup: OWNER_KB });
+  return "card";
+}
+
+export async function interviewTurn(env, chat, text, card = null) {
   const iv = await kvGet(env, ivKey(chat), null) || emptyIv();
   tg(env, "sendChatAction", { chat_id: chat, action: "typing" }).catch(() => {});
   let res;
   const ui = await kvGet(env, "ui", null);
+  const recent = ((await kvGet(env, "cards_recent", null)) || []).slice(-6);
+  const ctx = { ...(ui?.ctx || {}), recent_cards: recent.map((c, i) => ({ n: i + 1, line: c.line })),
+    ...(card ? { card: { line: card.line } } : {}) };
   try {
-    res = await interviewCore(env, iv, text, ui?.ctx || null);
+    res = await interviewCore(env, iv, text, ctx);
   } catch (e) {
     console.log("gemini error", e.message);
     await say(env, chat, "Ой, я запнулась 🙈 Попробуйте ещё раз через минуту.");
@@ -1029,6 +1087,7 @@ export async function interviewTurn(env, chat, text) {
     await say(env, chat, "🔄 С чистого листа!\n\n" + reply, { reply_markup: OWNER_KB });
     return;
   }
+  if (intent === "card") return cardAction(env, chat, res.raw || {}, card, recent, iv, text);
   const act = await chatAction(env, chat, intent, res.raw?.items, ui, iv, reply);
   if (act) return act;
   if (intent === "add_offer") return startAddMode(env, chat);
@@ -1063,7 +1122,7 @@ async function startInterview(env, chat, fresh, lang = "ru") {
     return;
   }
   await say(env, chat, `С возвращением! 🙌 Сейчас ищем: ${summary(iv.ans)}.\n` +
-    "Скажите, что поменять, — или «⋯ Ещё» → «Начать поиск заново».", { reply_markup: OWNER_KB });
+    "Скажите, что поменять, — или «начать заново».", { reply_markup: OWNER_KB });
 }
 
 // ───────────────────────────── разбор обновления ─────────────────────────────
@@ -1317,6 +1376,7 @@ export async function handleUpdate(env, upd) {
     const cmd = c0.toLowerCase().split("@")[0];
     const arg = rest.join(" ");
     if (cmd === "/add") return (await startAddMode(env, chat), "add_mode");
+    if (cmd === "/mysearch") return (await showMySearch(env, chat, L), "my_search");
     if (cmd === "/done") {
       const iv = ivNow || emptyIv();
       iv.mode = ""; await kvSet(env, ivKey(chat), iv);
@@ -1378,8 +1438,9 @@ export async function handleUpdate(env, upd) {
     await queueAndWake(env, upd, chat, WAIT[L]);
     return "queued";
   }
-  await interviewTurn(env, chat, text);
-  return "interview";
+  const card = await cardByMessage(env, msg.reply_to_message?.message_id);
+  await interviewTurn(env, chat, text, card);
+  return card ? "card" : "interview";
 }
 
 // ───────────────────────────── HTTP ─────────────────────────────
@@ -1457,6 +1518,15 @@ export default {
         await kvSet(env, "ui", snap);
         return json({ ok: true });
       }
+      if (p === "/svc/cards" && req.method === "POST") {      // Python: отправил карточку-альбом
+        const b = await req.json().catch(() => null);
+        if (!b || !Array.isArray(b.ids) || !b.ref) return json({ ok: false }, 400);
+        const list = (await kvGet(env, "cards_recent", null)) || [];
+        list.push({ ids: b.ids.map(Number).filter(Boolean).slice(0, 12), ref: String(b.ref).slice(0, 80),
+                    line: String(b.line || "").slice(0, 140), at: Date.now() });
+        await kvSet(env, "cards_recent", list.slice(-40));
+        return json({ ok: true });
+      }
       if (p === "/svc/pricemap" && req.method === "POST") {   // Python: сетка цен после среза рынка
         const d = await req.json().catch(() => null);
         if (!d || !Array.isArray(d.cells)) return json({ ok: false }, 400);
@@ -1471,13 +1541,12 @@ export default {
         const menu = await tg(env, "setChatMenuButton", { menu_button: { type: "commands" } });
         const menuOwner = await tg(env, "setChatMenuButton", { chat_id: +env.OWNER_CHAT, menu_button: { type: "commands" } });
         const ownerCmds = [
-          { command: "new", description: "🔎 Новый поиск" }, { command: "offers", description: "🏠 Варианты от маклеров" },
-          { command: "brokers", description: "📇 Разослать маклерам" }, { command: "add", description: "📥 Добавить вариант из WhatsApp" },
-          { command: "shortlist", description: "📋 Шортлист" }, { command: "help", description: "❓ Как это работает" }];
+          { command: "new", description: "🔎 Новый поиск" }, { command: "mysearch", description: "✏️ Мой поиск" },
+          { command: "shortlist", description: "📋 Шортлист" }, { command: "help", description: "❓ Помощь" }];
         const cmds = await tg(env, "setMyCommands", { commands: ownerCmds, scope: { type: "chat", chat_id: +env.OWNER_CHAT } });
         const cmdsAll = await tg(env, "setMyCommands", { commands: [{ command: "start", description: "Как прислать вариант" }] });
         if (url.searchParams.get("kb")) await tg(env, "sendMessage", { chat_id: +env.OWNER_CHAT, reply_markup: OWNER_KB,
-          text: "Кнопки — внизу: «🔎 Ищет Ra'no», «📇 Через маклеров», «⋯ Ещё». " +
+          text: "Кнопок больше нет — просто пишите. Меню ☰: новый поиск, мой поиск, шортлист, помощь. " +
                 "Команды запоминать не нужно — можно и просто написать, что хотите сделать." });
         const profile = {};
         // и для ru/en явно: старые языковые описания из BotFather перекрывают общее

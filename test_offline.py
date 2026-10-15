@@ -6,6 +6,30 @@ from pathlib import Path
 
 import rent_radar as rr
 
+# Telegram с файлами (альбомы) — через тот же tg_call, который тесты подменяют; подпись альбома — в caption
+def _files_shim(cfg_, method, data, files, timeout=90):
+    d = dict(data)
+    if "media" in d:
+        try:
+            d["caption"] = json.loads(d["media"])[0].get("caption")
+        except (ValueError, IndexError, KeyError):
+            pass
+    return rr.tg_call(cfg_, method, d)
+rr.tg_call_files = _files_shim
+rr.TESTING = True
+
+
+def tx_(pl):
+    """Текст сообщения или подпись альбома/фото."""
+    if pl.get("text") or pl.get("caption"):
+        return pl.get("text") or pl.get("caption")
+    try:
+        return json.loads(pl.get("media") or "[]")[0].get("caption") or ""
+    except (ValueError, IndexError, AttributeError):
+        return ""
+import geo as _geo_t
+_geo_t.static_map = lambda *a, **k: None             # тайлы карты не качаем в тестах (кроме отдельной проверки)
+
 cfg = rr.deep_merge(rr.DEFAULT_CONFIG, {})
 
 # ---------------------------------------------------------- извлечение ----
@@ -883,17 +907,14 @@ assert any(b["callback_data"] == "s:go" and "(2)" in b["text"] for row in kb["in
 with mock.patch.object(rr, "tg_call", fake_tg):
     SENT.clear()
     cg.handle_shortlist_cb(f"s:o:{oid1}", cfg, cs, 1)          # номер → карточка
-    card = [pl for m, pl in SENT if m in ("sendMessage", "sendPhoto")][-1]   # номер → новая карточка с фото
-    ckb = json.loads(card["reply_markup"])["inline_keyboard"]
-    datas = [b["callback_data"] for row in ckb for b in row]
-    assert f"o:ask:{oid1}" in datas and f"o:view:{oid1}" in datas and f"o:seen:{oid1}:g" in datas
-    assert len(datas) <= 5 and "s:ref" not in datas                     # кнопок немного
-    assert "Этап" in (card.get("caption") or card.get("text"))
+    card = [pl for m, pl in SENT if m in ("sendMessage", "sendPhoto", "sendMediaGroup")][-1]   # номер → карточка-альбом
+    assert "reply_markup" not in card                                   # кнопок нет — управление словами
+    assert "Этап" in tx_(card)
     SENT.clear()
     assert cg.show_shortlist(cfg, cs) == 2                               # шортлист — карточками, без списка
-    sl_cards = [pl for m, pl in SENT if "Шортлист</b> · " in (pl.get("text") or pl.get("caption") or "")]
-    assert len(sl_cards) == 2 and "1 из 2" in (sl_cards[0].get("text") or sl_cards[0].get("caption"))
-    assert "s:go" in sl_cards[0]["reply_markup"]
+    sl_cards = [pl for m, pl in SENT if "Шортлист</b> · " in tx_(pl)]
+    assert len(sl_cards) == 2 and "1 из 2" in tx_(sl_cards[0])
+    assert "уточни у всех" in tx_(sl_cards[0])   # подсказка словами
     SENT.clear()
     toast, _ = cg.handle_offer_cb(f"o:ask:{oid1}", cfg, cs, 1)
     assert "Отправлено: 1" in toast
@@ -922,7 +943,7 @@ with mock.patch.object(rr, "tg_call", fake_tg):
 
     SENT.clear()
     cg.handle_shortlist_cb("s:sort", cfg, cs, 1)                       # старые кнопки — просто карточки заново
-    assert any("Шортлист</b> · " in (pl.get("text") or pl.get("caption") or "") for m, pl in SENT)
+    assert any("Шортлист</b> · " in tx_(pl) for m, pl in SENT)
 
 # --- сообщение от маклера через process-слой ---
 with mock.patch.object(rr, "tg_call", fake_tg):
@@ -1046,7 +1067,7 @@ with mock.patch.object(rr, "tg_call", fake2):
     cg.send_app_button(cfg, ms2)
 m, pl = SENT2[-1]
 kb = json.loads(pl["reply_markup"])
-assert kb == cg.OWNER_KB and kb["is_persistent"]                 # постоянные кнопки вместо команд
+assert kb == cg.OWNER_KB and kb["remove_keyboard"]               # кнопок внизу нет — всё словами
 assert "своими словами" in pl["text"]
 
 # данные из формы применяются и сразу дают готовый текст
@@ -1079,7 +1100,7 @@ with mock.patch.object(rr, "tg_call", fake2):
 with mock.patch.object(rr, "tg_call", fake2):
     SENT2.clear()
     rr.handle_command("/app", rr.default_settings(), ms2, cfg)
-    assert any("Ищет Ra" in pl.get("reply_markup", "") for _, pl in SENT2)
+    assert any("remove_keyboard" in pl.get("reply_markup", "") for _, pl in SENT2)
     SENT2.clear()
     rr.handle_command("/steps", rr.default_settings(), ms2, cfg)
     assert any("Анкета" in str(pl.get("text", "")) for _, pl in SENT2)
@@ -1302,7 +1323,7 @@ assert "Поиск квартиры для покупки включён" in sen
 assert "нашлось подходящих: 3" in sent_msgs[0][1] and "45 дней" in sent_msgs[0][1]
 cards_ = [m for m in sent_msgs if "Что нашлось сейчас" in m[1]]          # без списка: каждая — своей карточкой
 assert len(cards_) == 3 and all(shown(i) for i in (101, 104, 202)) and "1 из 3" in cards_[0][1]
-assert all("Собственник" in m[1] and "L:n:" in m[2] for m in cards_)
+assert all("Собственник" in m[1] for m in cards_)
 # повторный проход ничего не дублирует и вступление не повторяет
 sent_msgs.clear()
 with mock.patch.object(rr.requests, "get", fake_uy_get), mock.patch.object(rr, "tg_call", fake_sale_tg), \
@@ -1380,7 +1401,7 @@ with mock.patch.object(rr.requests, "get", fake_uy_get), mock.patch.object(rr, "
 assert all(shown(i) for i in (102, 201, 301)), [m[1][:60] for m in sent_msgs]   # 102, 201 и 3-комнатная 301
 assert "Условия поиска обновлены" in sent_msgs[0][1] and "нашлось подходящих: 3" in sent_msgs[0][1]
 assert sum("Маклер / агентство" in m[1] for m in sent_msgs) == 2         # 102 и 201
-assert any("<b>3-комн" in m[1] and "Собственник" in m[1] and "sale:uybor:301" in m[2] for m in sent_msgs)
+assert any("<b>3-комн" in m[1] and "Собственник" in m[1] and "listings/301" in m[1] for m in sent_msgs)
 assert not shown(101)                                                   # не повторили
 sent_msgs.clear()
 with mock.patch.object(rr.requests, "get", fake_uy_get), mock.patch.object(rr, "tg_call", fake_sale_tg), \
@@ -1547,7 +1568,7 @@ i_card = next(i for i, t in enumerate(texts) if "listings/701" in t)
 card1 = texts[i_card]                                                       # карточка и разбор — одно сообщение
 assert "<b>Ипотека</b>" in card1 and "<b>Торг</b>" in card1 and "<blockquote expandable>" in card1, card1
 assert rr.tg_len(card1) <= rr.CAPTION_MAX and not any("📊 <b>Анализ</b>" in t for t in texts), texts
-assert sent_msgs[i_card][2] and "L:n:" in sent_msgs[i_card][2] and "|0.0" in sent_msgs[i_card][2]
+assert not sent_msgs[i_card][2]                                            # без кнопок — словами
 assert sstore.get_kv("sale_analysis_backfill") is True
 sent_msgs.clear()
 sstore.set_kv("sale_analysis_backfill", False)                              # как после обновления бота
@@ -1741,9 +1762,10 @@ with mock.patch.object(rr, "tg_call", lambda c, m, pl, **k: (W.append((m, pl)), 
     cg.show_offers(cfg, ws)
     assert "написали 1 маклерам" in W[-1][1]["text"] and "перешлите" in W[-1][1]["text"]
 for t in (rr.HELP_TEXT,):
-    assert "Ищет Ra'no" in t and "Через маклеров" in t and "/new" not in t and "/brokers" not in t
+    assert "в шортлист" in t and "ответьте на его карточку" in t and "/new" not in t and "/brokers" not in t
+    assert "Внизу три кнопки" not in t
 wdb.unlink(missing_ok=True)
-print("OK — без команд: кнопки внизу, понятные подсказки, маклер не получает приветствие дважды")
+print("OK — без команд и кнопок: справка словами, понятные подсказки, маклер не получает приветствие дважды")
 
 # ============ мгновенные «Варианты»/«Маклерам»: снимок для воркера ============
 sdb2 = Path("/tmp/test_snap.db"); sdb2.unlink(missing_ok=True)
@@ -1992,17 +2014,17 @@ with mock.patch.object(rr, "tg_call", xtg):
     assert SS.send_pick(cfg, xs) == 2
 cards = [pl for m, pl in XT if m in ("sendMessage", "sendPhoto") and "Подборка дня" in (pl.get("text") or pl.get("caption") or "")]
 assert len(cards) == 2 and "1 из 2" in (cards[0].get("text") or cards[0].get("caption"))   # каждая — своей карточкой
-assert "L:n:sale:joymee:77" in cards[0]["reply_markup"] and "L:n:sale:realting:555" in cards[1]["reply_markup"]
+assert {"L:sale:joymee:77", "L:sale:realting:555"} <= {r for r, _ in rr.CARD_LOG}
 assert SS.pick_pending(xs) == []
 assert [x["key"] for x in xs.get_kv("last_pick")] == ["sale:joymee:77", "sale:realting:555"]
 XT.clear()
 with mock.patch.object(rr, "tg_call", xtg):
     assert SS.resend_last_pick(cfg, xs) == 2
-assert "Последняя подборка" in (XT[-1][1].get("text") or XT[-1][1].get("caption")) and "L:n:sale:realting:555" in XT[-1][1]["reply_markup"]
+assert "Последняя подборка" in tx_(XT[-1][1]) and rr.CARD_LOG[-1][0] == "L:sale:realting:555"
 XT.clear()
 with mock.patch.object(rr, "tg_call", xtg), mock.patch.object(rr, "SALE_DB_PATH", xdb):
     t5, _ = rr.handle_callback("L:v:sale:joymee:77", rr.default_settings(), ys if "ys" in dir() else None, cfg, 1)
-assert any(m in ("sendMessage", "sendPhoto") and "L:n:sale:joymee:77" in pl.get("reply_markup", "") for m, pl in XT)   # разбор с 👍/Мимо
+assert rr.CARD_LOG[-1][0] == "L:sale:joymee:77"                                 # карточка с разбором
 assert any("Открыть на Joymee" in (pl.get("text") or pl.get("caption") or "") for m, pl in XT)
 assert xs.conn.execute("SELECT notified FROM listings WHERE key='sale:joymee:77'").fetchone()[0] == 1
 with mock.patch.object(rr, "tg_call", xtg), mock.patch.object(rr, "SALE_DB_PATH", xdb):
@@ -2139,8 +2161,8 @@ with mock.patch.object(rr, "tg_call", dtg):
     cheap = dict(own, key="sale:uybor:3", site="Uybor", seller="Нигора", price_usd=41000, url="https://uybor.uz/3")
     assert SS.attach_dup(cfg, ds, cheap, "sale:joymee:1", {}) == "cheaper"
     m = DT[-1][1]
-    t_ = m.get("text") or m.get("caption") or ""                         # полная карточка, а не строчка
-    assert "дешевле на $2 000" in t_ and "L:n:sale:uybor:3" in m["reply_markup"] and "$43 000" in t_ and "<b>Ипотека</b>" in t_
+    t_ = tx_(m)                                                          # полная карточка, а не строчка
+    assert "дешевле на $2 000" in t_ and rr.CARD_LOG[-1][0] == "L:sale:uybor:3" and "$43 000" in t_ and "<b>Ипотека</b>" in t_
     c = json.loads(ds.conn.execute("SELECT data FROM listings WHERE key='sale:uybor:3'").fetchone()[0])
     assert {a["key"] for a in c["alts"]} == {"sale:joymee:1", "sale:joymee:2"}
     # дешевле, а прежняя ждёт в подборке — заменяем её
@@ -2277,12 +2299,11 @@ with mock.patch.object(rr, "SALE_DB_PATH", ldb), mock.patch.object(rr, "tg_call"
         mock.patch.object(SS, "listing_from_url", lambda c, u: (dict(link_l, photo_urls=["https://x/1.jpg"]), "sale")), \
         mock.patch.object(SS, "_uybor_by_id", lambda rr_, i: ({"photo_urls": [f"https://api.uybor.uz/{i}.jpg"]}, None)):
     rr.handle_link(cfg, lr_, {"_link": "https://www.olx.uz/d/obyavlenie/kv-ID1.html", "text": "найди похожие https://www.olx.uz/d/obyavlenie/kv-ID1.html"})
-tx_ = lambda pl: pl.get("text") or pl.get("caption") or ""
 card = next(tx_(pl) for m, pl in LT if "Уже видела" in tx_(pl))
 assert "<b>Ипотека</b>" in card and rr.tg_len(card) <= rr.CAPTION_MAX and sum("Уже видела" in tx_(pl) for m, pl in LT) == 1
 assert "uybor.uz/listings/777" in card and "маклер" in card
-assert any("L:sim:sale:link:" in (pl.get("reply_markup") or "") for m, pl in LT)
-simm = " ".join(pl.get("reply_markup") or "" for m, pl in LT if "Похожий вариант" in (pl.get("text") or pl.get("caption") or ""))
+assert any(r.startswith("L:sale:link:") for r, _ in rr.CARD_LOG)
+simm = " ".join(r for r, t in rr.CARD_LOG if "Похожий вариант" in t)
 assert "sale:uybor:800" in simm and "sale:uybor:899" not in simm                           # похожие — карточками; другой район — нет
 ls2 = rr.Store(ldb)
 assert ls2.known("sale:uybor:800") and [x["key"] for x in ls2.get_kv("last_pick")][0].startswith("sale:uybor:")
@@ -2347,7 +2368,6 @@ with mock.patch.object(rr, "SALE_DB_PATH", sdb2), mock.patch.object(rr, "tg_call
         mock.patch.object(SS, "listing_from_url", lambda c, u: (dict(rent_l, photo_urls=["https://x/r.jpg"], url=u,
                                                                    **({} if u == rent_l["url"] else {"key": "ru:" + u[-3:]})), "rent")):
     rr.handle_link(cfg, rs2, {"_link": rent_l["url"], "text": rent_l["url"] + " похожие есть?"})
-tx_ = lambda pl: pl.get("text") or pl.get("caption") or ""
 card = next(tx_(pl) for m, pl in RT if "Похожие (3)" in tx_(pl))
 assert "~$600/мес" in card and "на 17% дороже" in card, card
 assert sum("Похожая аренда" in tx_(pl) for m, pl in RT) == 3                     # каждая — своей карточкой с фото
@@ -2468,13 +2488,21 @@ assert ct.startswith("🔥") and "<b>3-комн · 42 м² · этаж 3/6</b>" 
 assert ct.count("101-00-15") == 1                                           # телефон — строкой, не в описании
 assert rr.sale_kb("sale:uybor:5", "self")["inline_keyboard"][0][1]["callback_data"] == "L:n:sale:uybor:5|0.0"
 SP = []
-with mock.patch.object(rr.requests, "get", fake_img), \
-        mock.patch.object(rr.requests, "post", lambda url, data=None, files=None, timeout=None:
-                          SP.append((url, data, files)) or mock.Mock(status_code=200, json=lambda: {"result": {"message_id": 42}})):
-    assert rr.send_card(ss_tg, dict(long_l, photo_urls=["http://x/big", "http://x/s1"]), ct,
-                        kb=rr.sale_kb("sale:uybor:5", "self"), silent=True) == [42]
-assert SP[0][0].endswith("/sendPhoto") and SP[0][1]["caption"] == ct and SP[0][1]["disable_notification"] and "L:n:" in SP[0][1]["reply_markup"]
-print("OK — покупка: карточка и разбор одним сообщением — коллаж из фото, вывод сверху, детали свёрнуты, ≤1024 символов")
+def _rec_files(cfg_, method, data, files, timeout=90):
+    SP.append((method, data, files)); return {"ok": True, "result": [{"message_id": 42}, {"message_id": 43}, {"message_id": 44}]}
+_geo_t.static_map = lambda *a, **k: b"MAPJPEG"
+with mock.patch.object(rr.requests, "get", fake_img), mock.patch.object(rr, "tg_call_files", _rec_files):
+    ids_ = rr.send_card(dict(ss_tg, worker_url=""), dict(long_l, photo_urls=["http://x/big", "http://x/s1"],
+                                                       geo={"lat": 41.3, "lon": 69.28, "src": "сайт"}),
+                        ct, silent=True, ref="L:sale:uybor:5")
+_geo_t.static_map = lambda *a, **k: None
+assert ids_ == [42, 43, 44]
+meth, data_, files_ = SP[0]
+med = json.loads(data_["media"])
+assert meth == "sendMediaGroup" and med[0]["media"] == "attach://map" and len(med) == 3   # карта первой, потом фото
+assert med[0]["caption"] == ct and "reply_markup" not in data_ and data_["disable_notification"]
+assert set(files_) == {"map", "p0", "p1"} and rr.CARD_LOG[-1][0] == "L:sale:uybor:5"
+print("OK — карточка: обычный альбом — карта с отметкой первой, фото следом, подпись под альбомом, без кнопок")
 
 
 # ============ место внутри района: ориентиры из объявлений, соседи в радиусе, карта, поиск у ориентира ============

@@ -1130,6 +1130,20 @@ def detect_bot_username(cfg) -> str:
     return name
 
 
+def tg_call_files(cfg, method: str, data: dict, files: dict, timeout: int = 90):
+    """Запрос к Telegram с файлами (альбом с картой и фото). None — не ушло."""
+    api = f'https://api.telegram.org/bot{cfg["telegram_bot_token"]}/{method}'
+    try:
+        r = requests.post(api, data=data, files=files or None, timeout=timeout)
+        if r.status_code != 200:
+            log.warning("Telegram %s %s: %s", method, r.status_code, r.text[:200])
+            return None
+        return r.json()
+    except requests.RequestException as e:
+        log.warning("Telegram %s не ушёл: %s", method, e)
+        return None
+
+
 def tg_call(cfg, method: str, payload: dict, timeout: int = 20, quiet: bool = False):
     api = f'https://api.telegram.org/bot{cfg["telegram_bot_token"]}/{method}'
     try:
@@ -1190,19 +1204,10 @@ def send_listing(cfg, settings: dict, l: dict, likely_makler: bool, text: str = 
     text = text or format_message(l, cfg, likely_makler)
     photos = (l.get("photo_urls") or []) if settings.get("photos", True) else []
     quiet = {"disable_notification": True} if silent else {}
-    if photos:
-        media = [{"type": "photo", "media": u} for u in photos[:4]]
-        media[0]["caption"] = text[:1000]
-        media[0]["parse_mode"] = "HTML"
-        r = tg_call(cfg, "sendMediaGroup", {
-            "chat_id": cfg["telegram_chat_id"],
-            "media": json.dumps(media), **quiet,
-        })
-        if r is not None:
-            return _msg_ids(r) or True
-        up = send_photo_upload(cfg, photos[0], text)
-        if up:
-            return up
+    if photos:                                   # альбом: карта с отметкой + фото, подпись под ним
+        ids = send_card(cfg, l, text, silent=silent, ref="L:" + (l.get("key") or ""))
+        if ids:
+            return ids
         log.info("Фото не отправились, шлю текстом: %s", l["title"][:50])
     r = tg_call(cfg, "sendMessage", {"chat_id": cfg["telegram_chat_id"], "text": text, "parse_mode": "HTML", **quiet})
     return False if r is None else (_msg_ids(r) or True)
@@ -1225,21 +1230,21 @@ WELCOME_TEXT = (
     "С чего начнём? Напишите своими словами, что ищете, — например: «купить двушку в центре до $50 000, "
     "нужна ипотека» 👇")
 
-HELP_TEXT = """🏠 <b>Ra'no</b> — ваш ИИ-ассистент по поиску жилья. Рассказываю, как со мной дружить 🙂
+HELP_TEXT = """🏠 <b>Ra'no</b> — ваш ИИ-ассистент по поиску жилья. Кнопки не нужны — просто пишите мне 🙂
 
-<b>Команды запоминать не нужно.</b> Внизу три кнопки — два способа искать:
-🔎 <b>Ищет Ra'no</b> — я сама смотрю сайты (Uybor, Realt24, Joymee, Realting, Yangiuylar) и Telegram-каналы. Выгодное — сразу, остальное — в 19:30 лучшими карточками
-📇 <b>Через маклеров</b> — если на сайтах пусто: запрос маклерам по одному, их варианты карточками, шортлист
-⋯ <b>Ещё</b> — вариант из WhatsApp, цены рынка, текст запроса, начать заново
+<b>Что ищем</b>
+«купить двушку до $60 000, Мирабад», «бюджет 70 тысяч», «добавь Юнусабад», «рядом с метро Ойбек, до 2 км»
 
-Поменять поиск — просто напишите («бюджет 60 тысяч», «добавь Юнусабад»).
-Варианты из WhatsApp — перешлите сюда, соберу карточку с анализом цены.
-Ссылка на объявление (OLX, Uybor, Joymee, канал) — разберу и найду похожие.
-Знаете Telegram-канал с объявлениями по Ташкенту — пришлите ссылку или @имя: проверю и добавлю в поиск для всех 📡
-Понравилось объявление — «👍 В шортлист». Шортлист приходит карточками с фото: на каждой — уточнить, просмотр, заметка, «нравится» или «убрать».
-Напоминаю сама: если маклер молчит сутки, утром в день просмотра и за 2 часа до него; в 20:00 — итоги дня. Я пунктуальная 😉
+<b>С вариантом</b> — ответьте на его карточку (свайп влево по сообщению):
+«в шортлист» · «мимо» (можно с причиной: «мимо, дорого») · «уточни» · «просмотр завтра 18:00» · «заметка: торг 2000» · «похожие»
 
-Для тонкой настройки радара остались команды: /menu, /status, /owner, /segment, /work, /photos, /pause, /resume"""
+<b>Ещё</b>
+«что нашла?» · «ещё варианты» · «покажи шортлист» · «напиши маклерам» · «цены рынка» · «начать заново»
+Ссылка на объявление — разберу и найду похожие. Вариант из WhatsApp — перешлите сюда.
+Канал с объявлениями по Ташкенту — пришлите @имя, добавлю в поиск для всех 📡
+
+Каждый вариант — альбом: первым фото — карта, где квартира, дальше — фото квартиры, под ними разбор цены.
+Напоминаю сама: если маклер молчит сутки, в день просмотра и за 2 часа; в 20:00 — итоги дня."""
 
 DISTRICT_LIST = sorted(DISTRICTS)
 PRICE_PRESETS = [300, 400, 500, 700, 1000, 1500]
@@ -2025,7 +2030,7 @@ def outreach_empty_text(store, deal) -> str:
     return (f"📇 Новых маклеров {_kind(deal)} с контактом пока нет.\n"
             f"Всего в базе {_kind(deal)}: {total} (с контактом {withph}).\n"
             + ("Собираю их с Realt24, Joymee, Realting, Uybor и из Telegram-каналов — "
-               "загляните через час — кнопка «📇 Через маклеров»" if deal == "sale" else
+               "загляните через час — напишите «напиши маклерам»" if deal == "sale" else
                "База пополняется по мере работы радара — попробуйте позже."))
 
 
@@ -2087,7 +2092,7 @@ def send_next_broker(cfg, store) -> bool:
     if not pool:
         send_telegram(cfg, f"✅ Всех прошли: написали {st.get('sent', 0)}, "
                            f"пропустили {st.get('skipped', 0)}. Новые маклеры появляются сами — "
-                           "загляните через пару часов в «📇 Через маклеров», подкину ещё.")
+                           "напишите «напиши маклерам» через пару часов — подкину ещё.")
         return False
     b = pool[0]
     body, first_row = broker_card(b, deal, text)
@@ -2124,7 +2129,7 @@ def show_site_listing(cfg, key) -> str:
         if sale_sources.photo_repair(cfg, l) or fresh:
             sst.conn.execute("UPDATE listings SET data=? WHERE key=?", (sst.pack(l), l["key"]))
             sst.conn.commit()
-        ids = send_card(cfg, l, format_sale_card(sst, l, cfg), kb=sale_kb(l["key"], "self"))
+        ids = send_card(cfg, l, format_sale_card(sst, l, cfg), ref="L:" + l["key"])
         if not ids:
             return "Не получилось отправить 🙈"
     finally:
@@ -2350,7 +2355,7 @@ def handle_link(cfg, store, msg):
                 + (f'. Впервые — {when.astimezone(TASHKENT_TZ).strftime("%d.%m %H:%M")}' if when else ""))
         if not l.get("price_usd"):
             seen = (seen + "\n" if seen else "") + "⚠️ Цену на странице не нашла — разбор неполный."
-        send_card(cfg, l, format_sale_card(sst, l, cfg, note=seen), kb=link_kb(l["key"], "self"))
+        send_card(cfg, l, format_sale_card(sst, l, cfg, note=seen), ref="L:" + l["key"])
         if LIKE_WORDS.search(note):
             send_similar(cfg, sst, l)
     finally:
@@ -2385,7 +2390,7 @@ def handle_rent_link(cfg, store, sst, l, note=""):
                      + (f"эта на {abs(gap) * 100:.0f}% {'дешевле' if gap < 0 else 'дороже'}" if abs(gap) >= 0.03 else "эта в рынке"))
     kb = {"inline_keyboard": [[{"text": "🔎 Похожие", "callback_data": f"L:sim:{l['key']}"[:64]},
                                {"text": "🎯 Искать такие", "callback_data": f"L:like:{l['key']}"[:64]}]]}
-    send_card(cfg, l, text, kb=kb)
+    send_card(cfg, l, text, ref="L:" + l["key"])
     if LIKE_WORDS.search(note or ""):
         send_similar_rent(cfg, store, sst, l)
 
@@ -2412,7 +2417,7 @@ def send_similar_rent(cfg, store, sst, l) -> int:
         kb = {"inline_keyboard": [[{"text": "🎯 Искать такие", "callback_data": f"L:like:{o['key']}"[:64]}]]}
         if not store.known(o["key"]):
             store.save(o, notified=True)
-        n += bool(send_card(cfg, o, text, kb=kb))
+        n += bool(send_card(cfg, o, text, ref="L:" + o["key"]))
         time.sleep(1)
     return n
 
@@ -2703,6 +2708,22 @@ def apply_worker_done(data, cfg, store):
         store.set_kv("outreach", st)
 
 
+def _listing_any(store, key):
+    """Объявление по ключу: покупка — в sale.db, аренда — в базе радара."""
+    for path, st in ((SALE_DB_PATH, None), (None, store)):
+        if path is not None and not path.exists():
+            continue
+        s_ = st or Store(path)
+        try:
+            row = s_.conn.execute("SELECT data FROM listings WHERE key=?", (key,)).fetchone()
+        finally:
+            if st is None:
+                s_.conn.close()
+        if row:
+            return json.loads(row[0] or "{}")
+    return None
+
+
 def handle_callback(data: str, settings: dict, store, cfg: dict, message_id=None):
     """Возвращает (всплывающая_подсказка, view_для_перерисовки)."""
     d = data or ""
@@ -2752,6 +2773,13 @@ def handle_callback(data: str, settings: dict, store, cfg: dict, message_id=None
         finally:
             sst.conn.close()
         return search_like(cfg, store, l), None
+    if d.startswith("L:a:"):                   # из чата: «уточни» по объявлению — в шортлист и спросить
+        key = d[4:]
+        l = _listing_any(store, key)
+        if not l:
+            return "Объявление не найдено", None
+        oid, _ = concierge.add_site_offer(cfg, store, l)
+        return concierge.request_details(cfg, store, [oid]), None
     if d.startswith("L:v:"):                   # фото и разбор объявления из подборки
         return show_site_listing(cfg, d[4:].split("|")[0]), None
     if d.startswith("L:"):                     # объявление с сайта: в шортлист / мимо
@@ -2764,6 +2792,8 @@ def handle_callback(data: str, settings: dict, store, cfg: dict, message_id=None
                                        (key.replace("%", "") + "%",)).fetchone()
             finally:
                 sst.conn.close()
+        if not row and store is not None:      # аренда — в базе радара
+            row = store.conn.execute("SELECT data FROM listings WHERE key=?", (key,)).fetchone()
         if not row:
             return "Объявление не найдено", None
         if kind == "n":                        # «мимо»: из подборки убрать, отметить — пригодится для оценки
@@ -3165,6 +3195,12 @@ def process_commands(cfg: dict, store, long_poll: int = 0) -> dict:
             handle_owner_offer(cfg, store, msg)
             changed = True
             continue
+        for tag in ("_view", "_note"):       # объявление с сайта (ответ на карточку) — сначала в шортлист
+            v = msg.get(tag) or {}
+            if v.get("key") and not v.get("oid"):
+                l_ = _listing_any(store, v["key"])
+                if l_:
+                    v["oid"] = concierge.add_site_offer(cfg, store, l_)[0]
         if msg.get("_view"):                 # воркер разобрал время просмотра и уже ответил
             v = msg["_view"]
             concierge.set_viewing(cfg, store, int(v.get("oid") or 0), v.get("at"), v.get("label", ""),
@@ -3172,7 +3208,8 @@ def process_commands(cfg: dict, store, long_poll: int = 0) -> dict:
             changed = snap = True
             continue
         if msg.get("_note"):                 # заметка к варианту — воркер уже подтвердил
-            concierge.add_note(store, int(msg["_note"].get("oid") or 0), msg.get("text") or "")
+            concierge.add_note(store, int(msg["_note"].get("oid") or 0),
+                               msg["_note"].get("text") or msg.get("text") or "")
             changed = snap = True
             continue
 
@@ -3504,7 +3541,8 @@ def format_sale_message(l: dict, cfg: dict) -> str:
 # Коллаж из фото + подпись (≤1024 символа у Telegram) + кнопки. Вывод сверху, факты
 # короткими строками без эмодзи в начале, экономика тремя строками, остальное — в «Подробнее».
 
-CAPTION_MAX = 1000          # лимит Telegram — 1024 видимых символа (UTF-16); держим запас
+CAPTION_MAX = 1000
+TESTING = False         # тесты: без запросов адреса по карте          # лимит Telegram — 1024 видимых символа (UTF-16); держим запас
 
 
 def tg_len(s: str) -> int:
@@ -3553,8 +3591,16 @@ def format_sale_card(store, l: dict, cfg: dict, head: str = "", note: str = "") 
         top.append("<b>" + " · ".join(spec) + "</b>")
     g = l.get("geo") or {}
     where = l.get("district") or "район не указан"
+    street = ""
+    if g.get("src") == "сайт" and not TESTING:     # точный адрес — улица и махалля по карте
+        try:
+            street = geo.reverse(g["lat"], g["lon"])
+        except Exception:
+            street = ""
+    if street:
+        where += ", " + street
     if g.get("label") and not g["label"].startswith("м. "):
-        where += f', у «{g["label"]}»' if g.get("src") == "сайт" else f', {g["label"]}'
+        where += f' (у «{g["label"]}»)' if g.get("src") == "сайт" else f', {g["label"]}'
     nb = l["_nb"] if "_nb" in l else l.get("new_building")
     place = [where, "новостройка" if nb else "вторичка",
              FOUNDATION_RU.get(l.get("house_type") or "", l.get("house_type") or "")]
@@ -3814,41 +3860,119 @@ def make_collage(urls, more: int = 0, width: int = 1280, cfg=None):
     return out.getvalue()
 
 
-def send_card(cfg, l: dict, text: str, kb: dict = None, silent: bool = False):
-    """Одно сообщение на вариант: коллаж (или одно фото) с подписью и кнопками.
-    Нет фото или они не грузятся — тем же текстом. Возвращает id сообщения списком; False — не ушло."""
-    photos = l.get("photo_urls") or []
-    long_text = tg_len(text) > 1024              # в подпись к фото не влезет — текстом, фото превью сверху
-    extra = {"parse_mode": "HTML"}
-    if kb:
-        extra["reply_markup"] = json.dumps(kb, ensure_ascii=False)
-    if silent:
-        extra["disable_notification"] = True
-    if photos and not long_text:
+def _jpeg(content: bytes):
+    """Фото для Telegram: JPEG не больше 2048 px (у Yangiuylar рендеры по 10 МБ, у Realting — webp)."""
+    try:
+        from io import BytesIO
+        from PIL import Image
+        im = Image.open(BytesIO(content))
+        im = im.convert("RGB")
+        im.thumbnail((2048, 2048))
+        out = BytesIO()
+        im.save(out, "JPEG", quality=85)
+        return out.getvalue()
+    except Exception:
+        return content
+
+
+def _fit_caption(text: str) -> str:
+    """Подпись к альбому — до 1024 символов: сначала уходит «Подробнее», потом хвост."""
+    if tg_len(text) <= 1024:
+        return text
+    t = re.sub(r"\n*<blockquote expandable>.*?</blockquote>", "", text, flags=re.S)
+    lines = t.split("\n")
+    while lines and tg_len("\n".join(lines)) > 1020:
+        lines.pop(-2 if len(lines) > 1 else -1)    # последняя строка — ссылка на сайт, её держим
+    return "\n".join(lines)
+
+
+def card_line(text: str) -> str:
+    """Короткая подпись варианта для воркера: «2-комн · 46 м² · Чиланзар · $66 000»."""
+    plain = html_lib.unescape(re.sub(r"<[^>]+>", "", text or ""))
+    rows = [r.strip() for r in plain.split("\n") if r.strip()]
+    spec = next((r for r in rows if "комн" in r or "м²" in r), "")
+    price = next((r for r in rows if r.startswith("$") or "сум" in r[:20]), "")
+    place = next((r for r in rows if r.startswith(("Чиланзар", "Мирабад", "Юнусабад", "Яккасарай", "Яшнабад",
+                                                    "Сергели", "Алмазар", "Мирзо", "Шайхантахур", "Янгихаёт",
+                                                    "Бектемир", "Учтепа"))), "")
+    return " · ".join(x.split(" · ")[0] for x in (spec, place, price) if x)[:120] or (rows[0][:120] if rows else "")
+
+
+CARD_LOG = []          # последние отправленные карточки (ref, текст) — для отладки и тестов
+
+
+def remember_card(cfg, ids, ref, text):
+    """Воркеру: какие сообщения — какой вариант, чтобы «в шортлист» ответом на карточку понималось."""
+    CARD_LOG.append((ref, text))
+    del CARD_LOG[:-50]
+    if not ref or not ids or ids is True or not cfg.get("worker_url"):
+        return
+    worker_post(cfg, "/svc/cards", {"ids": list(ids), "ref": ref, "line": card_line(text)}, timeout=10)
+
+
+def send_card(cfg, l: dict, text: str, kb: dict = None, silent: bool = False, ref: str = None):
+    """Вариант — обычным альбомом Telegram: первым — карта с отметкой, где квартира, дальше фото;
+    подпись — под альбомом. Кнопок нет: управляют словами (ответом на карточку).
+    ref — какой это вариант («L:<ключ>» объявление, «O:<номер>» вариант маклера) — для ответов в чате.
+    Возвращает id сообщений списком; False — не ушло."""
+    text = _fit_caption(text)
+    photos = list(l.get("photo_urls") or [])[:6]
+    media, files = [], {}
+    g = l.get("geo")
+    if not g:
         try:
-            img = make_collage(photos[:4], more=len(photos) - 4, cfg=cfg)
+            g = geo.locate(dict(l))                  # координаты сайта, ориентир или метро из текста
+        except Exception:
+            g = None
+    if g:
+        approx = None if g.get("src") == "сайт" else max(0.4, float(g.get("spread") or 0.6))
+        try:
+            mp = geo.static_map(g["lat"], g["lon"], approx_km=approx)
         except Exception as e:
-            log.warning("коллаж не собрался: %s", e)
-            img = None
-        if img:
+            log.info("[карта] %s", e)
+            mp = None
+        if mp:
+            files["map"] = ("map.jpg", mp, "image/jpeg")
+            media.append({"type": "photo", "media": "attach://map"})
+    for i, ref_ in enumerate(photos):
+        if str(ref_).startswith("http"):
             try:
-                api = f'https://api.telegram.org/bot{cfg["telegram_bot_token"]}/sendPhoto'
-                r = requests.post(api, data={"chat_id": cfg["telegram_chat_id"], "caption": text, **extra},
-                                  files={"photo": ("rano.jpg", img, "image/jpeg")}, timeout=40)
-                if r.status_code == 200:
-                    return _msg_ids(r.json()) or True
-                log.warning("коллаж не принят Telegram: %s %s", r.status_code, r.text[:200])
-            except requests.RequestException as e:
-                log.warning("коллаж не отправился: %s", e)
-        r = tg_call(cfg, "sendPhoto", {"chat_id": cfg["telegram_chat_id"], "photo": photos[0],
-                                       "caption": text, **extra}, quiet=True)
+                b = photo_bytes(cfg, ref_)
+            except Exception as e:                   # фото не скачалось — без него
+                log.info("фото не скачалось: %s", e)
+                b = None
+            if b and len(b) > 1000:
+                files[f"p{i}"] = (f"p{i}.jpg", _jpeg(b), "image/jpeg")
+                media.append({"type": "photo", "media": f"attach://p{i}"})
+        else:                                        # фото из Telegram (прислал маклер) — по file_id
+            media.append({"type": "photo", "media": ref_})
+    quiet = {"disable_notification": True} if silent else {}
+    ids = None
+    if media:
+        media[0]["caption"] = text
+        media[0]["parse_mode"] = "HTML"
+        if len(media) == 1:
+            m = media[0]
+            data = {"chat_id": cfg["telegram_chat_id"], "caption": text, "parse_mode": "HTML", **quiet}
+            if m["media"].startswith("attach://"):
+                r = tg_call_files(cfg, "sendPhoto", data, {"photo": files[m["media"][9:]]})
+            else:
+                r = tg_call(cfg, "sendPhoto", {**data, "photo": m["media"]}, quiet=True)
+        else:
+            data = {"chat_id": cfg["telegram_chat_id"], "media": json.dumps(media, ensure_ascii=False), **quiet}
+            r = tg_call_files(cfg, "sendMediaGroup", data, files) if files else tg_call(cfg, "sendMediaGroup", data)
         if r is not None:
-            return _msg_ids(r) or True
-    prev = ({"link_preview_options": json.dumps({"url": photos[0], "prefer_large_media": True,
-                                                 "show_above_text": True})} if photos else
-            {"disable_web_page_preview": True})
-    r = tg_call(cfg, "sendMessage", {"chat_id": cfg["telegram_chat_id"], "text": text[:4096], **prev, **extra})
-    return False if r is None else (_msg_ids(r) or True)
+            ids = _msg_ids(r) or True
+    if not ids:                                      # запасной путь — текстом
+        r = tg_call(cfg, "sendMessage", {"chat_id": cfg["telegram_chat_id"], "text": text[:4096], "parse_mode": "HTML",
+                                         "disable_web_page_preview": True, **quiet})
+        ids = False if r is None else (_msg_ids(r) or True)
+    if ids:
+        try:
+            remember_card(cfg, ids, ref, text)
+        except Exception as e:
+            log.info("карточка не запомнена: %s", e)
+    return ids
 
 
 def send_site_cards(cfg, sst, items, title="", more=0, more_cb="R:pick", limit=5) -> int:
@@ -3883,10 +4007,9 @@ def send_site_cards(cfg, sst, items, title="", more=0, more_cb="R:pick", limit=5
     for i, l in enumerate(ready, 1):
         head = f"🔎 <b>{escape_html(title)}</b> · {i} из {len(ready)}" if title and len(ready) > 1 else \
             (f"🔎 <b>{escape_html(title)}</b>" if title else "")
-        kb = sale_kb(l["key"], "self")
-        if more and i == len(ready):
-            kb["inline_keyboard"].append([{"text": f"Ещё варианты ({more})", "callback_data": more_cb}])
-        if send_card(cfg, l, format_sale_card(sst, l, cfg, head=head), kb=kb):
+        if more and i == len(ready):                 # кнопок нет — подсказка словами
+            head += f"\nЕщё {more} — напишите «ещё»"
+        if send_card(cfg, l, format_sale_card(sst, l, cfg, head=head), ref="L:" + l["key"]):
             sent += 1
         time.sleep(1)
     return sent
@@ -4044,7 +4167,7 @@ def run_sale_search(cfg: dict, store, settings: dict, force: bool = False) -> in
                  f"За последние {days} дней подходящих нет — но я на посту, пришлю, как только появятся 👀")
         title = "Условия поиска обновлены" if intro_sent else "Поиск квартиры для покупки включён"
         intro = (f"🏷 <b>{title}</b>\n" + sale_criteria_text(ss) + "\n\n" + found
-                 + "\nСтатус — кнопка «🔎 Ищет Ra'no»")
+                 + "\nКак идёт поиск — меню ☰ → «Мой поиск»")
         if not send_telegram(cfg, intro):
             return 0      # Telegram недоступен — всё повторим в следующий проход
         store.set_kv("sale_intro_sent", True)
@@ -4079,8 +4202,7 @@ def run_sale_search(cfg: dict, store, settings: dict, force: bool = False) -> in
             head = (f"🔥 <b>Только что от собственника</b> · выложено {ago_text(mins)}\n"
                     "Позвоните первым — маклеры перехватывают такие за пару часов") if mins is not None else ""
             ids = send_card(cfg, l if settings.get("photos", True) else dict(l, photo_urls=[]),
-                            format_sale_card(store, l, cfg, head=head),
-                            kb=sale_kb(l["key"], "self"), silent=silent)
+                            format_sale_card(store, l, cfg, head=head), silent=silent, ref="L:" + l["key"])
             if not ids:
                 log.info("[продажа] не отправилось, повторю позже: %s", l["title"][:45])
                 break     # не сохраняем — объявление придёт в следующий проход
@@ -4218,7 +4340,7 @@ def backfill_sale_analysis(cfg: dict, store, settings: dict) -> int:
             todo.append(l)
     if todo and not send_telegram(cfg, f"📊 <b>Добавила анализ цены</b> к вариантам, которые уже "
                                        f"присылала и которые ещё в продаже ({len(todo)}). "
-                                       f"Сводка рынка — «⋯ Ещё» → «Цены рынка»"):
+                                       f"Сводка рынка — напишите «цены рынка»"):
         return 0
     n = 0
     for l in todo[:20]:
@@ -4266,7 +4388,7 @@ def sale_status_text(cfg: dict) -> str:
                 f'${_money(d["price_usd"])}' if d.get("price_usd") else ""]
         label = ", ".join(b for b in bits if b) or "вариант"
         lines.append(f'• <a href="{url}">{label}</a> — {escape_html(d.get("district") or "")}')
-    lines.append("\n📊 Цены за м², аренда и сценарии по районам — «⋯ Ещё» → «Цены рынка»")
+    lines.append("\n📊 Цены за м², аренда и сценарии по районам — напишите «цены рынка»")
     return "\n".join(lines)
 
 
@@ -4294,16 +4416,15 @@ def run():
     signal.signal(signal.SIGTERM, lambda *_: stop.update(flag=True))
 
     detect_bot_username(cfg)
-    if not once and store.get_kv("kb_v") != 2:      # новые кнопки внизу — показать один раз
+    if not once and store.get_kv("kb_v") != 3:      # кнопки внизу убраны — сказать один раз и убрать их
         if tg_call(cfg, "sendMessage", {
                 "chat_id": cfg["telegram_chat_id"], "parse_mode": "HTML",
-                "text": "✨ <b>Обновила кнопки внизу</b>\n\n"
-                        "🔎 <b>Ищет Ra'no</b> — я сама смотрю Uybor, Realt24, Joymee, Realting, Yangiuylar и "
-                        "Telegram-каналы. Выгодное присылаю сразу, остальное — в 19:30 лучшими карточками.\n"
-                        "📇 <b>Через маклеров</b> — запрос маклерам, их варианты и шортлист.\n"
-                        "⋯ <b>Ещё</b> — всё остальное.",
+                "text": "✨ <b>Теперь без кнопок — просто пишите</b>\n\n"
+                        "Каждый вариант приходит альбомом: первым — карта, где квартира, потом фото.\n"
+                        "С вариантом — ответьте на его карточку: «в шортлист», «мимо», «уточни», "
+                        "«просмотр завтра 18:00».\nМеню ☰ — новый поиск, мой поиск, шортлист и помощь.",
                 "reply_markup": json.dumps(concierge.OWNER_KB, ensure_ascii=False)}) is not None:
-            store.set_kv("kb_v", 2)
+            store.set_kv("kb_v", 3)
     enabled = {name: s for name, s in cfg["sources"].items() if s.get("enabled")}
     next_run = {name: 0.0 for name in enabled}
     mode = " (разовый проход)" if once else (f" на {minutes:.0f} мин" if minutes else "")

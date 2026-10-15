@@ -862,7 +862,8 @@ def add_site_offer(cfg, store, l):
     extra = {"url": l.get("url"), "phones": (l.get("phones") or [])[:2], "address": l.get("district_raw"),
              "summary": ", ".join(l.get("why") or []) or None, "site_key": key,
              "building": "new" if l.get("new_building") else None, "repair": l.get("repair"),
-             "mortgage": "yes" if l.get("mortgage") else None, "deal": "sale",
+             "mortgage": "yes" if l.get("mortgage") else None,
+             "deal": "sale" if key.startswith("sale:") else "rent",
              "seller": l.get("seller") or None}
     extra = {k: v for k, v in extra.items() if v}
     text = "\n".join(x for x in (l.get("title"), (l.get("text") or "")[:500]) if x)
@@ -1016,7 +1017,8 @@ def notify_offer(cfg, store, oid, pos=None, total=None):
         text = offer_card(store, cfg, oo, pos=pos, total=total)
     if not o["photos"]:
         text += "\n📷 Маклер не прислал фото — без них не сравнить, попрошу при уточнении"
-    rr.send_card(cfg, {"photo_urls": o["photos"][:6]}, text, kb=triage_keyboard(oid))
+    text += "\n<i>Ответьте на карточку: «в шортлист», «позже» или «мимо» (можно с причиной: «мимо, дорого»)</i>"
+    rr.send_card(cfg, offer_media(cfg, o), text, ref=f"O:{oid}")
 
 
 def show_offers(cfg, store, batch=None):
@@ -1214,8 +1216,8 @@ def shortlist_items(store, cfg, sort="n"):
     return title, rows, sum(1 for o in items if askable(o))
 
 
-SL_EMPTY = ("📋 <b>Шортлист пока пуст</b> — но это ненадолго 😉\n\nВарианты попадают сюда по кнопке "
-            "«👍 В шортлист» под карточкой.")
+SL_EMPTY = ("📋 <b>Шортлист пока пуст</b> — но это ненадолго 😉\n\nЧтобы добавить вариант, ответьте на его "
+            "карточку: «в шортлист».")
 
 
 def shortlist_view(store, cfg):
@@ -1271,6 +1273,41 @@ def offer_view(store, cfg, o, idx=None):
     return "\n".join(parts), {"inline_keyboard": rows}
 
 
+def offer_media(cfg, o) -> dict:
+    """Для карточки варианта: фото и где он — для карты первым фото.
+    Сайт — из объявления (фото свежие: у Joymee ссылки живут 10 минут); маклер — его фото и ориентир."""
+    ex = o.get("extra") or {}
+    key = ex.get("site_key")
+    if key:
+        l = _site_listing(key)
+        if l:
+            return l
+    where = ", ".join(x for x in (ex.get("landmark"), ex.get("address")) if x)
+    return {"photo_urls": list(o.get("photos") or [])[:6], "district": o.get("district"),
+            "text": (f"Ориентир: {where}. " if where else "") + (o.get("text") or "")}
+
+
+def _site_listing(key):
+    rr = _rr()
+    if not rr.SALE_DB_PATH.exists():
+        return None
+    try:
+        import sale_sources
+        st = rr.Store(rr.SALE_DB_PATH)
+        try:
+            row = st.conn.execute("SELECT data FROM listings WHERE key=?", (key,)).fetchone()
+        finally:
+            st.conn.close()
+        if not row:
+            return None
+        l = json.loads(row[0] or "{}")
+        sale_sources.refresh_listing(l)
+        return l
+    except Exception as e:
+        rr.log.info("объявление %s для карточки: %s", key, e)
+        return None
+
+
 def offer_photos(cfg, o) -> list:
     """Фото варианта: присланные маклером (file_id) или с сайта (свежие ссылки — у Joymee живут 10 минут)."""
     rr = _rr()
@@ -1306,7 +1343,7 @@ def offer_caption(store, cfg, o, head=""):
         if rr.tg_len(text) <= rr.CAPTION_MAX:
             break
     if not o.get("photos") and not (o.get("extra") or {}).get("site_key"):
-        text += "\n📷 Фото нет — «📨 Уточнить» попросит их у маклера"
+        text += "\n📷 Фото нет — напишите «уточни», попрошу у маклера"
     return text, kb
 
 
@@ -1323,7 +1360,7 @@ def show_offer_view(cfg, store, oid, message_id=None, head=""):
             if rr.tg_call(cfg, method, {"chat_id": cfg["telegram_chat_id"], "message_id": message_id,
                                         field: text, "parse_mode": "HTML", "reply_markup": kbj}, quiet=True) is not None:
                 return True
-    rr.send_card(cfg, {"photo_urls": offer_photos(cfg, o)}, text, kb=kb)
+    rr.send_card(cfg, offer_media(cfg, o), text, ref=f"O:{oid}")
     return True
 
 
@@ -1424,6 +1461,15 @@ def handle_offer_cb(data, cfg, store, message_id=None):
     if not o:
         return "Вариант не найден", True
     toast = ""
+    if act == "like":                         # из чата: «в шортлист», «нравится»
+        if o["status"] in ("new", "later", "rejected"):
+            set_offer_status(store, oid, "shortlist")
+            return f"👍 В шортлисте: {len(offers_by_status(store, 'shortlist'))}", True
+        act, arg = "seen", "g"
+    if act == "skip":                         # из чата: «мимо», «убрать» (+ причина)
+        if o["status"] in ("new", "later"):
+            return handle_triage_cb(f"t:r:{oid}:{arg or 'x'}", cfg, store)
+        act, arg = "seen", "n"
     if act == "ask":
         toast = request_details(cfg, store, [oid])
     elif act == "rem":
@@ -1459,11 +1505,14 @@ def handle_offer_cb(data, cfg, store, message_id=None):
         return "", True
     else:
         return "", True
-    show_offer_view(cfg, store, oid, message_id)
+    if message_id:                            # нажали кнопку на старой карточке — обновим её; из чата — не дублируем
+        show_offer_view(cfg, store, oid, message_id)
     return toast, True
 
 
-SL_PAGE = 5
+SL_PAGE = 10
+SL_HINT = ("Ответьте на карточку словами: «уточни», «просмотр в сб 11:00», «заметка: торг 2000», "
+           "«нравится» или «убрать»")
 
 
 def show_shortlist(cfg, store, message_id=None, offset=0):
@@ -1478,13 +1527,11 @@ def show_shortlist(cfg, store, message_id=None, offset=0):
     page = items[offset:offset + SL_PAGE]
     n_ask = sum(1 for o in items if askable(o))
     for i, o in enumerate(page, offset + 1):
-        text, kb = offer_caption(store, cfg, o, head=f"📋 <b>Шортлист</b> · {i} из {len(items)}")
-        if i == offset + 1 and n_ask > 1:
-            kb["inline_keyboard"].append([{"text": f"📨 Уточнить у всех ({n_ask})", "callback_data": "s:go"}])
-        if i == offset + len(page) and offset + SL_PAGE < len(items):
-            kb["inline_keyboard"].append([{"text": f"Ещё ({len(items) - offset - SL_PAGE})",
-                                           "callback_data": f"s:more:{offset + SL_PAGE}"}])
-        rr.send_card(cfg, {"photo_urls": offer_photos(cfg, o)}, text, kb=kb)
+        head = f"📋 <b>Шортлист</b> · {i} из {len(items)}"
+        if i == offset + 1:                       # кнопок нет — одна подсказка на первой карточке
+            head += "\n<i>" + SL_HINT + (f"; «уточни у всех» — спрошу {n_ask} сразу" if n_ask > 1 else "") + "</i>"
+        text, _ = offer_caption(store, cfg, o, head=head)
+        rr.send_card(cfg, offer_media(cfg, o), text, ref=f"O:{o['oid']}")
         time.sleep(1)
     return len(page)
 
@@ -1643,10 +1690,7 @@ def webapp_url(store, cfg=None):
 
 
 # те же кнопки, что ставит воркер (worker/src/index.js · OWNER_KB)
-OWNER_KB = {"keyboard": [[{"text": "🔎 Ищет Ra'no"}, {"text": "📇 Через маклеров"}],
-                         [{"text": "⋯ Ещё"}]],
-            "resize_keyboard": True, "is_persistent": True,
-            "input_field_placeholder": "Напишите, что ищете, или перешлите вариант"}
+OWNER_KB = {"remove_keyboard": True}           # кнопок внизу нет — всё словами
 
 
 def send_app_button(cfg, store, text=None):
