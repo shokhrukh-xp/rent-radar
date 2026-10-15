@@ -24,6 +24,8 @@ from datetime import datetime, timezone
 import requests
 
 import geo
+from i18n import t, dist
+dist_ = dist
 
 log = logging.getLogger("rent-radar")
 
@@ -433,15 +435,15 @@ def mortgage_line(x: dict) -> str:
     """«Ипотека — можно / нет / не указано» простыми словами, без суммы платежа."""
     ok, src, q = x.get("mortgage_ok"), x.get("mortgage_src"), x.get("mortgage_quote")
     if ok == "no":
-        s = "Ипотека — нет" + (f": «{q}»" if q else " (по пометке сайта)")
+        s = t("Ипотека — нет: «{q}»", q=q) if q else t("Ипотека — нет (по пометке сайта)")
     elif src == "общежитие":
-        s = "Ипотека — в объявлении не указано. Бывшее общежитие: без кадастра банки не дают"
+        s = t("Ипотека — в объявлении не указано. Бывшее общежитие: без кадастра банки не дают")
     elif ok == "yes":
-        s = "Ипотека — можно" + (f" («{q}»)" if q else " (по пометке сайта)")
+        s = t("Ипотека — можно («{q}»)", q=q) if q else t("Ипотека — можно (по пометке сайта)")
     else:
-        s = "Ипотека — в объявлении не указано, спросите продавца"
+        s = t("Ипотека — в объявлении не указано, спросите продавца")
     if x.get("mortgage_held"):
-        s += "; квартира сама в залоге у банка — узнайте, как снимут залог при сделке"
+        s += t("; квартира сама в залоге у банка — узнайте, как снимут залог при сделке")
     return s
 
 
@@ -478,12 +480,12 @@ def comparables(store, l: dict, min_n: int = 6, repair=None):
                 and (not segment or rnb == nb)
                 and (1 - spread) * area <= ar <= (1 + spread) * area]
 
-    kind = "бывшие общежития" if dorm else ("новостройки" if nb else "вторичка")
-    rep = {"good": ", хороший ремонт", "average": ", средний ремонт", "box": ", коробка"}.get(repair, "")
+    kind = t("бывшие общежития") if dorm else (t("новостройки") if nb else t("вторичка"))
+    rep = {"good": t(", хороший ремонт"), "average": t(", средний ремонт"), "box": t(", коробка")}.get(repair, "")
     g = l.get("geo") or {}
     if g and g.get("src") != "район" and geo.GAZ["pts"]:
         # сначала соседи: в одном районе есть и дорогие, и дешёвые части
-        where = f' от «{g["label"]}»' if g.get("label") else ""
+        where = t(" от «{label}»", label=g["label"]) if g.get("label") else ""
         for radius, spread in ((1.0, 0.3), (1.0, 0.5), (1.5, 0.5), (2.0, 0.5)):
             vals = [r[7] / r[6] for r in geo.neighbors(g["lat"], g["lon"], radius)
                     if r[9] != own and r[5] == dorm and r[4] == nb and (not codes or r[8] in codes)
@@ -492,14 +494,15 @@ def comparables(store, l: dict, min_n: int = 6, repair=None):
                 rng = f"{(1 - spread) * area:.0f}–{(1 + spread) * area:.0f} м²"
                 rad = f"{radius:g}".replace(".", ",")
                 return {"median_m2": _median(vals), "n": len(vals), "near_km": radius,
-                        "label": f"в радиусе {rad} км{where}, {kind}{rep}, {rng}"}
+                        "label": t("в радиусе {rad} км{where}, {kind}{rep}, {rng}", rad=rad, where=where, kind=kind,
+                                   rep=rep, rng=rng)}
     d = l.get("district")
     for dist, seg, spread in ((True, True, 0.3), (True, True, 0.5), (False, True, 0.3),
                               (False, True, 0.5), (True, False, 0.5)):
         vals = pick(dist, seg, spread)
         if len(vals) >= min_n:
-            where = d if dist else "весь Ташкент"
-            what = kind if (seg or dorm) else "вся продажа"
+            where = dist_(d) if dist else dist_("весь Ташкент")
+            what = kind if (seg or dorm) else t("вся продажа")
             rng = f"{(1 - spread) * area:.0f}–{(1 + spread) * area:.0f} м²"
             return {"median_m2": _median(vals), "n": len(vals), "label": f"{where}, {what}{rep}, {rng}"}
     return None
@@ -703,35 +706,38 @@ def analyze(store, l: dict, cfg: dict) -> dict:
     use_all_in = out.get("gap_all_in") is not None and not out.get("comp_same_repair")
     gap = out["gap_all_in"] if use_all_in else out.get("gap")
     out["gap_fair"] = gap
-    near = " рядом" if (out.get("comp") or {}).get("near_km") and not use_all_in else ""
+    near = t(" рядом") if (out.get("comp") or {}).get("near_km") and not use_all_in else ""
     good_yield = out.get("net_yield") is not None and out["net_yield"] >= a["usd_deposit"] + 0.02
     pct = f"{abs(gap) * 100:.0f}%" if gap is not None else ""
-    with_reno = (" даже с ремонтом" if gap < 0 else " с учётом ремонта") if use_all_in else \
-        (" с таким же ремонтом" if out.get("comp_same_repair") else "")
+    with_reno = (t(" даже с ремонтом") if gap < 0 else t(" с учётом ремонта")) if use_all_in else \
+        (t(" с таким же ремонтом") if out.get("comp_same_repair") else "")
     if gap is not None and gap >= 0.10:
-        verdict = ("🔴", "Дорого", f"на {pct} дороже похожих{near}{with_reno}")
+        verdict = ("🔴", t("Дорого"), t("на {pct} дороже похожих{near}{with_reno}", pct=pct, near=near, with_reno=with_reno))
     elif gap is not None and gap <= -0.10:
-        verdict = ("🟢", "Хорошая цена", f"на {pct} дешевле похожих{near}{with_reno}")
+        verdict = ("🟢", t("Хорошая цена"), t("на {pct} дешевле похожих{near}{with_reno}", pct=pct, near=near,
+                                             with_reno=with_reno))
     elif gap is None and out.get("comp_unreliable") is not None and out["comp_unreliable"] < 0:
         c = out["comp"]
         cpct = f'{abs(out["comp_unreliable"]) * 100:.0f}%'
-        med = f'${_money(c["median_m2"])}/м², {c["n"]} объявл.'
+        med = t("${m2}/м², {n} объявл.", m2=_money(c["median_m2"]), n=c["n"])
         if cls in ("none", "box", "average") and not out.get("comp_same_repair"):
             # похожих с таким же ремонтом мало, а с ремонтом получше сравнивать нечестно
-            verdict = ("⚪", "Сравнить не с чем",
-                       f"рядом продают в основном с ремонтом ({med}), а {('коробок' if cls == 'box' else 'таких')} "
-                       "мало — оценивайте на месте")
+            verdict = ("⚪", t("Сравнить не с чем"),
+                       t("рядом продают в основном с ремонтом ({med}), а {what} мало — оценивайте на месте",
+                         med=med, what=t("коробок") if cls == "box" else t("таких")))
         else:
-            verdict = ("⚪", "Подозрительно дёшево",
-                       f"на {cpct} дешевле похожих{' с таким же ремонтом' if out.get('comp_same_repair') else ''} "
-                       f"({med}) — проверьте адрес, документы и состояние")
+            verdict = ("⚪", t("Подозрительно дёшево"),
+                       t("на {pct} дешевле похожих{same} ({med}) — проверьте адрес, документы и состояние",
+                         pct=cpct, same=t(" с таким же ремонтом") if out.get("comp_same_repair") else "", med=med))
     elif gap is None:
-        verdict = ("⚪", "Сравнить не с чем", "мало похожих объявлений — оценивайте на месте")
+        verdict = ("⚪", t("Сравнить не с чем"), t("мало похожих объявлений — оценивайте на месте"))
     else:
-        verdict = ("🟡", "Цена в рынке", (f"на {pct} {'дешевле' if gap < 0 else 'дороже'} похожих{near}{with_reno}"
-                                          if abs(gap) >= 0.02 else "как у похожих") + " — торгуйтесь")
+        tpl = "на {pct} дешевле похожих{near}{with_reno}" if gap < 0 else "на {pct} дороже похожих{near}{with_reno}"
+        verdict = ("🟡", t("Цена в рынке"), (t(tpl, pct=pct, near=near, with_reno=with_reno)
+                                             if abs(gap) >= 0.02 else t("как у похожих")) + t(" — торгуйтесь"))
     if "dorm" in out["flags"] and verdict[0] != "🔴":
-        verdict = ("🟠", verdict[1] + ", но бывшее общежитие", verdict[2] + "; проверьте кадастр и приватизацию")
+        verdict = ("🟠", t("{base}, но бывшее общежитие", base=verdict[1]),
+                   t("{why}; проверьте кадастр и приватизацию", why=verdict[2]))
     out["verdict"] = verdict
     return out
 
@@ -742,31 +748,35 @@ def place_lines(x: dict, l: dict):
     if not g:
         return "", ""
     if g.get("src") == "район":
-        return (f'Место — точный адрес не указан, где-то в районе {l.get("district") or ""}; спросите ориентир у продавца',
-                "")
+        return (t("Место — точный адрес не указан, где-то в районе {d}; спросите ориентир у продавца",
+                  d=dist(l.get("district") or "")), "")
     bits = []
     pl = x.get("place")
     if pl:
         pct = f'{pl["diff"] * 100:+.0f}%'.replace("-", "−")
-        bits.append(f'{geo.place_word(pl["diff"])} ({pct} к району)' if abs(pl["diff"]) >= 0.10
-                    else geo.place_word(pl["diff"]))
+        bits.append(t("{w} ({pct} к району)", w=t(geo.place_word(pl["diff"])), pct=pct) if abs(pl["diff"]) >= 0.10
+                    else t(geo.place_word(pl["diff"])))
     if geo.in_city(g["lat"], g["lon"]):          # центр это или нет — по тому, что считается центром Ташкента
         rel, dc = geo.center_relation(g["lat"], g["lon"], geo.city_center("Ташкент"))
-        bits.insert(0, "в центре" if rel == "центр" else
-                    ("у центра, " if rel == "у центра" else "не центр, ") + f"{dc:.1f} км до середины".replace(".", ","))
+        km_ = f"{dc:.1f}".replace(".", ",")
+        bits.insert(0, t("в центре") if rel == "центр" else
+                    t("у центра, {km} км до середины", km=km_) if rel == "у центра" else
+                    t("не центр, {km} км до середины", km=km_))
     mt = x.get("metro")
     if mt:
         name = mt[0].split(" (")[0]
-        bits.append(f"м. {name} ~{mt[2]} мин пешком" if mt[2] <= 25 else f"до метро {mt[1]:.1f} км".replace(".", ","))
-    line = ("Место — " + " · ".join(bits)) if bits else ""
+        bits.append(t("м. {name} ~{min} мин пешком", name=name, min=mt[2]) if mt[2] <= 25 else
+                    t("до метро {km} км", km=f"{mt[1]:.1f}".replace(".", ",")))
+    line = t("Место — {bits}", bits=" · ".join(bits)) if bits else ""
     det = ""
     if pl:
-        kind = "новостройки" if l.get("_nb") else "вторичка"
+        kind = t("новостройки") if l.get("_nb") else t("вторичка")
         rad = f'{pl["radius"]:g}'.replace(".", ",")
-        det = (f'Рядом ({rad} км) {kind} — ${_money(pl["local_m2"])}/м² ({pl["n"]} объявл.), по району '
-               f'${_money(pl["district_m2"])}/м² ({pl["dn"]})')
+        det = t("Рядом ({rad} км) {kind} — ${loc}/м² ({n} объявл.), по району ${dm}/м² ({dn})", rad=rad, kind=kind,
+                loc=_money(pl["local_m2"]), n=pl["n"], dm=_money(pl["district_m2"]), dn=pl["dn"])
     if g.get("src") in ("ориентир", "метро"):
-        det = (det + "; т" if det else "Т") + f'очку поставила по ориентиру «{g.get("label")}» — адрес уточните'
+        pt = t("точку поставила по ориентиру «{label}» — адрес уточните", label=g.get("label"))
+        det = det + "; " + pt if det else pt[:1].upper() + pt[1:]
     return line, det
 
 

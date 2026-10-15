@@ -14,6 +14,9 @@ import json
 import re
 import statistics
 import time
+
+from i18n import t
+from i18n_texts import GUIDE as _GUIDE, GUIDE_ON as _GUIDE_ON, MANUAL as _MANUAL
 from datetime import datetime, timedelta, timezone
 
 TZ = timezone(timedelta(hours=5))
@@ -403,15 +406,18 @@ def _fmt_budget(ans, uz=False):
     return (f"byudjet oyiga {pretty} gacha" if uz else f"бюджет до {pretty}/мес")
 
 
-def compose_request(cfg, store, username=None):
-    """Собирает сообщение маклеру из ответов анкеты.
-
-    Язык письма: узбекский, если клиент выбрал узбекский интерфейс,
-    иначе русский (в том числе для иностранцев — маклеры английский
-    не читают, переводит Рано)."""
+def compose_request(cfg, store, username=None, lang=None):
+    """Запрос маклеру из ответов анкеты. Без lang — на двух языках в одном сообщении: маклеры в Ташкенте
+    пишут кто по-русски, кто по-узбекски; первым — язык клиента (иностранцу — русский: английский маклеры
+    не читают, переводит Ra'no). Дальше с каждым маклером — на его языке (i18n.broker_lang)."""
+    if lang is None:
+        first = "uz" if (get_anketa(store).get("ans") or {}).get("lang") == "uz" else "ru"
+        second = "ru" if first == "uz" else "uz"
+        return (compose_request(cfg, store, username, first) + "\n\n— — —\n\n"
+                + compose_request(cfg, store, username, second))
     rr = _rr()
     ans = get_anketa(store).get("ans", {})
-    uz = ans.get("lang") == "uz"
+    uz = lang == "uz"
     deal = ans.get("deal", "rent")
     obj = ans.get("object", "flat")
 
@@ -758,7 +764,7 @@ def attach_answer(cfg, store, oid, text):
     rr.tg_call(cfg, "sendMessage", {
         "chat_id": cfg["telegram_chat_id"], "parse_mode": "HTML",
         "text": f"💬 <b>Маклер ответил по варианту #{oid}</b> — принесла:\n\n"
-                f"{rr.escape_html((text or '').strip()[:800])}\n\n"
+                f"{rr.escape_html(__import__('i18n').quote_for_client(cfg, (text or '').strip()[:800]))}\n\n"
                 + offer_card(store, cfg, o)[:1500],
         "reply_markup": json.dumps({"inline_keyboard": [[
             {"text": "📂 Карточка", "callback_data": f"s:o:{oid}"},
@@ -854,7 +860,7 @@ def mark_as_message(cfg, store, oid):
     rr.tg_call(cfg, "sendMessage", {
         "chat_id": cfg["telegram_chat_id"], "parse_mode": "HTML",
         "text": f"💬 <b>{rr.escape_html(o['broker_name'] or 'Маклер')}</b> пишет:\n"
-                f"{rr.escape_html((o['text'] or '')[:800])}"})
+                f"{rr.escape_html(__import__('i18n').quote_for_client(cfg, (o['text'] or '')[:800]))}"})
 
 
 def is_site_offer(o) -> bool:
@@ -1147,15 +1153,7 @@ def broker_mode(store) -> str:
         return ""
 
 
-MANUAL_HOWTO = (
-    "Хорошо, без подключения 👍 Так тоже работает:\n"
-    "1. Скажите «напиши маклерам» — пришлю 5 маклеров. Нажмёте на имя — откроется чат, текст уже вписан, "
-    "останется «Отправить».\n"
-    "2. В тексте есть ссылка на меня — маклер может прислать варианты сразу мне.\n"
-    "3. Ответил вам — перешлите мне его сообщения: нажмите на сообщение и держите → «Переслать» → Ra'no. "
-    "Можно выбрать сразу несколько, с фото. Сделаю карточку с картой и разбором цены.\n"
-    "4. Если в ответе чего-то не хватает, пришлю готовый текст уточнения — отправите маклеру сами.\n\n"
-    "Ваши чаты я не вижу и ничего от вашего имени не пишу. Передумаете — напишите «подключить телеграм».")
+MANUAL_HOWTO = _MANUAL["ru"]
 
 
 def biz_guide(cfg, store=None) -> str:
@@ -1164,36 +1162,11 @@ def biz_guide(cfg, store=None) -> str:
     a = cfg.get("assistant_name", "Ra'no")
     c = biz_conn(store) if store else {}
     if c.get("enabled") and c.get("can_reply"):
-        return (f"✅ {a} уже подключена к вашему Telegram — ответы маклеров вижу и уточняю сама.\n\n"
-                "Отключить: Настройки → Telegram для бизнеса → Чат-боты → @" + bot + " → «Отключить бота».")
-    return (
-        f"🔗 <b>Подключите {a} к своему Telegram — и всю переписку с маклерами я возьму на себя.</b>\n\n"
-        "<b>Что вы получаете:</b>\n"
-        "• Не нужно отвечать каждому маклеру и разбирать десятки сообщений — я читаю их ответы сама.\n"
-        "• Фото, точный адрес, этаж, цену, документы, комиссию — уточняю у маклера сама, пока он на связи.\n"
-        "• Из каждого ответа делаю карточку: карта, фото, честный разбор цены — сравнивать варианты легко. "
-        "Маклер прислал локацию или ссылку на карту — отмечу точку на карте.\n"
-        "• Договорюсь о просмотре: скажите, когда вам удобно, — согласую время с маклером, передам ответ и напомню "
-        "за 2 часа.\n"
-        "• Ничего не теряется и не нужно ничего пересылать: все варианты от всех маклеров — в одном месте.\n"
-        "• Вам остаётся только решать: «нравится», «не то», «давай посмотрим».\n\n"
-        "<b>Что остаётся за вами:</b> первое сообщение маклеру (нажать «Отправить») и решения: когда смотреть, "
-        "торговаться ли, отказать ли — без вашего слова я этого не делаю.\n\n"
-        "<b>Как подключить</b> — один раз, около минуты:\n"
-        "<b>1.</b> Откройте <b>Настройки</b> → <b>Telegram для бизнеса</b> (Telegram Business).\n"
-        "<b>2.</b> Нажмите <b>Чат-боты</b> (ChatBots).\n"
-        f"<b>3.</b> Впишите <code>{bot}</code> (нажмите — скопируется) и нажмите <b>Добавить</b> (Add).\n"
-        "<b>4.</b> В «Чаты, к которым у бота есть доступ» выберите <b>Только выбранные чаты</b> "
-        "(Only Selected Chats) → <b>Выбрать чаты</b> (Select Chats) → отметьте <b>Новые чаты</b> (New Chats) "
-        "и <b>Не контакты</b> (Non-Contacts) → <b>Готово</b>. Старые переписки и ваши контакты я не увижу.\n"
-        "<b>5.</b> Ниже, в разрешениях бота, оставьте включённым <b>Управление сообщениями</b> (Manage Messages). "
-        "Остальные переключатели не нужны.\n"
-        "<b>6.</b> Нажмите <b>Готово</b> (Done) вверху. Если появится сообщение про подарки и звёзды — просто «OK».\n\n"
-        "Всё — я сама увижу подключение и напишу вам здесь.\n\n"
-        "<b>Безопасность:</b> читаю только чаты, куда вы отправили запрос маклеру; остальные переписки не открываю "
-        "и не храню. Пароль и коды не нужны, отключить можно в любой момент.\n"
-        "Если названия пунктов чуть другие — ищите «Чат-боты» в разделе для бизнеса.\n\n"
-        "Не хотите давать доступ к чатам — так и скажите, предложу другой способ.")
+        return t(_GUIDE_ON["ru"], a=a, bot=bot)
+    return t(GUIDE_RU, a=a, bot=bot)
+
+
+GUIDE_RU = _GUIDE["ru"]
 
 
 def _biz_voice(text: str, cfg) -> str:
@@ -1207,9 +1180,13 @@ def _biz_voice(text: str, cfg) -> str:
 
 
 def broker_send(cfg, store, broker_chat, text):
-    """Сообщение маклеру: в бота — от бота; в чат клиента — через Telegram для бизнеса."""
+    """Сообщение маклеру: в бота — от бота; в чат клиента — через Telegram для бизнеса.
+    На языке маклера: пишет по-узбекски — и ему по-узбекски (что не переведено вручную — переводит модель)."""
     rr = _rr()
     c = str(broker_chat or "")
+    import i18n
+    if i18n.broker_lang(store, c) == "uz" and i18n.has_russian(text):
+        text = i18n.ai(cfg, text, "uz")
     if c.startswith("biz:"):
         conn = biz_conn(store)
         if not (conn.get("id") and conn.get("enabled")):
@@ -1554,7 +1531,14 @@ def arrange_viewing(cfg, store, oid) -> str:
         when = (v.get("label") or "в этот день") + " — в какое время удобно"
     tag = _offer_tag(o)
     biz = str(o.get("broker_chat") or "").startswith("biz:")
-    if biz or is_site_offer(o) or not can_message_broker(o):
+    import i18n
+    uzb = (i18n.broker_lang(store, o["broker_chat"]) if can_message_broker(o) else
+           i18n.detect_lang(o.get("text") or "")) == "uz"
+    if uzb:                                    # маклер пишет по-узбекски — и просим по-узбекски
+        when_uz = v.get("label") or _when(v["at"]).strftime("%d.%m soat %H:%M")
+        text = (f"Assalomu alaykum! Variant bo'yicha{f' ({tag})' if tag else ''} — kvartirani {when_uz} ko'rsak "
+                "bo'ladimi? Noqulay bo'lsa — qachon mumkinligini ayting.")
+    elif biz or is_site_offer(o) or not can_message_broker(o):
         text = (f"Здравствуйте! По варианту{f' ({tag})' if tag else ''} — можно посмотреть квартиру {when}? "
                 "Если неудобно — подскажите, когда можно.")
     else:
@@ -1591,7 +1575,9 @@ def handle_viewing_reply(cfg, store, broker_key, text) -> bool:
     ok = bool(VIEW_OK_RE.search(text)) and not re.search(r"\bнет\b|не\s+(получится|могу|удобно)|yo['ʻ’]?q", text, re.I)
     if ok and v:
         _set_extra(store, oid, viewing={**v, "confirmed": True})
-    head = f"📅 Маклер ответил про просмотр варианта #{oid}:\n«{rr.escape_html(text.strip()[:500])}»\n\n"
+    import i18n
+    head = (f"📅 Маклер ответил про просмотр варианта #{oid}:\n"
+            f"«{rr.escape_html(i18n.quote_for_client(cfg, text.strip()[:500]))}»\n\n")
     tail = (f"✅ Договорились: {rr.escape_html(v.get('label') or '')}. Напомню за 2 часа." if ok else
             "Если предлагает другое время — скажите, подходит ли или на когда перенести, я передам.")
     rr.send_telegram(cfg, head + tail)
@@ -1776,7 +1762,8 @@ def manual_auto_ask(cfg, store, oid) -> bool:
         return False
     ans = get_anketa(store).get("ans") or {}
     deal = "buy" if ans.get("deal") in ("buy", "sale") else "rent"
-    q = biz_followup_text(o, deal, ans.get("lang") == "uz")
+    import i18n
+    q = biz_followup_text(o, deal, i18n.detect_lang(o.get("text") or "") == "uz")
     if not q:
         return False
     tag = _offer_tag(o)
@@ -1798,7 +1785,8 @@ def biz_auto_ask(cfg, store, oid) -> bool:
         return False
     ans = get_anketa(store).get("ans") or {}
     deal = "buy" if ans.get("deal") in ("buy", "sale") else "rent"
-    text = biz_followup_text(o, deal, ans.get("lang") == "uz")
+    import i18n
+    text = biz_followup_text(o, deal, i18n.broker_lang(store, o["broker_chat"]) == "uz")
     if not text:
         return False
     if broker_send(cfg, store, o["broker_chat"], text) is None:

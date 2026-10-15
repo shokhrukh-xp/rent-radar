@@ -32,6 +32,9 @@ import concierge
 import followup
 import sale_sources
 import market
+import i18n
+import i18n_texts
+from i18n import t, dist
 import geo
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -1133,6 +1136,7 @@ def detect_bot_username(cfg) -> str:
 def tg_call_files(cfg, method: str, data: dict, files: dict, timeout: int = 90):
     """Запрос к Telegram с файлами (альбом с картой и фото). None — не ушло."""
     api = f'https://api.telegram.org/bot{cfg["telegram_bot_token"]}/{method}'
+    data = _owner_translate(cfg, data)
     try:
         r = requests.post(api, data=data, files=files or None, timeout=timeout)
         if r.status_code != 200:
@@ -1160,10 +1164,50 @@ def _owner_no_buttons(cfg, payload):
     return payload
 
 
+def sync_lang(store):
+    """Язык клиента — из анкеты (ru / uz / en): на нём карточки, подсказки и ответы."""
+    try:
+        return i18n.set_lang(((store.get_kv("anketa") or {}).get("ans") or {}).get("lang") or "ru")
+    except Exception:
+        return i18n.LANG
+
+
+def _owner_translate(cfg, payload):
+    """Клиент не на русском: что осталось по-русски (не переведено вручную) — переводит модель."""
+    if payload.get("_noTr"):
+        payload = dict(payload)
+        payload.pop("_noTr", None)
+        return payload
+    if i18n.LANG == "ru" or str(payload.get("chat_id")) != str(cfg.get("telegram_chat_id")):
+        return payload
+    out = payload
+    for k in ("text", "caption"):
+        v = payload.get(k)
+        if isinstance(v, str) and i18n.has_russian(v):
+            out = dict(out)
+            out[k] = i18n.ai(cfg, v)
+    md = payload.get("media")
+    if md:
+        try:
+            items = json.loads(md) if isinstance(md, str) else md
+            changed = False
+            for it in items:
+                if isinstance(it.get("caption"), str) and i18n.has_russian(it["caption"]):
+                    it["caption"] = i18n.ai(cfg, it["caption"])
+                    changed = True
+            if changed:
+                out = dict(out)
+                out["media"] = json.dumps(items, ensure_ascii=False) if isinstance(md, str) else items
+        except (ValueError, TypeError, AttributeError):
+            pass
+    return out
+
+
 def tg_call(cfg, method: str, payload: dict, timeout: int = 20, quiet: bool = False):
     api = f'https://api.telegram.org/bot{cfg["telegram_bot_token"]}/{method}'
     if method != "editMessageReplyMarkup":
         payload = _owner_no_buttons(cfg, payload)
+    payload = _owner_translate(cfg, payload)
     try:
         r = requests.post(api, data=payload, timeout=timeout)
         if r.status_code != 200:
@@ -1239,28 +1283,9 @@ def is_night(now=None) -> bool:
 
 # ------------------------------------------------- настройки через бота ----
 
-WELCOME_TEXT = (
-    "Привет! Я <b>Ra'no</b> 👋 — ИИ-ассистент, которая обожает квартиры в Ташкенте: аренда и покупка.\n\n"
-    "Ищу двумя способами:\n"
-    "🔎 Сначала сама — каждый день прочёсываю сайты и Telegram-каналы, выгодное приношу сразу.\n"
-    "📇 Если на сайтах пусто — подберу маклеров: нажмёте на имя, запрос уже вписан, останется «Отправить».\n"
-    "К каждому варианту — честный разбор цены: дешевле рынка или кто-то загнул 😉\n\n"
-    "С чего начнём? Напишите своими словами, что ищете, — например: «купить двушку в центре до $50 000, "
-    "нужна ипотека».")
+WELCOME_TEXT = i18n_texts.WELCOME["ru"]
 
-HELP_TEXT = """🏠 <b>Ra'no</b> — ваш ИИ-ассистент по поиску жилья.
-
-Пишите мне как человеку — своими словами, как удобно. Ничего заучивать не нужно: я пойму и сделаю.
-Например: «хочу двушку в Мирабаде, тысяч до 60», «эта нравится, узнай про документы», «давай посмотрим её в субботу», «что-то дорого, не то».
-
-Про конкретную квартиру удобнее всего ответить на её сообщение — тогда я точно пойму, о какой речь. Но можно и просто описать: «та, что на Чиланзаре».
-
-Каждый вариант приходит альбомом: первым — карта, где квартира, дальше фото, под ними — разбор цены.
-Могу ещё: разобрать ссылку на объявление, сделать карточку из пересланного сообщения маклера, написать маклерам, показать цены рынка. Напоминаю сама — о просмотрах и если маклер молчит.
-
-Маклерам: скажите «напиши маклерам» — пришлю 5 маклеров под ваш запрос. Нажмёте на имя — откроется чат с ним, текст уже вписан, останется «Отправить».
-
-Хотите, чтобы маклеры отвечали прямо вам в Telegram, а я читала их ответы и сама уточняла детали? Напишите «подключить телеграм» — пришлю инструкцию на минуту. Не хотите давать доступ к чатам — так и скажите, предложу другой способ."""
+HELP_TEXT = i18n_texts.HELP["ru"]
 
 DISTRICT_LIST = sorted(DISTRICTS)
 PRICE_PRESETS = [300, 400, 500, 700, 1000, 1500]
@@ -1404,13 +1429,12 @@ VIEWS = {
 }
 
 
-VIEW_HINT = ("Кнопок больше нет — просто напишите, что поменять, например: «бюджет до 700», "
-             "«только Мирабад и Юнусабад», «2–3 комнаты», «пауза». Что я умею — /help.")
+VIEW_HINT = i18n_texts.VIEW_HINT["ru"]
 
 
 def render_view(cfg, settings, view: str, message_id=None) -> bool:
     """Старые экраны с кнопками больше не показываем: подсказываем, как сказать словами."""
-    return send_telegram(cfg, VIEW_HINT)
+    return send_telegram(cfg, t(VIEW_HINT))
     text_fn, kb_fn = VIEWS.get(view, VIEWS["M"])
     payload = {
         "chat_id": cfg["telegram_chat_id"],
@@ -1443,13 +1467,13 @@ def status_text(cfg: dict, settings: dict, store) -> str:
 
 def handle_command(text: str, settings: dict, store, cfg: dict):
     """Возвращает (ответ, view_или_None). view — какой экран показать кнопками."""
-    t = (text or "").strip()
-    low = t.lower()
+    txt_ = (text or "").strip()
+    low = txt_.lower()
     cmd, _, arg = low.partition(" ")
     cmd = cmd.split("@")[0]
     cfg = effective_sale_cfg(cfg, store)       # покупка из чата меняет и поиск /sale
     arg = arg.strip()
-    raw_arg = t.partition(" ")[2].strip()
+    raw_arg = txt_.partition(" ")[2].strip()
 
     if cmd == "/start" and raw_arg.startswith("p"):
         # параметры из мини-аппа, открытого кнопкой меню (там нет sendData)
@@ -1462,10 +1486,10 @@ def handle_command(text: str, settings: dict, store, cfg: dict):
     if cmd == "/start":
         # Первое касание: тёплое знакомство, одно понятное действие, честное
         # ожидание. Стена команд отпугивает — её показываем только по /help.
-        concierge.send_app_button(cfg, store, WELCOME_TEXT)
+        concierge.send_app_button(cfg, store, t(WELCOME_TEXT))
         return "", None
     if cmd == "/help":
-        return HELP_TEXT, None
+        return t(HELP_TEXT), None
     if cmd in ("/rano", "/via"):
         send_screen(cfg, (rano_screen if cmd == "/rano" else via_screen)(cfg, store))
         return "", None
@@ -1539,17 +1563,17 @@ def handle_command(text: str, settings: dict, store, cfg: dict):
     if cmd in ("/prices", "/index"):
         return concierge.concierge_status(store), None
     if cmd in ("/request", "/text"):
-        t = store.get_kv("request_text")
-        if not t:
+        rq_ = store.get_kv("request_text")
+        if not rq_:
             return "Текст запроса ещё не готов — расскажите, что ищем, и я его соберу ✍️", None
-        return f"📝 <b>Текущий запрос маклерам</b>\n\n<code>{escape_html(t)}</code>", None
+        return f"📝 <b>Текущий запрос маклерам</b>\n\n<code>{escape_html(rq_)}</code>", None
     if cmd in ("/brokers", "/makler", "/outreach"):
         if not concierge.broker_mode(store):        # сначала предлагаем подключить Telegram — маклеров пришлю после
             store.set_kv("brokers_pending", True)
             store.set_kv("biz_offered_at", time.time())
-            send_telegram(cfg, "📇 Маклеров подберу. Но сначала предлагаю подключить меня к вашему Telegram — "
-                               "тогда общаться с маклерами буду я, а не вы.\n\n" + concierge.biz_guide(cfg, store) +
-                               "\n\nКак подключите — сразу пришлю маклеров.")
+            send_telegram(cfg, t("📇 Маклеров подберу. Но сначала предлагаю подключить меня к вашему Telegram — "
+                                 "тогда общаться с маклерами буду я, а не вы.") + "\n\n" + concierge.biz_guide(cfg, store) +
+                          "\n\n" + t("Как подключите — сразу пришлю маклеров."))
             push_snapshot(cfg, store, settings, force=True)
             return "", None
         return send_broker_batch(cfg, store, settings), None   # ссылки с вписанным текстом, без кнопок
@@ -1618,7 +1642,7 @@ def handle_command(text: str, settings: dict, store, cfg: dict):
         settings["paused"] = False
         return "▶️ Уведомления снова работают", None
 
-    if t.startswith("/"):
+    if txt_.startswith("/"):
         return "Не знаю такую команду — пишите своими словами, я пойму. Что умею — /help.", None
     return "", None
 
@@ -2164,21 +2188,22 @@ def send_broker_batch(cfg, store, settings, n=OUTREACH_BATCH) -> str:
         day = {"d": today, "n": 0}
     room = OUTREACH_DAY_MAX - day["n"]
     if room <= 0:
-        return (f"Сегодня уже дала {OUTREACH_DAY_MAX} маклеров — на сегодня хватит, чтобы Telegram не счёл это "
-                "рассылкой. Завтра пришлю следующих, а пока жду ответы.")
+        return t("Сегодня уже дала {n} маклеров — на сегодня хватит, чтобы Telegram не счёл это рассылкой. "
+                 "Завтра пришлю следующих, а пока жду ответы.", n=OUTREACH_DAY_MAX)
     pool = [b for b in ranked_brokers(store, deal) if b.get("tg") or len(re.sub(r"\D", "", b.get("phone") or "")) >= 9]
     if not pool:
         return outreach_empty_text(store, deal)
     pick = pool[:min(n, room)]
     want = request_districts(store)
     biz = concierge.biz_ready(store)
-    lines = [f"📇 <b>Маклеры под ваш запрос</b> — {len(pick)} из {len(pool)}",
-             "Нажмите на имя — откроется чат с маклером, запрос уже вписан. Осталось нажать «Отправить».", ""]
+    lines = [t("📇 <b>Маклеры под ваш запрос</b> — {n} из {total}", n=len(pick), total=len(pool)),
+             t("Нажмите на имя — откроется чат с маклером, запрос уже вписан. Осталось нажать «Отправить»."), ""]
     for i, b in enumerate(pick, 1):
         ds = [d for d in b["districts"] if d in want][:2] or b["districts"][:2]
-        bits = [", ".join(ds)] if ds else []
+        bits = [", ".join(dist(d) for d in ds)] if ds else []
         if b.get("ads"):
-            bits.append(f"{b['ads']} {concierge.plural(b['ads'], 'объявление', 'объявления', 'объявлений')}")
+            bits.append(t("{n} объявл.", n=b["ads"]) if i18n.LANG != "ru" else
+                        f"{b['ads']} {concierge.plural(b['ads'], 'объявление', 'объявления', 'объявлений')}")
         if b.get("tg"):
             link = tg_user_link(b["tg"], text)
         else:
@@ -2186,7 +2211,7 @@ def send_broker_batch(cfg, store, settings, n=OUTREACH_BATCH) -> str:
             digits = "998" + digits if len(digits) == 9 else digits
             from urllib.parse import quote
             link = f"https://t.me/+{digits}?text={quote(text)}"
-            bits.append("по номеру — если чат не откроется, значит, номер скрыт")
+            bits.append(t("по номеру — если чат не откроется, значит, номер скрыт"))
             if not biz:                               # без подключения Telegram ответы всё равно приходят вам
                 bits.append("WA")
         name = escape_html((b.get("name") or "Маклер").strip()[:40])
@@ -2197,12 +2222,12 @@ def send_broker_batch(cfg, store, settings, n=OUTREACH_BATCH) -> str:
         lines.append(f'{i}. <a href="{link}">{name}</a>' + (" — " + escape_html(" · ".join(bits)) if bits else "") + wa)
         store.broker_status(b["bid"], "offered")       # показан — второй раз не предложим
     left = len(pool) - len(pick)
-    more = f" Ещё {left} — напишите «ещё маклеров»." if left and room - len(pick) > 0 else ""
+    more = t(" Ещё {n} — напишите «ещё маклеров».", n=left) if left and room - len(pick) > 0 else ""
     mode = concierge.broker_mode(store)
-    lines += ["", ("Как отправите — я увижу сама и буду следить за ответами: соберу карточки и уточню детали." if biz else
-                   "Маклеры ответят вам или сразу мне. Ответили вам — перешлите их сообщения мне "
-                   "(держите сообщение → «Переслать» → Ra'no), сделаю карточки."
-                   + ("" if mode == "manual" else " Хотите, чтобы я читала ответы сама, — «подключить телеграм»."))
+    lines += ["", (t("Как отправите — я увижу сама и буду следить за ответами: соберу карточки и уточню детали.") if biz else
+                   t("Маклеры ответят вам или сразу мне. Ответили вам — перешлите их сообщения мне "
+                     "(держите сообщение → «Переслать» → Ra'no), сделаю карточки.")
+                   + ("" if mode == "manual" else t(" Хотите, чтобы я читала ответы сама, — «подключить телеграм».")))
               + more]
     day["n"] += len(pick)
     store.set_kv("outreach_day", day)
@@ -2756,7 +2781,7 @@ def ui_snapshot(cfg, store, settings) -> dict:
             ctext, ckb = concierge.offer_view(store, cfg, o, idx=idx)
             cards[str(r["oid"])] = {"text": ctext, "kb": ckb}
     eff = effective_sale_cfg(cfg, store)
-    texts = {"/help": HELP_TEXT, "/sale": sale_status_text(eff)}
+    texts = {"/help": t(HELP_TEXT), "/sale": sale_status_text(eff)}
     rq = store.get_kv("request_text")
     texts["/request"] = (f"📝 <b>Текущий запрос маклерам</b>\n\n<code>{escape_html(rq)}</code>" if rq else
                          "Текст запроса ещё не готов — расскажите, что ищем, и я его соберу ✍️")
@@ -2906,9 +2931,9 @@ def handle_callback(data: str, settings: dict, store, cfg: dict, message_id=None
             sst.conn.close()
         return ("" if n else "Подборок ещё не было — скоро будет 🙂"), None
     if d.startswith("ch:rm:"):                 # убрать канал из общей базы
-        t = remove_channel(store, d[6:])
-        send_telegram(cfg, t)
-        return t, None
+        msg_ = remove_channel(store, d[6:])
+        send_telegram(cfg, msg_)
+        return msg_, None
     if d.startswith(("L:sim:", "L:like:")):    # похожие / искать такие же
         key = d.split(":", 2)[2]
         if not SALE_DB_PATH.exists():
@@ -3072,7 +3097,7 @@ def handle_callback(data: str, settings: dict, store, cfg: dict, message_id=None
         send_telegram(cfg, status_text(cfg, settings, store))
         return "Статус отправлен", None
     if act == "h":
-        send_telegram(cfg, HELP_TEXT)
+        send_telegram(cfg, t(HELP_TEXT))
         return "Справка отправлена", None
     return "", None
 
@@ -3148,31 +3173,31 @@ def handle_business_update(cfg, store, upd) -> bool:
         store.set_kv("biz_conn", conn)
         a = cfg.get("assistant_name", "Ra'no")
         if not conn["enabled"]:
-            send_telegram(cfg, f"🔌 {a} отключена от вашего Telegram — ответы маклеров в ваших чатах больше не вижу. "
-                               "Подключить снова: напишите «подключить телеграм».")
+            send_telegram(cfg, t("🔌 {a} отключена от вашего Telegram — ответы маклеров в ваших чатах больше не вижу. "
+                                 "Подключить снова: напишите «подключить телеграм».", a=a))
         elif not can_reply:
-            send_telegram(cfg, f"⚠️ Почти готово: {a} подключена, но без права отвечать — уточнять у маклеров "
-                               "не смогу.\nОткройте Настройки → Telegram для бизнеса → Чат-боты → "
-                               f"@{cfg.get('bot_username') or 'rano_smart_bot'} и включите <b>Управление сообщениями</b> (Manage Messages).")
+            send_telegram(cfg, t("⚠️ Почти готово: {a} подключена, но без права отвечать — уточнять у маклеров не смогу.\n"
+                                 "Откройте Настройки → Telegram для бизнеса → Чат-боты → @{bot} и включите "
+                                 "<b>Управление сообщениями</b> (Manage Messages).", a=a,
+                                 bot=cfg.get("bot_username") or "rano_smart_bot"))
         elif not (prev.get("enabled") and prev.get("can_reply")):
             req = concierge.compose_request(cfg, store)
             store.set_kv("request_text", req)
             store.set_kv("biz_offered_at", 0)
             if store.get_kv("brokers_pending"):          # просили маклеров — присылаю сразу после подключения
                 store.set_kv("brokers_pending", False)
-                send_telegram(cfg, f"✅ <b>{a} подключена к вашему Telegram.</b> Ваши чаты, кроме маклерских, не читаю. "
-                                   "Вот маклеры 👇")
-                t = send_broker_batch(cfg, store, default_settings())
-                if t:
-                    send_telegram(cfg, t)
+                send_telegram(cfg, t("✅ <b>{a} подключена к вашему Telegram.</b> Ваши чаты, кроме маклерских, не читаю. "
+                                     "Вот маклеры 👇", a=a))
+                bt_ = send_broker_batch(cfg, store, default_settings())
+                if bt_:
+                    send_telegram(cfg, bt_)
                 return True
-            send_telegram(cfg, f"✅ <b>{a} подключена к вашему Telegram.</b>\n\n"
-                               "Как это работает: вы отправляете маклеру запрос — я вижу его ответ, собираю карточку "
-                               "с картой и сама уточняю фото, адрес и цену. Другие ваши чаты не читаю.\n\n"
-                               "Скажите «напиши маклерам» — пришлю 5 маклеров под ваш запрос. Нажмёте на имя — "
-                               "откроется чат, текст уже вписан, останется «Отправить». Дальше я сама.\n\n"
-                               "Вот что они получат:\n"
-                               f"<code>{escape_html(req)}</code>")
+            send_telegram(cfg, t("✅ <b>{a} подключена к вашему Telegram.</b>\n\nКак это работает: вы отправляете маклеру "
+                                 "запрос — я вижу его ответ, собираю карточку с картой и сама уточняю фото, адрес и цену. "
+                                 "Другие ваши чаты не читаю.\n\n", a=a)
+                          + t("Скажите «напиши маклерам» — пришлю 5 маклеров под ваш запрос. Нажмёте на имя — откроется "
+                              "чат, текст уже вписан, останется «Отправить». Дальше я сама.\n\nВот что они получат:\n")
+                          + f"<code>{escape_html(req)}</code>")
         return True
     m = upd.get("business_message") or upd.get("edited_business_message")
     if not m:
@@ -3226,6 +3251,7 @@ def handle_broker_message(cfg, store, msg, key=None, quiet=False):
         return
     if quiet:
         k = key or f"biz:{chat_id}"
+        i18n.broker_lang(store, k, text)            # на каком языке пишет маклер — на том и ответим
         if not photos and concierge.handle_viewing_reply(cfg, store, k, text):   # ответ про время просмотра
             return
         asked = (store.get_kv("biz_asked") or {}).get(k) or {}
@@ -3246,6 +3272,8 @@ def handle_broker_message(cfg, store, msg, key=None, quiet=False):
     if msg.get("_welcomed"):                 # воркер уже познакомил маклера с запросом
         store.set_kv(f"welcomed:{chat_id}", time.time())
         return
+    if text:
+        i18n.broker_lang(store, chat_id, text)      # на каком языке пишет маклер — на том и ответим
     # ответ на «можно посмотреть …?» — клиенту (раньше приветствий: «Да, можно» — короткий ответ)
     if not photos and not text.startswith("/") and concierge.handle_viewing_reply(cfg, store, chat_id, text):
         return
@@ -3433,6 +3461,7 @@ def process_commands(cfg: dict, store, long_poll: int = 0) -> dict:
     changed = False
     snap = False                                  # шортлист/карточки поменялись — воркеру сразу
     concierge._BIZ_STORE["store"] = store          # подключён ли Telegram для бизнеса — для отправки маклерам
+    sync_lang(store)                                # язык клиента — для карточек и подсказок
     for upd in resp.get("result", []):
         offset = max(offset, upd.get("update_id", 0))
         if any(upd.get(x) for x in ("business_connection", "business_message", "edited_business_message",
@@ -3479,14 +3508,14 @@ def process_commands(cfg: dict, store, long_poll: int = 0) -> dict:
         if msg.get("_biz_decline"):          # «не хочу давать доступ» — работаем через пересылку
             store.set_kv("broker_mode", "manual")
             store.set_kv("biz_offered_at", 0)
-            send_telegram(cfg, concierge.MANUAL_HOWTO if not concierge.biz_ready(store) else
+            send_telegram(cfg, t(concierge.MANUAL_HOWTO) if not concierge.biz_ready(store) else
                           "Ra'no сейчас подключена к вашему Telegram. Чтобы отключить: Настройки → Telegram для "
                           "бизнеса → Чат-боты → Ra'no → «Отключить бота». Дальше буду работать через пересылку.")
             if store.get_kv("brokers_pending") and not concierge.biz_ready(store):
                 store.set_kv("brokers_pending", False)
-                t = send_broker_batch(cfg, store, settings)
-                if t:
-                    send_telegram(cfg, t)
+                bt_ = send_broker_batch(cfg, store, settings)
+                if bt_:
+                    send_telegram(cfg, bt_)
             push_snapshot(cfg, store, settings, force=True)
             continue
         if msg.get("_link"):                 # воркер: владелец прислал ссылку на объявление
@@ -3936,15 +3965,15 @@ def format_sale_card(store, l: dict, cfg: dict, head: str = "", note: str = "") 
     # факты
     spec = []
     if l.get("rooms"):
-        spec.append(f'{l["rooms"]}-комн')
+        spec.append(t("{n}-комн", n=l["rooms"]))
     if l.get("area"):
-        spec.append(f'{fmt_area(l["area"])} м²')
+        spec.append(t("{a} м²", a=fmt_area(l["area"])))
     if l.get("floor"):
-        spec.append(f'этаж {l["floor"]}' + (f'/{l["floors_total"]}' if l.get("floors_total") else ""))
+        spec.append(t("этаж {f}", f=str(l["floor"]) + (f'/{l["floors_total"]}' if l.get("floors_total") else "")))
     if spec:
         top.append("<b>" + " · ".join(spec) + "</b>")
     g = l.get("geo") or {}
-    where = l.get("district") or "район не указан"
+    where = dist(l.get("district") or "") or t("район не указан")
     street = ""
     if g.get("src") == "сайт" and not TESTING:     # точный адрес — улица и махалля по карте
         try:
@@ -3954,9 +3983,9 @@ def format_sale_card(store, l: dict, cfg: dict, head: str = "", note: str = "") 
     if street:
         where += ", " + street
     if g.get("label") and not g["label"].startswith("м. "):
-        where += f' (у «{g["label"]}»)' if g.get("src") == "сайт" else f', {g["label"]}'
+        where += t(" (у «{label}»)", label=g["label"]) if g.get("src") == "сайт" else f', {g["label"]}'
     nb = l["_nb"] if "_nb" in l else l.get("new_building")
-    place = [where, "новостройка" if nb else "вторичка",
+    place = [where, t("новостройка") if nb else t("вторичка"),
              FOUNDATION_RU.get(l.get("house_type") or "", l.get("house_type") or "")]
     top.append(escape_html(" · ".join(p for p in place if p)))
     pline, pdet = market.place_lines(x, l) if x else ("", "")
@@ -3966,37 +3995,39 @@ def format_sale_card(store, l: dict, cfg: dict, head: str = "", note: str = "") 
     if p:
         price = f"<b>${_money(p)}</b>"
         if (l.get("price_currency") or "").upper() == "UZS" and l.get("price_value"):
-            price = f'<b>{market._mln(l["price_value"])} млн сум</b> (~${_money(p)})'
+            price = "<b>" + t("{mln} млн сум", mln=market._mln(l["price_value"])) + f"</b> (~${_money(p)})"
         if l.get("area"):
             price += f' · ${_money(p / l["area"])}/м²'
         if x.get("fair") and x.get("gap") is not None:
-            price += f' · рынок ≈ ${_money(market._r500(x["fair"]))}'
+            price += " · " + t("рынок ≈ ${v}", v=_money(market._r500(x["fair"])))
         top.append(price)
 
     # ремонт
-    short = {"good": "хороший", "average": "средний", "none": "без ремонта", "box": "коробка"}
+    short = {"good": t("хороший"), "average": t("средний"), "none": t("без ремонта"), "box": t("коробка")}
     cls, rsrc, claimed = x.get("repair"), x.get("repair_src"), x.get("repair_claimed")
-    by = {"фото": "по фото", "описание": "по описанию", "пометка сайта": "по пометке сайта"}.get(rsrc, "")
+    by = {"фото": t("по фото"), "описание": t("по описанию"), "пометка сайта": t("по пометке сайта")}.get(rsrc, "")
     if cls:
-        r = f"Ремонт {short[cls]}" + (f" ({by})" if by else "")
+        r = t("Ремонт {cls}", cls=short[cls]) + (f" ({by})" if by else "")
         if x.get("repair_as_box"):
-            r = "Ремонт коробка" + (f" ({by}: «без ремонта» в новостройке)" if by else " (новостройка без ремонта)")
+            r = (t("Ремонт коробка ({by}: «без ремонта» в новостройке)", by=by) if by else
+                 t("Ремонт коробка (новостройка без ремонта)"))
         if cls == "good":
-            r += " — можно заезжать"
+            r += t(" — можно заезжать")
         elif x.get("reno"):
-            r += f' — {"освежить" if cls == "average" else "ремонт"} ~${_money(x["reno"])}'
+            r += t(" — освежить ~${v}" if cls == "average" else " — ремонт ~${v}", v=_money(x["reno"]))
         if rsrc == "фото" and claimed and claimed != cls:
-            r += f'; в объявлении «{short[claimed]}»'
+            r += t("; в объявлении «{c}»", c=short[claimed])
         top.append(r)
     elif x:
-        top.append("Ремонт не понять — уточните у продавца")
+        top.append(t("Ремонт не понять — уточните у продавца"))
     elif l.get("repair"):
         top.append("Ремонт: " + escape_html(REPAIR_RU.get(l["repair"], l["repair"])))
 
     # продавец и время
-    who = {"owner": "Собственник", "agency": "Маклер / агентство"}.get(l.get("seller_kind"), "Продавец не проверен")
+    who = {"owner": t("Собственник"), "agency": t("Маклер / агентство")}.get(l.get("seller_kind"),
+                                                                            t("Продавец не проверен"))
     if l.get("seller_hint") == "developer":
-        who = "Застройщик"
+        who = t("Застройщик")
     if l.get("phones"):
         who += " · " + fmt_phone(l["phones"][0])
     top.append(who)
@@ -4004,10 +4035,11 @@ def format_sale_card(store, l: dict, cfg: dict, head: str = "", note: str = "") 
     since = parse_iso(l.get("listed_since") or "")
     when = []
     if dt:
-        when.append(f'выложено {dt.astimezone(TASHKENT_TZ).strftime("%d.%m в %H:%M")}')
+        when.append(t("выложено {d}", d=dt.astimezone(TASHKENT_TZ).strftime("%d.%m %H:%M") if i18n.LANG != "ru"
+                      else dt.astimezone(TASHKENT_TZ).strftime("%d.%m в %H:%M")))
     if since:
         days = age_days(l["listed_since"])
-        when.append("перевыложено" + (f", на рынке ~{days:.0f} дн." if days else ""))
+        when.append(t("перевыложено") + (t(", на рынке ~{n} дн.", n=f"{days:.0f}") if days else ""))
     if when:
         top.append(when[0][0].upper() + ", ".join(when)[1:])
     alts = [a for a in (l.get("alts") or []) if a.get("price_usd") and a.get("url")]
@@ -4015,62 +4047,67 @@ def format_sale_card(store, l: dict, cfg: dict, head: str = "", note: str = "") 
         kinds = {"owner": ", собств.", "agency": ", маклер"}
         refs = [f'<a href="{a["url"]}">${_money(a["price_usd"])}</a> ({escape_html(a.get("site") or "Uybor")}'
                 f'{kinds.get(a.get("kind"), "")})' for a in alts[:2]]
-        top.append("Эту же продают ещё: " + ", ".join(refs) + (f" и ещё {len(alts) - 2}" if len(alts) > 2 else ""))
+        top.append(t("Эту же продают ещё: {refs}", refs=", ".join(refs))
+                   + (t(" и ещё {n}", n=len(alts) - 2) if len(alts) > 2 else ""))
     if "dorm" in (x.get("flags") or []):
-        top.append("⚠️ Бывшее общежитие — проверьте кадастр")
+        top.append(t("⚠️ Бывшее общежитие — проверьте кадастр"))
 
     # экономика — три строки
     econ = []
     m = x.get("mortgage")
     if x:                                            # можно ли в ипотеку — прямо, как написал продавец
-        mline = escape_html(market.mortgage_line(x).removeprefix("Ипотека — "))
+        mline = escape_html(market.mortgage_line(x).split(" — ", 1)[-1])
         if m:
-            mline += f' · взнос ${_money(m["down"])}, ≈ {market._mln(m["pay_uzs"])} млн сум/мес на {m["years"]} лет'
-        econ.append(f'<b>Ипотека</b> — {mline}')
+            mline += t(" · взнос ${down}, ≈ {mln} млн сум/мес на {years} лет", down=_money(m["down"]),
+                       mln=market._mln(m["pay_uzs"]), years=m["years"])
+        econ.append(f'<b>{t("Ипотека")}</b> — {mline}')
     bg = x.get("bargain")
     if bg:
-        econ.append(f'<b>Торг</b> — просите ~${_money(bg["offer"])}, цена уже ниже рынка' if bg["calm"] else
-                    f'<b>Торг</b> — начните с ~${_money(bg["offer"])}, потолок ~${_money(bg["ceiling"])}')
+        econ.append(f'<b>{t("Торг")}</b> — ' + (t("просите ~${v}, цена уже ниже рынка", v=_money(bg["offer"]))
+                    if bg["calm"] else t("начните с ~${a}, потолок ~${b}", a=_money(bg["offer"]),
+                                         b=_money(bg["ceiling"]))))
     if x.get("rent"):
         y = f'{x["net_yield"] * 100:.1f}'.replace(".", ",")
-        econ.append(f'<b>Сдавать</b> — ~${_money(x["rent"])}/мес, {y}% в год чистыми')
+        econ.append(f'<b>{t("Сдавать")}</b> — ' + t("~${r}/мес, {y}% в год чистыми", r=_money(x["rent"]), y=y))
 
     # подробнее — сколько влезет
     det = []
     if x.get("repair_signs"):
-        det.append("На фото: " + escape_html(x["repair_signs"]))
+        det.append(t("На фото: {s}", s=escape_html(x["repair_signs"])))
     if m and x.get("rent"):
         diff = m["pay_usd"] - x["rent"]
-        det.append(f'Ипотека ~${_money(m["pay_usd"])}/мес против аренды такой же ~${_money(x["rent"])}'
-                   + (f' — дороже на ${_money(diff)}, зато квартира ваша' if diff > 30 else " — выгоднее брать"))
+        det.append(t("Ипотека ~${p}/мес против аренды такой же ~${r}", p=_money(m["pay_usd"]), r=_money(x["rent"]))
+                   + (t(" — дороже на ${d}, зато квартира ваша", d=_money(diff)) if diff > 30 else t(" — выгоднее брать")))
     if bg and bg.get("args"):
-        det.append("Аргументы в торге: " + escape_html(", ".join(bg["args"])))
+        det.append(t("Аргументы в торге: {a}", a=escape_html(", ".join(bg["args"]))))
     if x.get("rent"):
         dep = x["assumptions"]["usd_deposit"]
         pb = x.get("payback_years")
-        det.append(f'Вклад в $ даёт {dep * 100:.0f}%' + (f'; окупится за ~{pb:.0f} лет' if pb else ""))
+        det.append(t("Вклад в $ даёт {p}%", p=f"{dep * 100:.0f}") + (t("; окупится за ~{y} лет", y=f"{pb:.0f}") if pb else ""))
     if pdet:
         det.append(escape_html(pdet))
     v = x.get("values")
     if v:
-        det.append(f'Через 5 лет — скорее ~${_money(market._r500(v["base"][5]))} '
-                   f'(${_money(market._r500(v["pess"][5]))}–${_money(market._r500(v["opt"][5]))})')
+        det.append(t("Через 5 лет — скорее ~${b} (${p}–${o})", b=_money(market._r500(v["base"][5])),
+                     p=_money(market._r500(v["pess"][5])), o=_money(market._r500(v["opt"][5]))))
     c = x.get("comp")
     if c:
-        det.append(f'Сравнивала с {c["n"]} объявл.: {escape_html(c["label"])}, медиана ${_money(c["median_m2"])}/м²')
+        det.append(t("Сравнивала с {n} объявл.: {label}, медиана ${m}/м²", n=c["n"], label=escape_html(c["label"]),
+                     m=_money(c["median_m2"])))
     if x.get("days_on_market") is not None and x.get("price_change"):
         pc = x["price_change"]
-        det.append(f'Цена менялась: ${_money(pc[0])} → ${_money(pc[1])}')
+        det.append(t("Цена менялась: ${a} → ${b}", a=_money(pc[0]), b=_money(pc[1])))
     flags = hot_flags(l.get("text") or "", cfg)
     if flags:
-        det.append(f"В тексте: «{escape_html(flags[0])}»")
+        det.append(t("В тексте: «{f}»", f=escape_html(flags[0])))
     desc = _desc_clean(l.get("text") or "")
 
-    foot = f'<a href="{l["url"]}">Открыть на {escape_html(l.get("site") or "Uybor")}</a>' if l.get("url") else ""
+    foot = (f'<a href="{l["url"]}">' + t("Открыть на {site}", site=escape_html(l.get("site") or "Uybor")) + "</a>"
+            if l.get("url") else "")
     if g and cfg.get("worker_url"):
-        foot += (" · " if foot else "") + f'<a href="{map_url(cfg, g["lat"], g["lon"])}">карта цен</a>'
+        foot += (" · " if foot else "") + f'<a href="{map_url(cfg, g["lat"], g["lon"])}">{t("карта цен")}</a>'
     if x:
-        foot += (" · " if foot else "") + f'<a href="{market.REPORT_URL}">как считаю</a>'
+        foot += (" · " if foot else "") + f'<a href="{market.REPORT_URL}">{t("как считаю")}</a>'
 
     def build(top_, econ_, det_, desc_):
         parts = ["\n".join(top_).strip()]
@@ -4080,9 +4117,9 @@ def format_sale_card(store, l: dict, cfg: dict, head: str = "", note: str = "") 
             parts.append(note.strip())
         body = ["• " + d for d in det_]
         if desc_:
-            body.append("Из объявления: «" + escape_html(desc_) + "»")
+            body.append(t("Из объявления: «{d}»", d=escape_html(desc_)))
         if body:
-            parts.append("<blockquote expandable><b>Подробнее</b>\n" + "\n".join(body) + "</blockquote>")
+            parts.append(f"<blockquote expandable><b>{t('Подробнее')}</b>\n" + "\n".join(body) + "</blockquote>")
         text_ = "\n\n".join(parts)
         return text_ + ("\n" + foot if body else "\n\n" + foot) if foot else text_
 
@@ -4096,10 +4133,10 @@ def format_sale_card(store, l: dict, cfg: dict, head: str = "", note: str = "") 
         text = build(top, econ, [], "")
     keep = []
     for d in det:
-        t = build(top, econ, keep + [d], "")
-        if tg_len(t) <= CAPTION_MAX:
+        cand = build(top, econ, keep + [d], "")
+        if tg_len(cand) <= CAPTION_MAX:
             keep.append(d)
-            text = t
+            text = cand
     if desc:
         room = CAPTION_MAX - tg_len(build(top, econ, keep, "")) - 24
         if room >= 60:
@@ -4769,6 +4806,7 @@ def run():
     cfg = load_config()
     store = Store(DB_PATH)
     store.prune()
+    sync_lang(store)
     first_run = store.counts()[0] == 0
 
     stop = {"flag": False}

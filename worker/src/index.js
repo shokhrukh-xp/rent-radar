@@ -320,6 +320,63 @@ export async function gemini(env, system, userText, opts = {}) {
   throw new Error(lastErr || "Gemini недоступен");
 }
 
+// ───────────────────────────── перевод для клиента (uz/en) ─────────────────────────────
+// Готовые тексты бота написаны по-русски; клиенту на узбекском/английском их переводит модель.
+// Без изменений остаются: HTML-разметка, ссылки, всё внутри <code> (это текст маклерам), числа и суммы.
+const TR_SCHEMA = { type: "object", properties: { text: { type: "string" } }, required: ["text"] };
+const TR_LANG = { uz: "узбекский язык (латиница, как пишут в Ташкенте)", en: "английский язык", ru: "русский язык" };
+const TR_SYSTEM = (lang) => `Переведи сообщение Telegram-бота Ra'no (помощник по поиску квартир в Ташкенте) ${lang === "ru" ? "с узбекского (или любого другого языка)" : "с русского"} на ${TR_LANG[lang]}.
+Правила:
+- Метки вида ⟦0⟧, ⟦1⟧ и HTML-теги (<b>, <i>, <a …>, </a>, <blockquote expandable>, <code>) оставь ровно как есть, на своих местах.
+- Числа, суммы ($, сум, млн), проценты, даты, время, телефоны, эмодзи — без изменений.
+- Названия районов, улиц, ЖК, сайтов — как принято писать на этом языке, без пояснений.
+- Ra'no говорит о себе в женском роде (для английского — просто I). Тон дружелюбный и короткий, как в оригинале.
+- Ничего не добавляй и не сокращай. Ответ: {"text": "перевод"}`;
+
+export function hasRussian(text) {
+  const t = String(text || "").replace(/<code>[\s\S]*?<\/code>/g, " ").replace(/<[^>]+>/g, " ")
+    .replace(/https?:\/\/\S+/g, " ").replace(/«[^»]{0,300}»/g, " ");   // цитаты маклера переводим, но не считаем
+  const cyr = (t.match(/[а-яё]/gi) || []).length, lat = (t.match(/[a-z]/gi) || []).length;
+  return cyr >= 12 && cyr > lat * 0.6;
+}
+
+function digitsOf(t) {
+  return String(t).replace(/<[^>]+>/g, " ").match(/\d+/g)?.sort().join(",") || "";
+}
+
+async function sha1(s) {
+  const b = await crypto.subtle.digest("SHA-1", new TextEncoder().encode(s));
+  return [...new Uint8Array(b)].map(x => x.toString(16).padStart(2, "0")).join("");
+}
+
+export async function translateText(env, text, lang) {
+  if (!text || !TR_LANG[lang] || (lang !== "ru" && !hasRussian(text))) return text;
+  const key = "tr:" + lang + ":" + (await sha1(text)).slice(0, 20);
+  const hit = await kvGet(env, key, null);
+  if (hit) return hit;
+  const keep = [];
+  const masked = String(text).replace(/<code>[\s\S]*?<\/code>|href="[^"]*"|https?:\/\/[^\s<>"]+/g,
+    m => { keep.push(m); return `⟦${keep.length - 1}⟧`; });
+  try {
+    const out = await gemini(env, TR_SYSTEM(lang), masked, { schema: TR_SCHEMA, temperature: 0.2 });
+    let t = String(out?.text || "");
+    if (!t || keep.some((_, i) => !t.includes(`⟦${i}⟧`))) return text;          // метки потерялись — не рискуем
+    t = t.replace(/⟦(\d+)⟧/g, (_, i) => keep[+i] ?? "");
+    if (digitsOf(t) !== digitsOf(text)) return text;                            // цифры поменялись — оригинал
+    await kvSet(env, key, t);
+    return t;
+  } catch (e) { return text; }
+}
+
+let langCache = { at: 0, v: "ru" };
+export function resetLangCache() { langCache = { at: 0, v: "ru" }; }
+async function ownerLang(env) {
+  if (Date.now() - langCache.at < 60e3) return langCache.v;
+  const iv = await kvGet(env, "iv:" + env.OWNER_CHAT, null);
+  langCache = { at: Date.now(), v: iv?.ans?.lang || "ru" };
+  return langCache.v;
+}
+
 // ───────────────────────────── разбор варианта маклера ─────────────────────────────
 export const OFFER_KEYS = ["is_offer", "deal", "price", "currency", "price_period", "rooms", "area", "floor",
   "floors_total", "district", "address", "landmark", "repair", "building", "furniture", "commission",
@@ -584,6 +641,13 @@ export async function tg(env, method, body) {
       && body.reply_markup?.inline_keyboard?.length) {
     body = { ...body }; delete body.reply_markup;
   }
+  // клиент на узбекском/английском: готовые русские тексты — в перевод
+  if (body?.text && env.OWNER_CHAT && String(body.chat_id) === String(env.OWNER_CHAT) && /^(sendMessage|editMessageText)$/.test(method)
+      && !body._noTr) {
+    const lang = await ownerLang(env);
+    if (lang !== "ru" && hasRussian(body.text)) body = { ...body, text: await translateText(env, body.text, lang) };
+  }
+  if (body?._noTr) { body = { ...body }; delete body._noTr; }
   const r = await fetch(`https://api.telegram.org/bot${await botToken(env)}/${method}`, {
     method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
   return r.json().catch(() => ({ ok: false }));
@@ -893,10 +957,11 @@ const GREET = {
 // Профиль бота: «О боте» (до 120 символов) и экран до Start (до 512) — русский по умолчанию, узбекский отдельно
 export const AVATAR_URL = "https://raw.githubusercontent.com/shokhrukh-xp/rent-radar/main/docs/brand/rano_avatar_navy.jpg";
 export const PROFILE = {
-  name: { "": "Ra'no", uz: "Ra'no" },
+  name: { "": "Ra'no", uz: "Ra'no", en: "Ra'no" },
   short: {
     "": "Ra'no 👋 сама ищет квартиры в Ташкенте на сайтах и в Telegram-каналах, а если пусто — подключит маклеров.",
     uz: "Ra'no 👋 Toshkentda kvartirani saytlar va Telegram-kanallardan o'zi qidiradi, topilmasa — maklerlarni ulaydi.",
+    en: "Ra'no 👋 finds flats in Tashkent herself on sites and Telegram channels, and brings in brokers if it's empty.",
   },
   long: {
     "": "Привет! Я Ra'no 👋 — ИИ-ассистент, которая обожает квартиры в Ташкенте: аренда и покупка.\n\n" +
@@ -911,6 +976,12 @@ export const PROFILE = {
       "📇 Saytlarda topilmasa — maklerlarni ulayman: so'rovni men tayyorlayman.\n" +
       "📊 Har bir variantga — halol narx tahlili 😉\n\n" +
       "Maklerlar uchun: Start ni bosing va variantlarni yuboring — mijozga darhol yetkazaman 🙌",
+    en: "Hi! I'm Ra'no 👋 — an AI assistant who loves flats in Tashkent: renting and buying.\n\n" +
+      "🔎 I search myself first — every day on Uybor, Realt24, Joymee, Realting, Yangiuylar and Telegram channels. " +
+      "Great deals right away, the rest in the evening, no repeats.\n" +
+      "📇 Sites empty? I'll pick brokers: tap a name, the request is already typed, just press «Send».\n" +
+      "📊 Every option comes with an honest price analysis 😉\n\n" +
+      "Brokers: press Start and send your options — I'll pass them to the client right away 🙌",
   },
 };
 const WAIT = {
@@ -1639,6 +1710,11 @@ export default {
         await kvSet(env, "pricemap", d);
         return json({ ok: true, cells: d.cells.length });
       }
+      if (p === "/svc/translate" && req.method === "POST") {   // Python: перевод текста для клиента
+        const b = await req.json().catch(() => null);
+        if (!b || !b.text || !TR_LANG[b.lang]) return json({ ok: false }, 400);
+        return json({ ok: true, text: await translateText(env, String(b.text).slice(0, 6000), b.lang) });
+      }
       if (p === "/svc/bye") { await kvSet(env, "py_alive", null); return json({ ok: true }); }
       if (p === "/svc/setup") {
         const hook = await tg(env, "setWebhook", { url: url.origin + "/tg", secret_token: env.TG_SECRET || undefined,
@@ -1661,7 +1737,7 @@ export default {
         // и для ru/en явно: старые языковые описания из BotFather перекрывают общее
         for (const lang of ["", "ru", "en", "uz"]) {
           const lc = lang ? { language_code: lang } : {};
-          const t = lang === "uz" ? "uz" : "";
+          const t = lang === "uz" ? "uz" : lang === "en" ? "en" : "";
           profile[lang || "default"] = {
             name: (await tg(env, "setMyName", { name: PROFILE.name[t], ...lc })).ok,
             short: (await tg(env, "setMyShortDescription", { short_description: PROFILE.short[t], ...lc })).ok,

@@ -2,7 +2,7 @@
 // D1 эмулируется на node:sqlite, Telegram / Gemini / GitHub — подменой fetch.
 import { DatabaseSync } from "node:sqlite";
 import assert from "node:assert/strict";
-import worker, { repairFromPhotos, linkFacts, suggestedChannels, parseNum, applyPatch, essentialsOk, finalAns, handleUpdate, summary, pairsToSet, OWNER_KB, BROKER_KB, BTN, parseWhen, PROFILE, interviewCore, BIZ_ASK } from "../src/index.js";
+import worker, { repairFromPhotos, linkFacts, suggestedChannels, parseNum, applyPatch, essentialsOk, finalAns, handleUpdate, summary, pairsToSet, OWNER_KB, BROKER_KB, BTN, parseWhen, PROFILE, interviewCore, BIZ_ASK, translateText, hasRussian, resetLangCache } from "../src/index.js";
 
 function d1() {
   const s = new DatabaseSync(":memory:");
@@ -617,3 +617,22 @@ console.log("OK — Telegram для бизнеса: подключение и с
   assert.ok(sent.length > before && !last.reply_markup);
 }
 console.log("OK — без кнопок у клиента");
+
+// ── клиент на английском: русские тексты бота переводит модель; <code>, ссылки и цифры — как были
+{
+  const row = await env.DB.prepare("SELECT v FROM kv WHERE k=?").bind("iv:" + OWNER).first();
+  const ivx = JSON.parse(row.v); ivx.ans = { ...(ivx.ans || {}), lang: "en" };
+  await env.DB.prepare("UPDATE kv SET v=? WHERE k=?").bind(JSON.stringify(ivx), "iv:" + OWNER).run();
+  resetLangCache();
+  const ru = "Пока тихо — новых вариантов нет, загляните через 5 минут. Запрос: <code>Здравствуйте, ищу квартиру</code>";
+  geminiQueue.push({ text: "All quiet — no new options, check back in 5 minutes. Request: ⟦0⟧" });
+  await (await import("../src/index.js")).tg(env, "sendMessage", { chat_id: +OWNER, text: ru });
+  assert.equal(sent.at(-1).text, "All quiet — no new options, check back in 5 minutes. Request: <code>Здравствуйте, ищу квартиру</code>");
+  assert.equal(await translateText(env, ru, "en"), sent.at(-1).text);                          // из кэша, без модели
+  geminiQueue.push({ text: "All quiet, check back in 7 minutes ⟦0⟧" });                          // цифра поменялась — оригинал
+  assert.equal(await translateText(env, ru.replace("5", "6"), "en"), ru.replace("5", "6"));
+  assert.ok(hasRussian(ru) && !hasRussian("Good price · Mirabad · ул. Аския"));
+  ivx.ans.lang = "ru"; await env.DB.prepare("UPDATE kv SET v=? WHERE k=?").bind(JSON.stringify(ivx), "iv:" + OWNER).run();
+  resetLangCache();
+}
+console.log("OK — языки: клиенту на английском/узбекском — перевод, разметка и цифры не трогаются");

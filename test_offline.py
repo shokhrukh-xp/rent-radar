@@ -2881,3 +2881,55 @@ with mock.patch.object(rr, "tg_call", lambda c, m, p, **k: LV.append((m, p)) or 
 rr.concierge._BIZ_STORE["store"] = None
 lvd.unlink(missing_ok=True)
 print("OK — локация от маклера (точка, ссылки карт, скриншот) и просмотр: Ra'no согласует время с маклером")
+
+# ============ языки: клиент ru/uz/en (главное — вручную, остальное — модель), маклер — на его языке ============
+import i18n as I18
+assert I18.detect_lang("Assalomu alaykum, 2 xonali kvartira bor, narxi 60 000$") == "uz"
+assert I18.detect_lang("Здравствуйте, есть 2-комн на Чиланзаре") == "ru"
+assert I18.detect_lang("Икки хонали уй сотилади, нархи 55 000") == "uz"
+try:
+    I18.set_lang("en")
+    assert I18.t("Хорошая цена") == "Good price" and I18.t("на {pct} дешевле похожих{near}{with_reno}", pct="21%",
+                                                               near=I18.t(" рядом"), with_reno="") == "21% less than similar nearby"
+    assert I18.dist("Мирабад") == "Mirabad" and "Telegram Business" in cg.biz_guide({})
+    assert I18.t(rr.HELP_TEXT).startswith("🏠 <b>Ra'no</b> — your AI assistant") and "/help" in I18.t(rr.VIEW_HINT)
+    assert mk.mortgage_line({"mortgage_ok": "no", "mortgage_quote": "в ипотеку не даём"}) == "Mortgage — no: «в ипотеку не даём»"
+    assert I18.t("Неизвестная фраза") == "Неизвестная фраза"                        # нет в каталоге — переведёт модель
+    # что осталось по-русски — в перевод моделью; кнопки/ссылки/код — как были
+    seen = []
+    fake_post = lambda c, path, pl, timeout=40: (seen.append(pl), {"ok": True, "text": "Translated: " + pl["text"][-5:]})[1]
+    with mock.patch.object(rr, "worker_post", fake_post):
+        ocfg2 = dict(cfg, telegram_chat_id="900", worker_url="https://w")
+        out = rr._owner_translate(ocfg2, {"chat_id": 900, "text": "Пока тихо — новых вариантов нет, загляните позже, пожалуйста"})
+        assert out["text"].startswith("Translated") and seen[-1]["lang"] == "en"
+        same = rr._owner_translate(ocfg2, {"chat_id": 900, "text": I18.t("Хорошая цена") + " · Mirabad"})
+        assert same["text"] == "Good price · Mirabad"                                 # уже по-английски — не трогаем
+        brk = rr._owner_translate(ocfg2, {"chat_id": 555, "text": "Здравствуйте, маклеру — по-русски, как есть"})
+        assert brk["text"].startswith("Здравствуйте")                                 # маклеру — не переводим
+        media = rr._owner_translate(ocfg2, {"chat_id": 900, "media": json.dumps([{"type": "photo", "media": "x",
+                                     "caption": "Ремонт хороший — можно заезжать, документы готовы, звоните"}])})
+        assert json.loads(media["media"])[0]["caption"].startswith("Translated")
+    I18.set_lang("uz")
+    assert I18.t("Ипотека") == "Ipoteka" and I18.dist("Яшнабад") == "Yashnobod"
+finally:
+    I18.set_lang("ru")
+assert I18.t("Хорошая цена") == "Хорошая цена"
+# запрос маклерам — на двух языках; узбекскому маклеру отвечаем по-узбекски
+two = cg.compose_request(cfg, cs)
+assert "Здравствуйте" in two and "Assalomu alaykum" in two
+ls_ = rr.Store(Path("/tmp/test_lang.db"))
+UZ = []
+with mock.patch.object(rr, "tg_call", lambda c, m, p, **k: UZ.append(p) or {"ok": True}), \
+        mock.patch.object(I18, "ai", lambda c, text, lang=None, post=None: "UZ:" + text[:10] if lang == "uz" else text):
+    I18.broker_lang(ls_, "4321", "Assalomu alaykum, variant bor")
+    cg.broker_send(dict(cfg, worker_url="https://w"), ls_, "4321", "Здравствуйте! Он ещё актуален?")
+    assert UZ[-1]["text"].startswith("UZ:")
+    I18.broker_lang(ls_, "4322", "Добрый день, есть вариант")
+    cg.broker_send(cfg, ls_, "4322", "Здравствуйте! Он ещё актуален?")
+    assert UZ[-1]["text"].startswith("Здравствуйте")
+    assert "Kvartirani" in cg.biz_followup_text({"photos": [], "extra": {}}, "buy", True) or "rasm" in \
+        cg.biz_followup_text({"photos": [], "extra": {}}, "buy", True).lower()
+with mock.patch.object(I18, "ai", lambda c, text, lang=None, post=None: "есть вариант" if lang == "ru" else text):
+    assert I18.quote_for_client(cfg, "variant bor, narxi yaxshi") == "variant bor, narxi yaxshi\n(перевод: есть вариант)"
+Path("/tmp/test_lang.db").unlink(missing_ok=True)
+print("OK — языки: карточки и инструкции на ru/uz/en, остальное переводит модель, маклеру — на его языке")
