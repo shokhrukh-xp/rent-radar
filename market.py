@@ -668,6 +668,10 @@ def place_lines(x: dict, l: dict):
         pct = f'{pl["diff"] * 100:+.0f}%'.replace("-", "−")
         bits.append(f'{geo.place_word(pl["diff"])} ({pct} к району)' if abs(pl["diff"]) >= 0.10
                     else geo.place_word(pl["diff"]))
+    if geo.in_city(g["lat"], g["lon"]):          # центр это или нет — по тому, что считается центром Ташкента
+        rel, dc = geo.center_relation(g["lat"], g["lon"], geo.city_center("Ташкент"))
+        bits.insert(0, "в центре" if rel == "центр" else
+                    ("у центра, " if rel == "у центра" else "не центр, ") + f"{dc:.1f} км до середины".replace(".", ","))
     mt = x.get("metro")
     if mt:
         name = mt[0].split(" (")[0]

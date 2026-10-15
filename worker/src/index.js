@@ -176,11 +176,12 @@ pets: no | cat | dog | pet_other
 parking: yes (нужна) | any
 contact: bot (маклеры пишут ассистенту — по умолчанию) | me (лично клиенту) | both
 near: ориентир, рядом с которым искать, — как назвал клиент: «метро Ойбек», «Ц-1», «Госпитальный рынок»,
-  «Мегапланет», «улица Бабура». Только конкретное место; «центр» — не near (в note).
+  «Мегапланет», «улица Бабура». «Центр», «в центре», «ближе к центру», «markazda» — near = "центр"
+  (что считается центром именно этого города, система узнает сама).
 near_km: радиус в км, если клиент назвал («не дальше 2 км», «пешком до метро» → 1); иначе не ставь.
   Ориентир и районы можно вместе: районы тогда не нужны, ищу по радиусу.
 note: короткая фраза для маклеров о том, для чего нет своего поля: «нужна ипотека»,
-  «рассрочка», «ближе к центру», «рядом со школой». Пиши её целиком заново (с прежним содержимым),
+  «рассрочка», «рядом со школой», «тихий двор». Пиши её целиком заново (с прежним содержимым),
   на языке письма маклерам (русский, для lang=uz — узбекский).
 
 intent — что клиент хочет сделать этим сообщением (выбери ОДНО):
@@ -224,7 +225,7 @@ intent — что клиент хочет сделать этим сообщен
   Фото есть у объявлений с сайтов: их показывает show_item. Ты сама картинки не видишь.
 
 Честность: если ты ничего не записал в set — не пиши «учла», «обновила запрос».
-«Центр» без названий районов — не выдумывай districts, а положи «ближе к центру» в note.
+«Центр» без названий районов — не выдумывай districts, а поставь near = "центр".
 Ориентир («рядом с метро Ойбек», «у Ц-1», «в 2 км от Мегапланета») — в near (и near_km, если назван радиус).`;
 
 // Перечисления в схеме Gemini воспринимает как «заполнять только если уверен» и молча
@@ -438,6 +439,49 @@ export async function linkFacts(env, url) {
     const facts = normOfferFacts(o.facts, LINK_KEYS);
     const opened = (fetched || !meta.length) && o.opened !== false && Object.keys(facts).length >= 2;
     return { opened, facts: opened ? facts : {}, status: meta.map(m => m.urlRetrievalStatus || m.url_retrieval_status).join(",") };
+  }
+  throw new Error(last || "Gemini недоступен");
+}
+
+// ───────────────────────── что считается центром города ─────────────────────────
+// Модель ищет в интернете (инструмент google_search Gemini), что жители и риелторы называют центром.
+// Координаты и радиус Python потом проверяет по карте — сюда только смысл и названия.
+const CITY_SYSTEM = `Ты помогаешь сервису поиска квартир понять, что в городе считается центром.
+Найди в интернете, что жители, риелторы и сайты недвижимости этого города называют центром.
+Ответь строго JSON без пояснений:
+{"anchor": "главная центральная точка, от которой меряют центр (площадь, сквер), как она называется на карте",
+ "boundary": "чем ограничен центр — улицы, кольцевая дорога, река; одна короткая фраза по-русски",
+ "radius_km": число — примерный радиус центра от anchor в км,
+ "in": ["8–15 массивов, кварталов, улиц и ориентиров, которые точно ВНУТРИ центра"],
+ "near": ["5–10 мест рядом с центром, но уже не центр"],
+ "out": ["5–10 известных районов и массивов города, которые точно НЕ центр"]}
+Названия — как их пишут на картах и в объявлениях, по-русски. Ничего не выдумывай: если не нашла — пустой список.`;
+
+export async function cityCenterFacts(env, city) {
+  if (!env.GEMINI_KEY) throw new Error("GEMINI_KEY не задан");
+  const first = env.AI_MODEL || "gemini-3.8-flash";
+  let last = "";
+  for (const model of [first, ...["gemini-3.6-flash", "gemini-3.5-flash"].filter(m => m !== first)]) {
+    const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
+      method: "POST", headers: { "content-type": "application/json", "x-goog-api-key": env.GEMINI_KEY },
+      body: JSON.stringify({ systemInstruction: { parts: [{ text: CITY_SYSTEM }] },
+        contents: [{ role: "user", parts: [{ text: `Город: ${city}, Узбекистан. Что здесь считается центром города?` }] }],
+        tools: [{ google_search: {} }], generationConfig: { temperature: 0.1, maxOutputTokens: 2048 } }),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) { last = `${model} ${r.status}: ${d?.error?.message || ""}`; if ([429, 500, 503, 404].includes(r.status)) continue; break; }
+    const c = d.candidates?.[0] || {};
+    const raw = (c.content?.parts || []).filter(p => !p.thought).map(p => p.text || "").join("");
+    const a = raw.indexOf("{"), z = raw.lastIndexOf("}");
+    let o = {};
+    try { o = JSON.parse(raw.slice(a, z + 1)); } catch (e) { last = "не JSON"; continue; }
+    const list = v => (Array.isArray(v) ? v : []).map(x => String(x).trim()).filter(x => x && x.length <= 60).slice(0, 15);
+    const gm = c.groundingMetadata || c.grounding_metadata || {};
+    const sources = (gm.groundingChunks || gm.grounding_chunks || []).map(g => g.web?.uri).filter(Boolean).slice(0, 5);
+    const rk = parseFloat(o.radius_km);
+    return { anchor: String(o.anchor || "").slice(0, 80), boundary: String(o.boundary || "").slice(0, 160),
+      radius_km: rk > 0 && rk < 15 ? rk : null, in: list(o.in), near: list(o.near), out: list(o.out),
+      sources, via: model };
   }
   throw new Error(last || "Gemini недоступен");
 }
@@ -930,7 +974,8 @@ export function summary(a) {
   const deal = { rent: "аренда", daily: "посуточно", buy: "покупка" }[a.deal] || "";
   const obj = { flat: "квартира", house: "дом", dacha: "дача", land: "участок" }[a.object] || "";
   const rooms = (a.rooms || []).length ? a.rooms.map(r => r === "4" ? "4+" : r).join("/") + "-комн." : "";
-  const ds = a.near ? `до ${(a.near_km || "2").replace(".", ",")} км от «${a.near}»`
+  const ds = a.near && /центр|markaz|center/i.test(a.near) ? "центр и рядом с ним"
+    : a.near ? `до ${(a.near_km || "2").replace(".", ",")} км от «${a.near}»`
     : (a.districts || []).map(i => DISTRICTS[+i]).filter(Boolean).join(", ");
   const b = a.budget ? `до $${a.budget}${a.deal === "daily" ? "/сутки" : a.deal === "buy" ? "" : "/мес"}` : "";
   return [deal, obj, rooms, ds || (a.city === "tashkent" ? "Ташкент" : a.city_other || ""), b].filter(Boolean).join(" · ");
@@ -1522,6 +1567,11 @@ export default {
       if (p === "/svc/link" && req.method === "POST") {    // Python: прочитать объявление по ссылке
         const body = await req.json().catch(() => ({}));
         try { return json({ ok: true, ...(await linkFacts(env, String(body.url || ""))) }); }
+        catch (e) { return json({ ok: false, error: String(e.message || e) }, 502); }
+      }
+      if (p === "/svc/city" && req.method === "POST") {    // Python: что считается центром города (поиск в интернете)
+        const body = await req.json().catch(() => ({}));
+        try { return json({ ok: true, ...(await cityCenterFacts(env, String(body.city || "Ташкент").slice(0, 40))) }); }
         catch (e) { return json({ ok: false, error: String(e.message || e) }, 502); }
       }
       if (p === "/svc/repair" && req.method === "POST") {  // Python: ремонт по фото объявления

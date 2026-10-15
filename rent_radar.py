@@ -1625,7 +1625,47 @@ def _sale_post(text: str) -> bool:
     return any(w in low for w in SALE_POST_WORDS) and not any(w in low for w in RENT_POST_WORDS)
 
 
-def near_point(cfg, store, text, km_=None):
+CITY_PROFILE_DAYS = 120          # что считается центром — перепроверяем в интернете раз в ~4 месяца
+
+
+def city_profile(cfg, city="Ташкент", force=False) -> dict:
+    """Центр города: модель ищет в интернете, что там называют центром (граница, места внутри и вне),
+    Ra'no проверяет названия по карте и считает середину и радиус. Хранится в sale.db; без интернета —
+    оценка по размеру города в OpenStreetMap."""
+    key = (city or "Ташкент").strip().lower()
+    overrides = cfg.get("cities") or {}
+    prof = None
+    sst = Store(SALE_DB_PATH)
+    try:
+        prof = sst.get_kv(f"city:{key}")
+        age = age_days((prof or {}).get("at") or "")
+        if prof and not force and age is not None and age < CITY_PROFILE_DAYS:
+            geo.CITY_PROFILES[key] = prof
+            return prof
+        geo.CITY_PROFILES.pop(key, None)
+        base = geo.city_center(city, overrides)
+        facts = worker_post(cfg, "/svc/city", {"city": city}, timeout=120) if cfg.get("worker_url") else None
+        if (facts or {}).get("ok") and (facts.get("in") or facts.get("radius_km")):
+            market.ensure_tables(sst.conn)
+            geo.ensure(sst)
+
+            def resolve(name):              # свой справочник ориентиров (Ташкент) → карта OSM
+                pt = geo.point_for(name) if key == "ташкент" else None
+                return (pt["lat"], pt["lon"]) if pt else geo.geocode_in(name, base)
+            prof = geo.center_from_research(base, facts, resolve)
+            prof["anchor"] = facts.get("anchor") or ""
+            prof["at"] = datetime.now(timezone.utc).isoformat()
+            sst.set_kv(f"city:{key}", prof)
+            log.info("[центр] %s: %s, радиус %.1f км (%s)", city, prof.get("boundary"), prof["center_km"], prof["checked"])
+        else:
+            prof = base                      # интернет не ответил — оценка по размеру, спросим позже
+    finally:
+        sst.conn.close()
+    geo.CITY_PROFILES[key] = prof
+    return prof
+
+
+def near_point(cfg, store, text, km_=None, city="Ташкент"):
     """Ориентир клиента («метро Ойбек», «Ц-1») → точка и радиус для поиска. Кэш в kv радара;
     не нашли на карте — один раз скажем клиенту и ищем по районам."""
     text = " ".join(str(text or "").split())[:60]
@@ -1635,10 +1675,22 @@ def near_point(cfg, store, text, km_=None):
         km_ = min(max(float(str(km_ or 2).replace(",", ".")), 0.3), 10.0)
     except (TypeError, ValueError):
         km_ = 2.0
-    key = f"{geo.skel(text)}|{km_:g}"
+    key = f"{geo.skel(text)}|{km_:g}|{city}"
     c = store.get_kv("near_point") or {}
     if c.get("key") == key:
         return c.get("pt")
+    if geo.is_center_query(text):          # «центр» — что считается центром именно в этом городе
+        prof = city_profile(cfg, city)
+        pt = {"lat": prof["lat"], "lon": prof["lon"], "label": "центр", "src": "центр", "city": city,
+              "km": prof["near_km"], "center_km": prof["center_km"]}
+        pt["districts"] = geo.districts_within(pt["lat"], pt["lon"], pt["km"] + 0.5) if city.lower() == "ташкент" else []
+        why = f' — {escape_html(prof["boundary"])}' if prof.get("boundary") else ""
+        src = (prof.get("sources") or [None])[0]
+        send_telegram(cfg, f"📍 <b>Центр {escape_html(city)}</b>{why}.\nИщу в центре и рядом с ним "
+                           f"(до {str(pt['km']).replace('.', ',')} км от середины); что «у центра», а не в нём, — помечу."
+                      + (f'\n<a href="{src}">Откуда это знаю</a>' if src else ""))
+        store.set_kv("near_point", {"key": key, "pt": pt})
+        return pt
     pt = None
     try:
         sst = Store(SALE_DB_PATH)
@@ -1684,7 +1736,11 @@ def effective_sale_cfg(cfg, store):
     elif ans.get("districts_any"):              # клиент сказал «любой район» — весь Ташкент
         ss["districts"] = list(DISTRICT_LIST)
     ss["mortgage"] = "ипотек" in str(ans.get("note") or "").lower() or ans.get("payment") == "mortgage"
-    ss["near"] = near_point(cfg, store, ans.get("near"), ans.get("near_km")) if ans.get("near") else None
+    near_txt = ans.get("near")
+    if not near_txt and geo.is_center_query(str(ans.get("note") or "")):
+        near_txt = "центр"                    # раньше «ближе к центру» лежало в пожеланиях
+    city = ans.get("city_other") if ans.get("city") == "other" and ans.get("city_other") else "Ташкент"
+    ss["near"] = near_point(cfg, store, near_txt, ans.get("near_km"), city=city) if near_txt else None
     if ss["near"] and ss["near"].get("districts"):
         ss["districts"] = ss["near"]["districts"]      # сайты спрашиваем по районам круга, отсев — по радиусу
     ss["enabled"] = True
@@ -4014,7 +4070,9 @@ def sale_criteria_text(ss: dict) -> str:
     rooms = f"{rooms} комн" if rooms else "любая комнатность"
     districts = ", ".join(ss.get("districts") or []) or "любые районы"
     nr = ss.get("near") or {}
-    if nr.get("lat") is not None:
+    if nr.get("src") == "центр":
+        districts = "центр города и рядом с ним"
+    elif nr.get("lat") is not None:
         districts = f'до {str(round(nr["km"], 1)).replace(".0", "").replace(".", ",")} км от «{nr["label"]}»'
     if ss.get("owner_only", True):
         sellers = (f'Только собственники: у продавца не больше {ss.get("max_owner_ads", 2)} '

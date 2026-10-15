@@ -610,7 +610,8 @@ def rent_settings(ans, settings, cfg=None, store=None):
     ds = [rr.DISTRICT_LIST[int(i)] for i in (ans.get("districts") or [])
           if str(i).isdigit() and int(i) < len(rr.DISTRICT_LIST)]
     s["districts"] = ds
-    s["near"] = rr.near_point(cfg, store, ans.get("near"), ans.get("near_km")) \
+    city = ans.get("city_other") if ans.get("city") == "other" and ans.get("city_other") else "Ташкент"
+    s["near"] = rr.near_point(cfg, store, ans.get("near"), ans.get("near_km"), city=city) \
         if ans.get("near") and cfg is not None and store is not None else None
     return s
 

@@ -29,6 +29,7 @@ def tx_(pl):
         return ""
 import geo as _geo_t
 _geo_t.static_map = lambda *a, **k: None             # тайлы карты не качаем в тестах (кроме отдельной проверки)
+_geo_t.CITY_PROFILES["ташкент"] = {**_geo_t.CITY_FALLBACK["ташкент"], "near_km": 4.9}   # без Nominatim в тестах
 
 cfg = rr.deep_merge(rr.DEFAULT_CONFIG, {})
 
@@ -2601,3 +2602,34 @@ assert "попросить" in cg.details_question({"rooms": 2, "district": "М�
                                       "photos": [], "extra": {}}, cfg, "buy")
 npdb.unlink(missing_ok=True)
 print("OK — без фото: в подборку и карточкой не показываем, у маклера просим фото")
+
+# ============ «центр» — что считается центром города: поиск в интернете + проверка по карте ============
+cprof = G.center_from_research({"name": "Тест", "lat": 41.3123, "lon": 69.2787, "center_km": 3.5},
+    {"anchor": "сквер Амира Темура", "radius_km": 3.5, "boundary": "внутри Малой кольцевой",
+     "in": ["Минор", "Ойбек", "Госпитальный", "Бадамзар", "Ц-1"], "out": ["Юнусабад 11 квартал", "Чиланзар 5"]},
+    resolve=lambda n: {"сквер Амира Темура": (41.3111, 69.2797), "Минор": (41.3269, 69.2831), "Ойбек": (41.298, 69.2741),
+                       "Госпитальный": (41.2936, 69.2728), "Бадамзар": (41.3372, 69.2847), "Ц-1": (41.3126, 69.2893),
+                       "Юнусабад 11 квартал": (41.3647, 69.2876), "Чиланзар 5": (41.2919, 69.2236)}.get(n))
+assert 2.4 <= cprof["center_km"] <= 3.6 and cprof["near_km"] > cprof["center_km"] and cprof["boundary"], cprof
+assert G.center_relation(41.3269, 69.2831, cprof)[0] == "центр" and G.center_relation(41.3647, 69.2876, cprof)[0] == "не центр"
+assert G.is_center_query("ближе к центру") and G.is_center_query("markazda") and not G.is_center_query("метро Ойбек")
+cdb = Path("/tmp/test_center_sale.db"); cdb.unlink(missing_ok=True); rr.Store(cdb).conn.close()
+crd = Path("/tmp/test_center_radar.db"); crd.unlink(missing_ok=True); crs = rr.Store(crd)
+CM = []
+fake_city = lambda c, path, payload, timeout=60: {"ok": True, "anchor": "сквер Амира Темура", "radius_km": 3.0,
+                                                  "boundary": "внутри Малой кольцевой дороги", "in": [], "out": [],
+                                                  "sources": ["https://example.uz/centr"]}
+with mock.patch.object(rr, "SALE_DB_PATH", cdb), mock.patch.object(rr, "worker_post", fake_city), \
+        mock.patch.object(rr, "tg_call", lambda c, m, p, **k: CM.append(p) or {"ok": True, "result": {}}):
+    G.CITY_PROFILES.pop("ташкент", None)
+    pt = rr.near_point(dict(ss_tg, worker_url="https://w"), crs, "ближе к центру")
+    assert pt["src"] == "центр" and pt["center_km"] == 3.0 and pt["km"] > 3.0
+    assert "Малой кольцевой" in CM[-1]["text"] and "example.uz" in CM[-1]["text"]   # объяснила, что считает центром
+    assert rr.Store(cdb).get_kv("city:ташкент")["researched"] is True          # запомнила, второй раз не ищет
+    cg.save_anketa(crs, {"ans": {"deal": "buy", "object": "flat", "budget": "80000", "rooms": ["2"], "note": "ближе к центру"}})
+    crs.set_kv("near_point", None)
+    assert rr.effective_sale_cfg(ss_tg, crs)["sale_search"]["near"]["src"] == "центр"   # старая пометка в пожеланиях
+G.CITY_PROFILES["ташкент"] = {**G.CITY_FALLBACK["ташкент"], "near_km": 4.9}
+cdb.unlink(missing_ok=True); crd.unlink(missing_ok=True)
+print("OK — центр: что считается центром города — из интернета, проверено по карте; «у центра» помечаем")
+

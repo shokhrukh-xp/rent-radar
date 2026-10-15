@@ -556,3 +556,143 @@ def reverse(lat, lon) -> str:
     except OSError:
         pass
     return out
+
+
+# ---------------------------------------------------- «центр» любого города ----
+# Системно, для любого города: середина — точка города в OpenStreetMap (у Ташкента — сквер Амира Темура),
+# радиус центра — по размеру города (Ташкент ~3,5 км — это примерно Малая кольцевая, Самарканд ~1,8 км).
+# «У центра» — ещё полтора-два километра за этой границей. Можно поправить в config: cities.<город>.center_km.
+
+CITY_FALLBACK = {"ташкент": {"name": "Ташкент", "lat": 41.3123, "lon": 69.2787, "center_km": 3.5}}
+CENTER_WORDS = ("tsentr", "markaz", "center", "centre", "sentr")
+
+
+def is_center_query(text: str) -> bool:
+    s = skel(text)
+    return any(w in s for w in CENTER_WORDS)
+
+
+CITY_PROFILES = {}       # город → профиль центра, найденный в интернете и проверенный по карте (кладёт rent_radar)
+
+
+def city_center(city: str = "Ташкент", overrides: dict = None) -> dict:
+    """{name, lat, lon, center_km, near_km} — середина города и радиус «центра».
+    Есть исследованный профиль (интернет + карта) — он; иначе — по размеру города в OpenStreetMap."""
+    prof = CITY_PROFILES.get((city or "Ташкент").strip().lower())
+    if prof:
+        return prof
+    import json
+    import os
+    import tempfile
+    import requests
+    key = (city or "Ташкент").strip().lower()
+    over = (overrides or {}).get(key) or {}
+    path = os.path.join(tempfile.gettempdir(), "rano_cities.json")
+    try:
+        cache = json.load(open(path, encoding="utf-8"))
+    except (OSError, ValueError):
+        cache = {}
+    c = cache.get(key)
+    if not c:
+        try:
+            r = requests.get("https://nominatim.openstreetmap.org/search",
+                             params={"q": f"{city}, Узбекистан", "format": "jsonv2", "limit": 1,
+                                     "featureType": "city", "accept-language": "ru"},
+                             headers={"User-Agent": TILE_UA}, timeout=15)
+            d = (r.json() or [None])[0] if r.status_code == 200 else None
+        except Exception as e:
+            log.info("[центр] %s: %s", city, e)
+            d = None
+        if d:
+            s_, n_, w_, e_ = (float(x) for x in d["boundingbox"])
+            lat = float(d["lat"])
+            size = math.sqrt((n_ - s_) * 111.0 * (e_ - w_) * 111.0 * math.cos(math.radians(lat)))
+            c = {"name": city, "lat": lat, "lon": float(d["lon"]),
+                 "center_km": round(min(4.0, max(1.0, 0.11 * size)), 1)}
+            cache[key] = c
+            try:
+                json.dump(cache, open(path, "w", encoding="utf-8"), ensure_ascii=False)
+            except OSError:
+                pass
+        else:
+            c = CITY_FALLBACK.get(key) or CITY_FALLBACK["ташкент"]
+    c = {**c, **{k: v for k, v in over.items() if k in ("lat", "lon", "center_km")}}
+    c["near_km"] = round(c["center_km"] + max(1.0, 0.4 * c["center_km"]), 1)
+    return c
+
+
+def center_relation(lat, lon, city: dict) -> tuple:
+    """('центр' | 'у центра' | 'не центр', км до середины)."""
+    d = km(lat, lon, city["lat"], city["lon"])
+    if d <= city["center_km"]:
+        return "центр", d
+    if d <= city["near_km"]:
+        return "у центра", d
+    return "не центр", d
+
+
+def geocode_in(name: str, city: dict):
+    """Место по названию внутри города (Nominatim, рамка вокруг города; кэш на диске)."""
+    import json
+    import os
+    import tempfile
+    import requests
+    key = f'{city.get("name", "")}|{skel(name)}'
+    path = os.path.join(tempfile.gettempdir(), "rano_geocode.json")
+    try:
+        cache = json.load(open(path, encoding="utf-8"))
+    except (OSError, ValueError):
+        cache = {}
+    if key in cache:
+        return cache[key]
+    wait = 1.1 - (time.time() - _REV_LAST[0])
+    if wait > 0:
+        time.sleep(wait)
+    _REV_LAST[0] = time.time()
+    d = 0.25
+    try:
+        r = requests.get("https://nominatim.openstreetmap.org/search",
+                         params={"q": f'{name}, {city.get("name", "")}', "format": "jsonv2", "limit": 1,
+                                 "accept-language": "ru", "bounded": 1,
+                                 "viewbox": f'{city["lon"] - d},{city["lat"] + d},{city["lon"] + d},{city["lat"] - d}'},
+                         headers={"User-Agent": TILE_UA}, timeout=15)
+        js = r.json() if r.status_code == 200 else []
+        res = [float(js[0]["lat"]), float(js[0]["lon"])] if js else None
+    except Exception as e:
+        log.info("[центр] %s: %s", name, e)
+        return None
+    cache[key] = res
+    try:
+        json.dump(cache, open(path, "w", encoding="utf-8"), ensure_ascii=False)
+    except OSError:
+        pass
+    return res
+
+
+def center_from_research(city: dict, facts: dict, resolve=None) -> dict:
+    """Что модель нашла в интернете (центральная точка, места внутри, рядом и вне центра) → середина и
+    радиус центра, проверенные по карте. resolve(name) → (lat, lon) | None; по умолчанию — Nominatim."""
+    resolve = resolve or (lambda n: geocode_in(n, city))
+    out = dict(city)
+    if facts.get("anchor"):
+        a = resolve(facts["anchor"])
+        if a and km(a[0], a[1], city["lat"], city["lon"]) < 6:
+            out["lat"], out["lon"] = a
+    pts = lambda names: [p for p in (resolve(n) for n in names) if p]      # noqa: E731
+    d_in = sorted(km(out["lat"], out["lon"], *p) for p in pts(facts.get("in") or []))
+    d_out = sorted(km(out["lat"], out["lon"], *p) for p in pts(facts.get("out") or []))
+    d_in = [x for x in d_in if x < 10]                    # явные промахи геокодера — мимо
+    r = facts.get("radius_km") or city["center_km"]
+    if len(d_in) >= 4:                                    # «внутри центра» — на таком расстоянии от середины
+        r_in = d_in[min(len(d_in) - 1, int(len(d_in) * 0.85))]
+        r = (r + r_in) / 2
+    if d_out:                                             # «точно не центр» — граница ближе
+        far = [x for x in d_out if x > 0.5 * r]
+        if far and far[0] < r:
+            r = far[0] - 0.2
+    out["center_km"] = round(min(6.0, max(0.8, r)), 1)
+    out["near_km"] = round(out["center_km"] + max(1.0, 0.4 * out["center_km"]), 1)
+    out.update(boundary=facts.get("boundary") or "", in_names=(facts.get("in") or [])[:12],
+               sources=facts.get("sources") or [], researched=True,
+               checked=f"{len(d_in)} внутри, {len(d_out)} вне — по карте")
+    return out
