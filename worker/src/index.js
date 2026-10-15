@@ -955,6 +955,12 @@ export async function watchdog(env, now = Date.now()) {
   }
   return "ok";
 }
+let lastWatch = 0;                         // в памяти изолята: не чаще раза в 5 минут
+function maybeWatch(env, ctx) {
+  if (Date.now() - lastWatch < 5 * 60e3) return;
+  lastWatch = Date.now();
+  ctx.waitUntil(watchdog(env).catch(e => console.log("watchdog error", e.stack || e)));
+}
 async function queueAndWake(env, upd, chat, note) {
   await enqueue(env, upd);
   const alive = await wake(env);
@@ -1654,6 +1660,11 @@ export default {
     const url = new URL(req.url);
     const p = url.pathname;
     if (url.origin.startsWith("https://")) ORIGIN = url.origin;
+    if (p === "/watch") {                      // GitHub Actions раз в 30 минут; ничего не раскрывает
+      lastWatch = Date.now();
+      return json({ ok: true, state: await watchdog(env) });
+    }
+    if (p !== "/svc/updates") maybeWatch(env, ctx);   // Python опрашивает очередь сам — это и есть «жив»
     if (p === "/map" || p === "/map/") {
       return new Response(MAP_HTML, { headers: { "content-type": "text/html; charset=utf-8", "cache-control": "public, max-age=600" } });
     }

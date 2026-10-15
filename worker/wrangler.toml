@@ -17,8 +17,8 @@ database_name = "rano"
 database_id = "e31433a9-bb25-4225-ad09-ea6d7caef25c"
 
 # логи воркера в дашборде Cloudflare (Workers → rano-bot → Logs) — для разбора «ничего не пришло»
-[triggers]
-crons = ["*/15 * * * *"]   # сторож сервера (watchdog) и будильник к сводкам
+# cron-триггеров на бесплатном плане 5 на аккаунт, и они заняты — сторож сервера (watchdog) запускается
+# каждым запросом к воркеру и раз в 30 минут из GitHub Actions (.github/workflows/watch.yml → GET /watch)
 
 [observability]
 enabled = true
