@@ -368,13 +368,122 @@ export async function translateText(env, text, lang) {
   } catch (e) { return text; }
 }
 
-let langCache = { at: 0, v: "ru" };
-export function resetLangCache() { langCache = { at: 0, v: "ru" }; }
-async function ownerLang(env) {
-  if (Date.now() - langCache.at < 60e3) return langCache.v;
-  const iv = await kvGet(env, "iv:" + env.OWNER_CHAT, null);
-  langCache = { at: Date.now(), v: iv?.ans?.lang || "ru" };
-  return langCache.v;
+let langCache = {};
+export function resetLangCache() { langCache = {}; }
+async function ownerLang(env, chat = env.OWNER_CHAT) {        // язык клиента (любого пользователя)
+  const c = langCache[chat];
+  if (c && Date.now() - c.at < 60e3) return c.v;
+  const iv = await kvGet(env, "iv:" + chat, null);
+  langCache[chat] = { at: Date.now(), v: iv?.ans?.lang || "ru" };
+  return langCache[chat].v;
+}
+
+// ───────────────────────────── много пользователей (этап 2) ─────────────────────────────
+// Владелец (OWNER_CHAT) — клиент всегда. Остальные — из таблицы users: active / waitlist / removed.
+// MULTI_USER=on — новые люди по /start становятся клиентами (до лимита, дальше — лист ожидания);
+// выключено — как раньше: любой чат, кроме владельца, — маклер.
+export const isMulti = env => env.MULTI_USER === "on";
+const uiKey = (env, chat) => (!chat || String(chat) === String(env.OWNER_CHAT)) ? "ui" : "ui:" + chat;
+const cardsKey = (env, chat) => (!chat || String(chat) === String(env.OWNER_CHAT)) ? "cards_recent" : "cards:" + chat;
+let usersCache = { at: 0, m: new Map() };
+export function resetUsersCache() { usersCache = { at: 0, m: new Map() }; }
+async function usersMap(env) {
+  if (Date.now() - usersCache.at < 30e3) return usersCache.m;
+  const r = await (await db(env)).prepare("SELECT chat, status, name, username, lang, at FROM users").all();
+  usersCache = { at: Date.now(), m: new Map((r.results || []).map(u => [String(u.chat), u])) };
+  return usersCache.m;
+}
+export async function userStatus(env, chat) {
+  if (String(chat) === String(env.OWNER_CHAT)) return "owner";
+  return (await usersMap(env)).get(String(chat))?.status || null;
+}
+export async function isClient(env, chat) {
+  if (String(chat) === String(env.OWNER_CHAT)) return true;
+  if (!isMulti(env)) return false;
+  return (await userStatus(env, chat)) === "active";
+}
+async function userLimit(env) { return +(await kvGet(env, "user_limit", 0)) || +(env.USER_LIMIT || 20); }
+async function activeCount(env) {
+  return [...(await usersMap(env)).values()].filter(u => u.status === "active").length;
+}
+async function setUser(env, chat, status, from = {}) {
+  const lang = (from.language_code || "").slice(0, 2);
+  await (await db(env)).prepare("INSERT INTO users (chat, status, name, username, lang, at) VALUES (?, ?, ?, ?, ?, ?) " +
+    "ON CONFLICT(chat) DO UPDATE SET status=excluded.status, name=COALESCE(excluded.name, users.name), " +
+    "username=COALESCE(excluded.username, users.username)")
+    .bind(String(chat), status, [from.first_name, from.last_name].filter(Boolean).join(" ") || null,
+          from.username || null, lang || null, Date.now()).run();
+  resetUsersCache();
+}
+const adminSay = (env, text) => env.OWNER_CHAT
+  ? tg(env, "sendMessage", { chat_id: env.OWNER_CHAT, text, parse_mode: "HTML", _noTr: true }) : null;
+const who = (from = {}, chat = "") => esc([from.first_name, from.last_name].filter(Boolean).join(" ") || "без имени") +
+  (from.username ? ` @${esc(from.username)}` : "") + ` · <code>${chat}</code>`;
+function esc(s) { return String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
+export const WAITLIST = {
+  ru: "Привет! Я Ra'no 👋 — ИИ-ассистент по поиску квартир в Ташкенте.\n\nСейчас я работаю с небольшой группой " +
+    "людей, и все места заняты. Я записала вас в лист ожидания — как освободится место, напишу сюда сама 🙌",
+  uz: "Salom! Men Ra'no 👋 — Toshkentda kvartira qidirishda AI-yordamchiman.\n\nHozir kichik guruh bilan ishlayapman, " +
+    "barcha joylar band. Sizni kutish ro'yxatiga yozdim — joy bo'shashi bilan o'zim shu yerga yozaman 🙌",
+  en: "Hi! I'm Ra'no 👋 — an AI assistant for finding flats in Tashkent.\n\nRight now I work with a small group and " +
+    "all spots are taken. I've put you on the waitlist — I'll message you here as soon as a spot opens 🙌",
+};
+export const APPROVED = {
+  ru: "🎉 Место освободилось — начинаем! Напишите своими словами, что ищете: например, «купить двушку в центре до $60 000».",
+  uz: "🎉 Joy bo'shadi — boshlaymiz! Nima qidirayotganingizni yozing: masalan, «markazda 2 xonali, $60 000 gacha».",
+  en: "🎉 A spot opened up — let's start! Tell me what you're looking for, e.g. \"buy a 2-room flat in the centre up to $60,000\".",
+};
+const langOf = from => { const l = (from?.language_code || "").slice(0, 2); return l === "uz" ? "uz" : l === "ru" ? "ru" : (l ? "en" : "ru"); };
+/** Новый человек нажал Start (без метки маклера): клиент, если есть место, иначе — лист ожидания. */
+export async function signup(env, msg) {
+  const chat = String(msg.chat.id), from = msg.from || {};
+  const st = await userStatus(env, chat);
+  if (st === "active" || st === "owner") return "active";
+  if (st === "removed") return "removed";
+  const n = await activeCount(env), lim = await userLimit(env);
+  if (n < lim) {
+    await setUser(env, chat, "active", from);
+    await adminSay(env, `🆕 Новый пользователь: ${who(from, chat)} — ${n + 1}/${lim}`);
+    return "active";
+  }
+  if (st !== "waitlist") {
+    await setUser(env, chat, "waitlist", from);
+    await adminSay(env, `⏳ В лист ожидания: ${who(from, chat)} (мест ${lim}/${lim}). Пустить: <code>/approve ${chat}</code>`);
+  }
+  return "waitlist";
+}
+/** Команды владельца: /users, /approve <chat|@username>, /remove <chat>, /limit <N>. */
+export async function adminCommand(env, chat, text) {
+  if (String(chat) !== String(env.OWNER_CHAT)) return null;
+  const [c0, arg = ""] = text.trim().split(/\s+/, 2);
+  const cmd = c0.toLowerCase().split("@")[0];
+  if (!["/users", "/approve", "/remove", "/limit"].includes(cmd)) return null;
+  const m = await usersMap(env);
+  const find = a => [...m.values()].find(u => String(u.chat) === a || (u.username && "@" + u.username.toLowerCase() === a.toLowerCase()));
+  if (cmd === "/limit") {
+    const n = parseInt(arg, 10);
+    if (n > 0) await kvSet(env, "user_limit", n);
+    return `Лимит пользователей: ${await userLimit(env)} (сейчас ${await activeCount(env)}).`;
+  }
+  if (cmd === "/users") {
+    const rows = [...m.values()].sort((a, b) => (a.at || 0) - (b.at || 0));
+    const line = u => `• ${who({ first_name: u.name, username: u.username }, u.chat)}`;
+    const act = rows.filter(u => u.status === "active"), wl = rows.filter(u => u.status === "waitlist");
+    return `👥 <b>Пользователи</b>: ${act.length}/${await userLimit(env)}` + (isMulti(env) ? "" : " (MULTI_USER выключен)") +
+      (act.length ? "\n" + act.map(line).join("\n") : "") +
+      (wl.length ? `\n\n⏳ <b>Лист ожидания</b>: ${wl.length}\n` + wl.map(line).join("\n") : "") +
+      "\n\nПустить: <code>/approve id</code> · убрать: <code>/remove id</code> · лимит: <code>/limit 30</code>";
+  }
+  const u = find(arg);
+  if (!u) return "Не нашла такого пользователя — посмотрите <code>/users</code>.";
+  if (cmd === "/approve") {
+    await setUser(env, u.chat, "active", {});
+    const L = u.lang === "uz" ? "uz" : u.lang === "ru" || !u.lang ? "ru" : "en";
+    await tg(env, "sendMessage", { chat_id: u.chat, text: APPROVED[L], _noTr: true });
+    return `✅ Пустила: ${who({ first_name: u.name, username: u.username }, u.chat)}`;
+  }
+  await setUser(env, u.chat, "removed", {});
+  return `🚫 Убрала: ${who({ first_name: u.name, username: u.username }, u.chat)} — сообщения от него больше не обрабатываю.`;
 }
 
 // ───────────────────────────── разбор варианта маклера ─────────────────────────────
@@ -608,6 +717,8 @@ async function db(env) {
     await env.DB.batch([
       env.DB.prepare("CREATE TABLE IF NOT EXISTS queue (id INTEGER PRIMARY KEY AUTOINCREMENT, upd TEXT NOT NULL, at INTEGER NOT NULL)"),
       env.DB.prepare("CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT)"),
+      env.DB.prepare("CREATE TABLE IF NOT EXISTS users (chat TEXT PRIMARY KEY, status TEXT, name TEXT, " +
+        "username TEXT, lang TEXT, at INTEGER)"),
     ]);
     schemaReady = true;
   }
@@ -636,15 +747,14 @@ async function botToken(env) {
   return tokenCache;
 }
 export async function tg(env, method, body) {
+  const client = body?.chat_id != null && env.OWNER_CHAT && await isClient(env, body.chat_id).catch(() => false);
   // клиенту кнопок не шлём: управление — словами (ссылки в тексте остаются)
-  if (body && method !== "editMessageReplyMarkup" && env.OWNER_CHAT && String(body.chat_id) === String(env.OWNER_CHAT)
-      && body.reply_markup?.inline_keyboard?.length) {
+  if (body && method !== "editMessageReplyMarkup" && client && body.reply_markup?.inline_keyboard?.length) {
     body = { ...body }; delete body.reply_markup;
   }
   // клиент на узбекском/английском: готовые русские тексты — в перевод
-  if (body?.text && env.OWNER_CHAT && String(body.chat_id) === String(env.OWNER_CHAT) && /^(sendMessage|editMessageText)$/.test(method)
-      && !body._noTr) {
-    const lang = await ownerLang(env);
+  if (body?.text && client && /^(sendMessage|editMessageText)$/.test(method) && !body._noTr) {
+    const lang = await ownerLang(env, String(body.chat_id));
     if (lang !== "ru" && hasRussian(body.text)) body = { ...body, text: await translateText(env, body.text, lang) };
   }
   if (body?._noTr) { body = { ...body }; delete body._noTr; }
@@ -679,7 +789,7 @@ const INTENT_CMD = { show_offers: "/offers", shortlist: "/shortlist", brokers: "
 
 // Готовые тексты из снимка (цены рынка, поиск на Uybor, текст запроса, справка) — сразу.
 async function instantText(env, chat, cmd) {
-  const ui = await kvGet(env, "ui", null);
+  const ui = await kvGet(env, uiKey(env, chat), null);
   const t = ui && ui.texts && ui.texts[cmd];
   if (!t) return false;
   if (cmd === "/request") {                       // запрос поменялся после снимка — пусть ответит Python
@@ -692,7 +802,7 @@ async function instantText(env, chat, cmd) {
 
 // ── Экраны двух кнопок поиска — из снимка; без снимка ответит Python ──
 async function showScreen(env, chat, cmd) {
-  const scr = ((await kvGet(env, "ui", null)) || {}).screens?.[cmd];
+  const scr = ((await kvGet(env, uiKey(env, chat), null)) || {}).screens?.[cmd];
   if (!scr) return asCommand(env, chat, cmd);
   await say(env, chat, scr.text, { parse_mode: "HTML", disable_web_page_preview: true, reply_markup: scr.kb });
 }
@@ -799,7 +909,7 @@ export async function showShortlist(env, chat, messageId = null) {
 }
 
 export async function showShortlistList(env, chat, messageId = null) {   // прежний список (не используется)
-  const ui = await kvGet(env, "ui", null);
+  const ui = await kvGet(env, uiKey(env, chat), null);
   if (!ui || !ui.sl) return asCommand(env, chat, "/shortlist");
   const st = await kvGet(env, "sl", null) || { sort: "n" };
   const { text, kb } = renderShortlist(ui, st);
@@ -825,7 +935,7 @@ async function showMySearch(env, chat, L) {
   const iv = await kvGet(env, ivKey(chat), null);
   if (!iv || !essentialsOk(iv.ans || {})) return startInterview(env, chat, false, L);
   const note = iv.ans.note ? `\nПожелания: ${iv.ans.note}` : "";
-  const ui = await kvGet(env, "ui", null);
+  const ui = await kvGet(env, uiKey(env, chat), null);
   const st = ui?.screens?.["/rano"]?.text ? "\n\n" + ui.screens["/rano"].text : "";
   await say(env, chat, `🔎 <b>Мой поиск</b>: ${summary(iv.ans)}.${note}${st}\n\n` +
     "Поменять — просто напишите: «бюджет 60 тысяч», «добавь Юнусабад», «рядом с метро Ойбек». " +
@@ -838,19 +948,21 @@ const triageKb = oid => ({ inline_keyboard: [[
   { text: "👍 В шортлист", callback_data: `t:s:${oid}` }, { text: "🕐 Позже", callback_data: `t:l:${oid}` },
   { text: "👎 Мимо", callback_data: `t:n:${oid}` }]] });
 
-async function pendingBrokerMsgs(env) {
+async function pendingBrokerMsgs(env, chat = env.OWNER_CHAT) {
   const r = await (await db(env)).prepare("SELECT upd FROM queue").all();
   const owner = String(env.OWNER_CHAT);
   return (r.results || []).filter(x => {
-    try { const u = JSON.parse(x.upd); const m = u.message || u.edited_message; return m && String(m.chat?.id) !== owner && !m._welcomed; }
-    catch (e) { return false; }
+    try {
+      const u = JSON.parse(x.upd); const m = u.message || u.edited_message;
+      return m && !m._welcomed && String(m.chat?.id) !== String(chat) && String(m._client || owner) === String(chat);
+    } catch (e) { return false; }
   }).length;
 }
 
 export async function showOffers(env, chat, all = false) {
-  const ui = await kvGet(env, "ui", null);
+  const ui = await kvGet(env, uiKey(env, chat), null);
   if (!ui) return asCommand(env, chat, all ? "/offers" : "/offers");
-  const waiting = await pendingBrokerMsgs(env);
+  const waiting = await pendingBrokerMsgs(env, chat);
   const waitNote = waiting ? `\n\n⏳ Ещё ${waiting} сообщ. от маклеров разбираю — карточки будут через минуту-две.` : "";
   if (waiting) await wake(env);
   if (!ui.offers_total) {
@@ -875,7 +987,7 @@ export async function startOutreach(env, chat) {
 }
 
 async function nextBroker(env, chat) {
-  const ui = await kvGet(env, "ui", null) || {};
+  const ui = await kvGet(env, uiKey(env, chat), null) || {};
   const st = await kvGet(env, "out", null) || { sent: 0, skipped: 0, done: [] };
   const left = (ui.brokers || []).filter(b => !st.done.includes(b.bid));
   if (!left.length) {
@@ -1161,9 +1273,9 @@ async function chatAction(env, chat, intent, items, ui, iv, reply) {
 }
 
 /** Карточка, на которую ответили: по id любого сообщения альбома. */
-export async function cardByMessage(env, mid) {
+export async function cardByMessage(env, mid, chat = null) {
   if (!mid) return null;
-  const list = (await kvGet(env, "cards_recent", null)) || [];
+  const list = (await kvGet(env, cardsKey(env, chat), null)) || [];
   return [...list].reverse().find(c => (c.ids || []).includes(+mid)) || null;
 }
 
@@ -1233,8 +1345,8 @@ export async function interviewTurn(env, chat, text, card = null) {
   const iv = await kvGet(env, ivKey(chat), null) || emptyIv();
   tg(env, "sendChatAction", { chat_id: chat, action: "typing" }).catch(() => {});
   let res;
-  const ui = await kvGet(env, "ui", null);
-  const recent = ((await kvGet(env, "cards_recent", null)) || []).slice(-6);
+  const ui = await kvGet(env, uiKey(env, chat), null);
+  const recent = ((await kvGet(env, cardsKey(env, chat), null)) || []).slice(-6);
   const ctx = { ...(ui?.ctx || {}), recent_cards: recent.map((c, i) => ({ n: i + 1, line: c.line })),
     ...(card ? { card: { line: card.line } } : {}) };
   try {
@@ -1313,7 +1425,7 @@ export async function handleUpdate(env, upd) {
   const cb = upd.callback_query;
   if (cb) {
     const chat = String(cb.message?.chat?.id ?? "");
-    if (chat !== owner) return "skip";
+    if (!(await isClient(env, chat))) return "skip";
     const data = cb.data || "";
     if (data === "b" || data === "off2" || data === "q:ok") {
       await tg(env, "answerCallbackQuery", { callback_query_id: cb.id });
@@ -1342,7 +1454,7 @@ export async function handleUpdate(env, upd) {
       const act = data.split(":")[1];
       let toast = "📋 Открываю шортлист…";
       if (act === "go") {
-        const ui = await kvGet(env, "ui", null);
+        const ui = await kvGet(env, uiKey(env, chat), null);
         const n = ((ui?.sl || {}).n || {}).askable || 0;
         toast = ui?.sl && !n ? "Всех уже спросила 🙂" : `📨 Спрашиваю маклеров — ответы принесу сюда`;
         if (ui?.sl && !n) { await tg(env, "answerCallbackQuery", { callback_query_id: cb.id, text: toast }); return "shortlist"; }
@@ -1491,7 +1603,31 @@ export async function handleUpdate(env, upd) {
   const msg = upd.message || upd.edited_message;
   if (!msg) { await enqueue(env, upd); return "queued"; }
   const chat = String(msg.chat?.id ?? "");
-  if (chat !== owner) {                         // маклер
+  let client = chat === owner || await isClient(env, chat);
+  if (!client && isMulti(env)) {
+    // много пользователей: Start без метки маклера — новый клиент (или лист ожидания); с меткой m<id> — маклер
+    // клиента <id> (ссылка из его запроса). Убранных и ждущих не обслуживаем.
+    const st0 = await userStatus(env, chat);
+    const sm = /^\/start(?:@\w+)?(?:\s+(\S+))?/i.exec(String(msg.text || "").trim());
+    const payload = sm ? (sm[1] || "") : null;
+    if (payload !== null && /^m[0-9a-z]+$/i.test(payload)) {
+      const cid = String(parseInt(payload.slice(1), 36));
+      if (cid && (cid === owner || (await userStatus(env, cid)) === "active")) await kvSet(env, "broker_of:" + chat, cid);
+    } else if (payload !== null || st0 === "waitlist") {
+      const st = st0 === "waitlist" && payload === null ? "waitlist" : await signup(env, msg);
+      if (st === "waitlist") {
+        const k = "wl_note:" + chat;                   // не чаще раза в сутки
+        if (Date.now() - (await kvGet(env, k, 0)) > 864e5) { await kvSet(env, k, Date.now()); await say(env, chat, WAITLIST[langOf(msg.from)]); }
+        return "waitlist";
+      }
+      if (st === "removed") return "removed";
+      client = true;
+    }
+    if (st0 === "removed") return "removed";
+  }
+  if (!client) {                                // маклер
+    const forClient = isMulti(env) ? (await kvGet(env, "broker_of:" + chat, null)) || owner : owner;
+    msg._client = forClient;                      // Python: чей это маклер
     const chans = !msg.photo ? suggestedChannels(msg.text) : [];
     if (chans.length) {
       await say(env, chat, `📡 Спасибо! Проверяю ${chans.map(c => "@" + c).join(", ")} — пару минут.`);
@@ -1499,7 +1635,7 @@ export async function handleUpdate(env, upd) {
       await queueAndWake(env, upd);
       return "channel";
     }
-    if (await brokerWelcome(env, msg, owner)) {
+    if (await brokerWelcome(env, msg, forClient)) {
       if (String(msg.text || "").trim() === BTN.what) return "broker_info";   // кнопка — Python не нужен
       msg._welcomed = true;
     } else {
@@ -1530,7 +1666,7 @@ export async function handleUpdate(env, upd) {
 
   // «подключи к моему телеграму» — пошаговая инструкция Telegram для бизнеса (текст и проверка — в Python)
   // короткое «нет / не хочу» сразу после предложения подключить Telegram — тоже отказ от доступа
-  const uiB = await kvGet(env, "ui", null);
+  const uiB = await kvGet(env, uiKey(env, chat), null);
   const justOffered = uiB?.biz_offered_at && Date.now() / 1000 - uiB.biz_offered_at < 3600;
   if (BIZ_NO.test(text) || (justOffered && /^(нет|не|не хочу|не надо|не буду|не стоит|пока нет|не готов[а-я]*|yo['ʻ’]?q|kerak emas|xohlamayman)[.!,)]*$/i.test(text))) {
     upd.message = { ...msg, _biz_decline: true };
@@ -1576,6 +1712,10 @@ export async function handleUpdate(env, upd) {
     return "link";
   }
 
+  if (text.startsWith("/") && chat === owner) {
+    const adm = await adminCommand(env, chat, text);
+    if (adm) { await say(env, chat, adm, { parse_mode: "HTML", _noTr: true }); return "admin"; }
+  }
   if (text.startsWith("/")) {
     const [c0, ...rest] = text.split(/\s+/);
     const cmd = c0.toLowerCase().split("@")[0];
@@ -1642,7 +1782,7 @@ export async function handleUpdate(env, upd) {
     await queueAndWake(env, upd, chat, WAIT[L]);
     return "queued";
   }
-  const card = await cardByMessage(env, msg.reply_to_message?.message_id);
+  const card = await cardByMessage(env, msg.reply_to_message?.message_id, chat);
   await interviewTurn(env, chat, text, card);
   return card ? "card" : "interview";
 }
@@ -1712,6 +1852,10 @@ export default {
         catch (e) { return json({ ok: false, error: String(e.message || e) }, 502); }
       }
       if (p === "/svc/owner") return json({ chat: env.OWNER_CHAT || null });   // для .env сервера: не секрет
+      if (p === "/svc/users") {                                // Python: кто клиент (этап 2)
+        const users = [...(await usersMap(env)).values()].map(u => ({ chat: u.chat, status: u.status, lang: u.lang, name: u.name }));
+        return json({ multi: isMulti(env), limit: await userLimit(env), users });
+      }
       if (p === "/svc/link" && req.method === "POST") {    // Python: прочитать объявление по ссылке
         const body = await req.json().catch(() => ({}));
         try { return json({ ok: true, ...(await linkFacts(env, String(body.url || ""))) }); }
@@ -1731,16 +1875,17 @@ export default {
         const snap = await req.json().catch(() => null);
         if (!snap || !Array.isArray(snap.offers)) return json({ ok: false }, 400);
         snap.at = Date.now();
-        await kvSet(env, "ui", snap);
+        await kvSet(env, uiKey(env, url.searchParams.get("chat") || snap.chat), snap);
         return json({ ok: true });
       }
       if (p === "/svc/cards" && req.method === "POST") {      // Python: отправил карточку-альбом
         const b = await req.json().catch(() => null);
         if (!b || !Array.isArray(b.ids) || !b.ref) return json({ ok: false }, 400);
-        const list = (await kvGet(env, "cards_recent", null)) || [];
+        const ck = cardsKey(env, b.chat);
+        const list = (await kvGet(env, ck, null)) || [];
         list.push({ ids: b.ids.map(Number).filter(Boolean).slice(0, 12), ref: String(b.ref).slice(0, 80),
                     line: String(b.line || "").slice(0, 140), at: Date.now() });
-        await kvSet(env, "cards_recent", list.slice(-40));
+        await kvSet(env, ck, list.slice(-40));
         return json({ ok: true });
       }
       if (p === "/svc/pricemap" && req.method === "POST") {   // Python: сетка цен после среза рынка
@@ -1802,7 +1947,7 @@ export default {
       if (p === "/svc/try") {            // проверка промпта вживую, без Telegram и очереди
         if (url.searchParams.get("reset")) await kvSet(env, "iv:test", emptyIv());
         const iv = await kvGet(env, "iv:test", null) || emptyIv();
-        const ctx = url.searchParams.get("ctx") ? JSON.parse(url.searchParams.get("ctx")) : ((await kvGet(env, "ui", null))?.ctx || null);
+        const ctx = url.searchParams.get("ctx") ? JSON.parse(url.searchParams.get("ctx")) : ((await kvGet(env, uiKey(env, null), null))?.ctx || null);
         const res = await interviewCore(env, iv, url.searchParams.get("text") || "", ctx);
         await kvSet(env, "iv:test", iv);
         return json({ ...res, intent: res.raw?.intent, items: res.raw?.items, ans: iv.ans });

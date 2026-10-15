@@ -3096,3 +3096,79 @@ with mock.patch.object(rr, "send_telegram", lambda c, txt, _admin=False: HS.appe
     assert rr.source_health({}, hst_, hss_, now=now_ + 200) == [] and "снова работает" in HS[-1][0]
 hdb_.unlink(missing_ok=True); Path("/tmp/test_health2.db").unlink(missing_ok=True)
 print("OK — надёжность: упавший источник — сообщение владельцу раз в сутки и когда снова заработал")
+
+# ============ этап 2: много пользователей — свои базы, общий срез рынка, маршрутизация обновлений ============
+import tempfile as _tf, tenants as TN, market as _mkt
+_td = Path(_tf.mkdtemp())
+with mock.patch.object(rr, "STATE_DIR", _td), mock.patch.object(rr, "DB_PATH", _td / "radar.db"), \
+        mock.patch.object(rr, "SALE_DB_PATH", _td / "sale.db"):
+    ost_, osa_ = rr.Store(rr.DB_PATH), rr.Store(rr.SALE_DB_PATH)
+    _mkt.ensure_tables(osa_.conn)
+    osa_.conn.execute("INSERT INTO market(key, op, district, area, price_usd, removed_at) VALUES('sale:uybor:1','sale','Мирабад',50,60000,NULL)")
+    osa_.conn.commit()
+    ost_.upsert_broker("tel:1", "Uybor", "Азиз", "998901112233", 5, "Мирабад", None, deal="sale")
+    ost_.broker_status("tel:1", "contacted")                     # у владельца — уже написали
+    tcfg_ = dict(cfg, telegram_chat_id="500", worker_url="https://w")
+    users_ = {"multi": True, "users": [{"chat": "7001", "status": "active"}, {"chat": "7002", "status": "waitlist"}]}
+    TN.REG.update(owner=None, at=0)
+    TN.refresh(tcfg_, ost_, osa_, force=True, fetch=lambda: users_)
+    assert [x.chat for x in TN.all_tenants()] == ["500", "7001"] and TN.REG["multi"]
+    u1 = TN.get("7001")
+    assert u1.cfg["telegram_chat_id"] == "7001" and u1.cfg["admin_chat_id"] == "500" and u1.cfg["tenant"] == "7001"
+    assert u1.sale.conn.execute("SELECT COUNT(*) FROM market").fetchone()[0] == 1     # срез — общий
+    assert _mkt.ensure_tables(u1.sale.conn) is False
+    assert not u1.sale.conn.execute("SELECT name FROM main.sqlite_master WHERE name='market'").fetchone()
+    assert u1.store.conn.execute("SELECT status FROM brokers WHERE bid='tel:1'").fetchone()[0] == "new"   # свой статус
+    assert (_td / "users" / "7001" / "radar.db").exists()
+    # маршрутизация: клиент, маклер клиента (метка от воркера), непонятный маклер — владельцу, Telegram для бизнеса
+    m_ = lambda chat, **kw: {"update_id": 1, "message": {"chat": {"id": chat}, "text": "x", **kw}}
+    assert TN.route(m_(7001)) == "7001" and TN.route(m_(9999, _client="7001")) == "7001"
+    assert TN.route(m_(9999)) == "500" and TN.route(m_(9999, _client="7002")) == "500"     # ждущий — не клиент
+    assert TN.route({"business_connection": {"user_chat_id": 7001}}) == "7001"
+    u1.store.set_kv("biz_conn", {"id": "BCU"})
+    assert TN.route({"business_message": {"business_connection_id": "BCU", "chat": {"id": 1}}}) == "7001"
+    # обработка: каждому — в его чат, его базой и его sale.db; контекст потом прежний
+    seen_ = []
+    def _hc(text, settings, store, c):
+        seen_.append((text, c["telegram_chat_id"], Path(store.conn.execute("PRAGMA database_list").fetchone()[2]).parent.name,
+                      rr.sale_path().parent.name))
+        return "", None
+    ups_ = [{"update_id": 11, "message": {"chat": {"id": 7001}, "text": "мой поиск"}},
+            {"update_id": 12, "message": {"chat": {"id": 500}, "text": "шортлист"}}]
+    with mock.patch.object(rr, "fetch_updates", lambda c, st, lp=0: ({"result": ups_}, "wq_offset")), \
+            mock.patch.object(rr, "handle_command", _hc), mock.patch.object(rr, "push_snapshot", lambda *a, **k: False):
+        rr.process_commands(tcfg_, ost_)
+    assert ("мой поиск", "7001", "7001", "7001") in seen_ and ("шортлист", "500", _td.name, _td.name) in seen_, seen_
+    assert ost_.get_kv("wq_offset") == 12 and rr.CUR == {"sale": None, "shared": None}
+    # ссылка на бота в запросе — с меткой клиента: маклер, пришедший по ней, — маклер этого клиента
+    with TN.ctx(u1):
+        rq7 = cg.compose_request(u1.cfg, u1.store, lang="ru")
+        assert "t.me/" not in rq7 or "?start=m" + cg._b36("7001") in rq7, rq7
+    assert int(cg._b36("7001"), 36) == 7001 and int(cg._b36("308687648"), 36) == 308687648
+    # поиск покупки — у пользователя по его анкете, его sale.db и его чат
+    u1.store.set_kv("anketa", {"ans": {"deal": "buy", "object": "flat", "rooms": ["2"], "budget": "60000", "districts": ["2"]}})
+    RS_ = []
+    with mock.patch.object(rr, "run_sale_search", lambda c, st, se, force=False: RS_.append(
+            (c["telegram_chat_id"], c["sale_search"]["max_price_usd"], Path(st.conn.execute("PRAGMA database_list")
+                                                                         .fetchone()[2]).parent.name)) or 0), \
+            mock.patch.object(sale_sources, "maybe_daily_pick", lambda *a: 0):
+        nx_ = {}
+        rr.tenant_sales(nx_, time.time())
+        rr.tenant_sales(nx_, time.time())                       # интервал не прошёл — второй раз не ищем
+    assert RS_ == [("7001", 60000, "7001")], RS_
+    # pump посреди разбора пользователя: обработал чужие сообщения — и вернул его контекст
+    with TN.ctx(u1):
+        rr._PUMP.update(ctx=(tcfg_, ost_, osa_), last=0, busy=False)
+        with mock.patch.object(rr, "fetch_updates", lambda c, st, lp=0: ({"result": [{"update_id": 20, "message": {
+                "chat": {"id": 500}, "text": "привет"}}]}, "wq_offset")), mock.patch.object(rr, "handle_command", _hc), \
+                mock.patch.object(rr, "push_snapshot", lambda *a, **k: False), \
+                mock.patch.object(rr, "flush_pending_offer", lambda *a: None):
+            rr.pump()
+        assert rr.sale_path().parent.name == "7001" and cg._BIZ_STORE["store"] is u1.store
+        rr._PUMP.update(ctx=None)
+    # без многих пользователей — только владелец
+    TN.refresh(tcfg_, ost_, osa_, force=True, fetch=lambda: {"multi": False, "users": users_["users"]})
+    assert [x.chat for x in TN.all_tenants()] == ["500"] and TN.route(m_(7001)) == "500"
+TN.REG.update(owner=None, at=0, multi=False, t={})
+import shutil as _sh; _sh.rmtree(_td, ignore_errors=True)
+print("OK — много пользователей: свои базы и чаты, общий срез рынка, маклер — своему клиенту, без флага — как раньше")

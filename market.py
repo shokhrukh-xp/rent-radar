@@ -213,6 +213,8 @@ BAND_RU = {"s": "до 35 м²", "m": "35–60 м²", "l": "больше 60 м²"
 # ------------------------------------------------------------- хранилище ----
 
 def ensure_tables(conn):
+    if any(r[1] == "shared" for r in conn.execute("PRAGMA database_list")):
+        return False                             # пользователь: срез общий, из базы владельца (tenants.py)
     conn.execute("""CREATE TABLE IF NOT EXISTS market(
         key TEXT PRIMARY KEY, op TEXT, district TEXT, rooms INTEGER, area REAL,
         price_usd REAL, new_building INTEGER, repair TEXT, created_at TEXT,

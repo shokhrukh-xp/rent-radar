@@ -36,6 +36,7 @@ import i18n
 import i18n_texts
 from i18n import t, dist
 import geo
+import tenants
 
 if __name__ == "__main__":
     # Запуск скриптом: модуль называется __main__, а concierge/sale_sources/followup делают `import rent_radar` —
@@ -52,6 +53,20 @@ DB_PATH = STATE_DIR / "radar.db"
 # Поиск квартиры для покупки — отдельная база: цены продажи не должны
 # попадать в арендную аналитику и дедупликацию.
 SALE_DB_PATH = STATE_DIR / "sale.db"
+# Чья база сейчас: владелец (STATE_DIR) или другой пользователь (STATE_DIR/users/<chat>) — см. tenants.py.
+# У пользователя своя sale.db (что видел, подборка), а срез рынка — общий: база владельца подключена как «shared».
+CUR = {"sale": None, "shared": None}          # None — владелец: SALE_DB_PATH
+
+
+def sale_path() -> Path:
+    return CUR["sale"] or SALE_DB_PATH
+
+
+def open_sale():
+    st = Store(sale_path())
+    if CUR.get("shared"):
+        st.attach_shared(CUR["shared"])
+    return st
 
 TASHKENT_TZ = timezone(timedelta(hours=5))
 HEADERS = {
@@ -713,13 +728,13 @@ def fetch_joymee_rent(scfg: dict, cfg: dict) -> list:
     return out
 
 
-SOURCE_FETCHERS = {
-    "olx": fetch_olx,
-    "uybor": fetch_uybor,
-    "birbir": fetch_birbir,
-    "telegram": fetch_telegram,
-    "realt24": fetch_realt24_rent,
-    "joymee": fetch_joymee_rent,
+SOURCE_FETCHERS = {          # одно скачивание на всех пользователей за минуту (tenants.shared_fetch)
+    "olx": tenants.shared_fetch("olx", fetch_olx),
+    "uybor": tenants.shared_fetch("uybor", fetch_uybor),
+    "birbir": tenants.shared_fetch("birbir", fetch_birbir),
+    "telegram": tenants.shared_fetch("telegram", fetch_telegram),
+    "realt24": tenants.shared_fetch("realt24", fetch_realt24_rent),
+    "joymee": tenants.shared_fetch("joymee", fetch_joymee_rent),
 }
 
 
@@ -836,6 +851,14 @@ class Store:
         except sqlite3.OperationalError:
             pass
         self.conn.commit()
+
+    def attach_shared(self, path):
+        """Общий срез рынка (market, market_prices) из базы владельца: запросы без схемы находят его сами,
+        своих таблиц market у пользователя нет."""
+        if path and Path(path) != Path(self.conn.execute("PRAGMA database_list").fetchone()[2] or ""):
+            if not any(r[1] == "shared" for r in self.conn.execute("PRAGMA database_list")):
+                self.conn.execute("ATTACH DATABASE ? AS shared", (str(path),))
+        return self
 
     def upsert_broker(self, bid, source, name, phone, ads, district, price, deal="rent", tg=None):
         """Копим карточку маклера: телефон, районы, диапазон цен, аренда/продажа.
@@ -1700,7 +1723,7 @@ def city_profile(cfg, city="Ташкент", force=False) -> dict:
     key = (city or "Ташкент").strip().lower()
     overrides = cfg.get("cities") or {}
     prof = None
-    sst = Store(SALE_DB_PATH)
+    sst = open_sale()
     try:
         prof = sst.get_kv(f"city:{key}")
         age = age_days((prof or {}).get("at") or "")
@@ -1758,7 +1781,7 @@ def near_point(cfg, store, text, km_=None, city="Ташкент"):
         return pt
     pt = None
     try:
-        sst = Store(SALE_DB_PATH)
+        sst = open_sale()
         try:
             market.ensure_tables(sst.conn)
             geo.ensure(sst)
@@ -2311,9 +2334,9 @@ SNAPSHOT_EVERY = 15
 
 def show_site_listing(cfg, key) -> str:
     """Полная карточка объявления с сайта: фото, описание, разбор цены, 👍 / Мимо."""
-    if not SALE_DB_PATH.exists():
+    if not sale_path().exists():
         return "Объявление не найдено"
-    sst = Store(SALE_DB_PATH)
+    sst = open_sale()
     try:
         row = sst.conn.execute("SELECT data FROM listings WHERE key LIKE ?",
                                (key.replace("%", "") + "%",)).fetchone()
@@ -2507,7 +2530,7 @@ def handle_link(cfg, store, msg):
     сказать, видели ли эту квартиру раньше (и у кого), по просьбе — показать похожие."""
     url = msg["_link"]
     note = (msg.get("text") or "").replace(url, " ").strip()
-    sst = Store(SALE_DB_PATH)
+    sst = open_sale()
     try:
         try:
             l, deal = sale_sources.listing_from_url(cfg, url)
@@ -2666,8 +2689,8 @@ def chat_context(cfg, store) -> dict:
         ctx["site_search"] = sale_criteria_text(ss).split("\n")[0] if ss.get("enabled") else "выключен"
     except Exception:
         pass
-    if SALE_DB_PATH.exists():
-        sst = Store(SALE_DB_PATH)
+    if sale_path().exists():
+        sst = open_sale()
         try:
             day = sale_sources.day_stats(sst)
             ctx["today"] = {k: day.get(k, 0) for k in ("seen", "fit", "instant", "picked")}
@@ -2707,8 +2730,8 @@ def rano_screen(cfg, store) -> dict:
                         "Поиск покупки по всем сайтам включается, когда в чате вы ищете купить квартиру.",
                 "kb": {"inline_keyboard": [[{"text": "✏️ Изменить, что ищем", "callback_data": "cmd:/mysearch"}]]}}
     st, pend, sent_total, stats = {}, 0, 0, {}
-    if SALE_DB_PATH.exists():
-        sst = Store(SALE_DB_PATH)
+    if sale_path().exists():
+        sst = open_sale()
         try:
             st = sale_sources.day_stats(sst)
             pend = len(sale_sources.pick_pending(sst))
@@ -2851,6 +2874,7 @@ def push_snapshot(cfg, store, settings, force=False) -> bool:
         return False
     try:
         r = requests.post(cfg["worker_url"] + "/svc/snapshot", json=snap, timeout=20,
+                          params={"chat": str(cfg["telegram_chat_id"])},
                           headers={"x-svc": cfg.get("worker_key", ""), "user-agent": "rano-radar/1.0"})
         ok = r.status_code == 200
     except requests.RequestException as e:
@@ -2910,10 +2934,10 @@ def apply_worker_done(data, cfg, store):
 
 def _listing_any(store, key):
     """Объявление по ключу: покупка — в sale.db, аренда — в базе радара."""
-    for path, st in ((SALE_DB_PATH, None), (None, store)):
+    for path, st in ((sale_path(), None), (None, store)):
         if path is not None and not path.exists():
             continue
-        s_ = st or Store(path)
+        s_ = st or open_sale()
         try:
             row = s_.conn.execute("SELECT data FROM listings WHERE key=?", (key,)).fetchone()
         finally:
@@ -2940,9 +2964,9 @@ def handle_callback(data: str, settings: dict, store, cfg: dict, message_id=None
         toast, _ = concierge.handle_offer_cb(d, cfg, store, message_id)
         return toast, None
     if d == "R:last":                          # «покажи подборку ещё раз»
-        if not SALE_DB_PATH.exists():
+        if not sale_path().exists():
             return "Подборок ещё не было", None
-        sst = Store(SALE_DB_PATH)
+        sst = open_sale()
         try:
             n = sale_sources.resend_last_pick(cfg, sst)
         finally:
@@ -2954,9 +2978,9 @@ def handle_callback(data: str, settings: dict, store, cfg: dict, message_id=None
         return msg_, None
     if d.startswith(("L:sim:", "L:like:")):    # похожие / искать такие же
         key = d.split(":", 2)[2]
-        if not SALE_DB_PATH.exists():
+        if not sale_path().exists():
             return "Объявление не найдено", None
-        sst = Store(SALE_DB_PATH)
+        sst = open_sale()
         try:
             rent = not key.startswith("sale:")
             src = store if rent else sst
@@ -2985,8 +3009,8 @@ def handle_callback(data: str, settings: dict, store, cfg: dict, message_id=None
     if d.startswith("L:"):                     # объявление с сайта: в шортлист / мимо
         kind, key = d[2:3], d[4:].split("|")[0]
         row = None
-        if SALE_DB_PATH.exists():
-            sst = Store(SALE_DB_PATH)
+        if sale_path().exists():
+            sst = open_sale()
             try:
                 row = sst.conn.execute("SELECT data FROM listings WHERE key LIKE ?",
                                        (key.replace("%", "") + "%",)).fetchone()
@@ -2997,7 +3021,7 @@ def handle_callback(data: str, settings: dict, store, cfg: dict, message_id=None
         if not row:
             return "Объявление не найдено", None
         if kind == "n":                        # «мимо»: из подборки убрать, отметить — пригодится для оценки
-            sst = Store(SALE_DB_PATH)
+            sst = open_sale()
             try:
                 sst.set_kv("sale_pick", [x for x in (sst.get_kv("sale_pick") or []) if x["key"] != key])
                 gone = (sst.get_kv("sale_dismissed") or [])[-500:]
@@ -3009,9 +3033,9 @@ def handle_callback(data: str, settings: dict, store, cfg: dict, message_id=None
         oid, new = concierge.add_site_offer(cfg, store, json.loads(row[0] or "{}"))
         return ("👍 В шортлисте — там уточнение, просмотр, заметки" if new else "Уже в шортлисте"), None
     if d == "R:pick":
-        if not SALE_DB_PATH.exists():
+        if not sale_path().exists():
             return "Подборка пуста", None
-        sst = Store(SALE_DB_PATH)
+        sst = open_sale()
         try:
             n = sale_sources.send_pick(cfg, sst, reason="Подборка")
         finally:
@@ -3446,7 +3470,7 @@ def send_offer_analysis(cfg, store, oid, sale_store=None) -> bool:
     if not o or not o.get("price_usd") or o["price_usd"] < 5000:
         return False
     own = sale_store is None
-    st = sale_store or Store(SALE_DB_PATH)
+    st = sale_store or open_sale()
     try:
         l = {"key": f"offer:{oid}", "price_usd": o["price_usd"], "area": o.get("area"),
              "rooms": o.get("rooms"), "district": o.get("district"), "text": o.get("text") or "",
@@ -3503,18 +3527,39 @@ def fetch_updates(cfg, store, long_poll=0):
 
 
 def process_commands(cfg: dict, store, long_poll: int = 0) -> dict:
-    """Читает новые сообщения/нажатия, применяет их, отвечает."""
+    """Читает новые сообщения/нажатия, применяет их, отвечает. Очередь воркера одна на всех: каждое
+    обновление — в контексте своего пользователя (tenants.route); без многих пользователей — всё владельцу."""
     settings = {**default_settings(), **(store.get_kv("settings") or {})}
     resp, offset_key = fetch_updates(cfg, store, long_poll)
     offset = store.get_kv(offset_key, 0)
     if not resp:
         return settings
+    ups = resp.get("result", [])
+    for upd in ups:
+        offset = max(offset, upd.get("update_id", 0))
+    groups = {}
+    for upd in ups:
+        groups.setdefault(tenants.route(upd), []).append(upd)
+    owner = str(cfg["telegram_chat_id"])
+    for chat, group in groups.items():
+        t_ = tenants.get(chat)
+        if t_ is None or t_.owner or chat == owner:
+            with tenants.ctx(tenants.REG["owner"] or tenants.Tenant(owner, cfg, owner=True, store=store)):
+                settings = _process_updates(cfg, store, group, settings)
+        else:
+            with tenants.ctx(t_):
+                _process_updates(t_.cfg, t_.store, group, t_.settings())
+    store.set_kv(offset_key, offset)
+    return settings
+
+
+def _process_updates(cfg: dict, store, ups: list, settings: dict) -> dict:
+    """Обновления одного пользователя (cfg — с его чатом, store — его база)."""
     changed = False
     snap = False                                  # шортлист/карточки поменялись — воркеру сразу
     concierge._BIZ_STORE["store"] = store          # подключён ли Telegram для бизнеса — для отправки маклерам
     sync_lang(store)                                # язык клиента — для карточек и подсказок
-    for upd in resp.get("result", []):
-        offset = max(offset, upd.get("update_id", 0))
+    for upd in ups:
         if any(upd.get(x) for x in ("business_connection", "business_message", "edited_business_message",
                                      "deleted_business_messages")):
             try:
@@ -3625,7 +3670,6 @@ def process_commands(cfg: dict, store, long_poll: int = 0) -> dict:
         if reply or view:
             changed = True
             log.info("Команда: %s", text[:50])
-    store.set_kv(offset_key, offset)
     if changed:
         store.set_kv("settings", settings)
     if snap:
@@ -4361,7 +4405,8 @@ def remember_card(cfg, ids, ref, text):
     del CARD_LOG[:-50]
     if not ref or not ids or ids is True or not cfg.get("worker_url"):
         return
-    worker_post(cfg, "/svc/cards", {"ids": list(ids), "ref": ref, "line": card_line(text)}, timeout=10)
+    worker_post(cfg, "/svc/cards", {"ids": list(ids), "ref": ref, "line": card_line(text),
+                                    "chat": str(cfg.get("telegram_chat_id") or "")}, timeout=10)
 
 
 def send_card(cfg, l: dict, text: str, kb: dict = None, silent: bool = False, ref: str = None):
@@ -4544,6 +4589,10 @@ def find_sale_dup(l: dict, store, cfg: dict):
     return key
 
 
+def _UYBOR_SALE_SHARED(ss, cfg):
+    return tenants.shared_fetch("uybor_sale", lambda a, b: fetch_uybor_sale(a, b))(ss, cfg)
+
+
 def run_sale_search(cfg: dict, store, settings: dict, force: bool = False) -> int:
     """Один проход поиска квартиры для покупки по всем источникам.
     Сильные варианты (ниже рынка, снижена цена) — сразу, остальные — в подборку дня.
@@ -4552,7 +4601,7 @@ def run_sale_search(cfg: dict, store, settings: dict, force: bool = False) -> in
     listings = []
     if (ss.get("uybor") or {}).get("enabled", True):
         try:
-            listings = fetch_uybor_sale(ss, cfg)
+            listings = _UYBOR_SALE_SHARED(ss, cfg)
         except Exception as e:
             log.warning("[продажа] Uybor: %s", e)
     pump()
@@ -4560,9 +4609,10 @@ def run_sale_search(cfg: dict, store, settings: dict, force: bool = False) -> in
         listings += sale_sources.fetch_due(ss, cfg, store, force=force)
     except Exception as e:
         log.warning("[продажа] другие источники: %s", e)
-    # раз в сутки — срез рынка для анализа (сам ловит свои ошибки)
-    market.maybe_scan(store, cfg, sale_district_ids(ss))
-    push_price_map(cfg, store)
+    if not cfg.get("tenant"):                     # срез рынка и карта цен — общие, их ведёт проход владельца
+        # раз в сутки — срез рынка для анализа (сам ловит свои ошибки)
+        market.maybe_scan(store, cfg, sale_district_ids(ss))
+        push_price_map(cfg, store)
 
     # Условия поиска поменялись — всё, что раньше отсеяли, пересматриваем заново.
     # Уже присланное не трогаем, чтобы не было повторов.
@@ -4732,8 +4782,8 @@ def push_price_map(cfg, store) -> bool:
 
 def load_geo():
     try:
-        if SALE_DB_PATH.exists():
-            gs = Store(SALE_DB_PATH)
+        if sale_path().exists():
+            gs = open_sale()
             try:
                 market.ensure_tables(gs.conn)
                 geo.load(gs)
@@ -4819,7 +4869,7 @@ def sale_market_text(cfg: dict) -> str:
     ss = cfg.get("sale_search") or {}
     if not ss.get("enabled"):
         return "📊 Поиск квартиры для покупки выключен."
-    store = Store(SALE_DB_PATH)
+    store = open_sale()
     try:
         return market.summary_text(store, cfg, ss.get("districts") or [])
     finally:
@@ -4830,7 +4880,7 @@ def sale_status_text(cfg: dict) -> str:
     ss = cfg.get("sale_search") or {}
     if not ss.get("enabled"):
         return "🏷 Поиск квартиры для покупки выключен."
-    store = Store(SALE_DB_PATH)
+    store = open_sale()
     try:
         total = store.counts()[0]
         rows = store.conn.execute(
@@ -4854,6 +4904,112 @@ def sale_status_text(cfg: dict) -> str:
         lines.append(f'• <a href="{url}">{label}</a> — {escape_html(d.get("district") or "")}')
     lines.append("\n📊 Цены за м², аренда и сценарии по районам — спросите, покажу")
     return "\n".join(lines)
+
+
+def _rent_listings(cfg, store, settings, name, listings, first_run, market, harvest=True):
+    """Новые объявления аренды одного источника — одному пользователю: запомнить, отсеять, прислать."""
+    eff = effective_cfg(cfg, settings)
+    rent_on = rent_search_on(store)
+    fresh = 0
+    warm = not store.get_kv(f"src_warm:{name}")     # новый источник: текущее — запомнить молча
+    for l in listings:
+      pump()                                    # клиент пишет — отвечаем, не дожидаясь конца прохода
+      # одно битое объявление не должно ронять весь радар
+      try:
+        if store.known(l["key"]):
+            if not store.has_data(l["key"]):
+                store.backfill(l)       # дозаполняем гео и характеристики
+            continue
+        seller_cnt = store.bump_seller(l.get("seller_id", ""))
+
+        if first_run or warm:
+            store.save(l, notified=False)
+            continue
+
+        ads_cnt = count_seller_ads(l, store, cfg)
+        l["seller_ads"] = ads_cnt
+        if harvest:                         # маклеров собирает проход владельца, у остальных — копия каталога
+            harvest_broker(l, store, cfg, ads_cnt)
+
+        if not rent_on:                     # клиент покупает — аренду в чат не шлём
+            store.save(l, notified=False)
+            continue
+
+        if not passes_filters(l, eff) or not passes_user_filters(l, settings):
+            store.save(l, notified=False)
+            continue
+
+        reject = relevance_reject(l, cfg, settings, store)
+        if reject:
+            store.save(l, notified=False)
+            log.info("[%s] не по теме — %s: %s", name, reject, l["title"][:45])
+            continue
+
+        dup_of = store.find_dup(l, cfg)
+        if dup_of:
+            store.save(l, notified=False, dup_of=dup_of)
+            log.info("[%s] дубль (%s ← %s): %s",
+                     name, dup_of, l["key"], l["title"][:50])
+            if cfg["notify_duplicates"]:
+                send_telegram(cfg, f'🔁 Дубль в {escape_html(l["source"])}: '
+                                   f'<a href="{l["url"]}">{escape_html(l["title"][:60])}</a>')
+            continue
+
+        if settings.get("paused"):
+            store.save(l, notified=False)
+            continue
+
+        if settings.get("photos", True) and not l.get("photo_urls"):
+            store.save(l, notified=False)          # без фото не сравнить — не показываем
+            log.info("[%s] без фото — не показываю: %s", name, l["title"][:50])
+            continue
+        likely_makler = seller_cnt >= cfg["makler_user_threshold"]
+        try:
+            analyst.score_listing(l, store, cfg, market, settings)
+        except Exception as e:
+            log.warning("анализ %s не удался: %s", l.get("key"), e)
+        ok = send_listing(cfg, settings, l, likely_makler, silent=is_night())
+        store.save(l, notified=ok)
+        if ok:
+            fresh += 1
+            log.info("[%s] уведомление: %s", name, l["title"][:60])
+        time.sleep(1)
+      except Exception as e:
+        log.warning("[%s] объявление %s пропущено из-за ошибки: %s",
+                    name, l.get("key"), e)
+        try:
+            store.save(l, notified=False)   # чтобы не спотыкаться о него снова
+        except Exception:
+            pass
+
+    if warm and listings:
+        store.set_kv(f"src_warm:{name}", True)
+    if fresh:
+        log.info("[%s] новых: %d", name, fresh)
+    return fresh
+
+
+def tenant_sales(next_at: dict, now: float) -> int:
+    """Поиск квартиры для покупки — каждому пользователю (кроме владельца: его проход в run()) по его анкете.
+    Сайты скачиваются один раз на всех (tenants.shared_fetch), отсев и подборка — у каждого свои."""
+    n = 0
+    for t_ in tenants.others():
+        try:
+            with tenants.ctx(t_):
+                tcfg = effective_sale_cfg(t_.cfg, t_.store)
+                ss = tcfg.get("sale_search") or {}
+                if not ss.get("enabled") or t_.store.get_kv("fresh_start"):
+                    continue
+                force = bool(t_.store.get_kv("sale_force"))
+                if force or now >= next_at.get(t_.chat, 0):
+                    next_at[t_.chat] = now + (ss.get("uybor") or {}).get("interval_seconds", 60)
+                    if force:
+                        t_.store.set_kv("sale_force", False)
+                    n += run_sale_search(tcfg, t_.sale, t_.settings(), force=force)
+                sale_sources.maybe_daily_pick(t_.cfg, t_.sale)
+        except Exception as e:
+            log.warning("[продажа] пользователь %s: %s", t_.chat, e)
+    return n
 
 
 SOURCE_DOWN_HOURS = 6                              # источник с ошибками дольше — сообщить владельцу
@@ -4982,6 +5138,9 @@ def run():
     if first_run:
         log.info("Первый запуск: текущие объявления запоминаю без уведомлений")
     _PUMP["ctx"] = None if once else (cfg, store, sale_store)
+    if not once:
+        tenants.refresh(cfg, store, sale_store, force=True)       # много пользователей — список с воркера
+    next_sale_t = {}                                              # chat → когда следующий поиск по сайтам
 
     while not stop["flag"]:
         now = time.time()
@@ -4992,6 +5151,15 @@ def run():
         push_snapshot(cfg, store, settings)
         if not once:
             followup.run(cfg, store, sale_store)     # напоминания, просмотры, вечерняя сводка
+            tenants.refresh(cfg, store, sale_store)  # раз в минуту — кто сейчас пользователь
+            for t_ in tenants.others():              # то же — каждому пользователю
+                with tenants.ctx(t_):
+                    try:
+                        flush_pending_offer(t_.cfg, t_.store, t_.sale)
+                        push_snapshot(t_.cfg, t_.store, t_.settings())
+                        followup.run(t_.cfg, t_.store, t_.sale)
+                    except Exception as e:
+                        log.warning("пользователь %s: %s", t_.chat, e)
             try:
                 recheck_channels(cfg, store)         # раз в неделю — живы ли каналы
             except Exception as e:
@@ -5019,81 +5187,14 @@ def run():
                 continue
             note_source(store, name)
 
-            fresh = 0
-            warm = not store.get_kv(f"src_warm:{name}")     # новый источник: текущее — запомнить молча
-            for l in listings:
-              pump()                                    # клиент пишет — отвечаем, не дожидаясь конца прохода
-              # одно битое объявление не должно ронять весь радар
-              try:
-                if store.known(l["key"]):
-                    if not store.has_data(l["key"]):
-                        store.backfill(l)       # дозаполняем гео и характеристики
-                    continue
-                seller_cnt = store.bump_seller(l.get("seller_id", ""))
-
-                if first_run or warm:
-                    store.save(l, notified=False)
-                    continue
-
-                ads_cnt = count_seller_ads(l, store, cfg)
-                l["seller_ads"] = ads_cnt
-                harvest_broker(l, store, cfg, ads_cnt)
-
-                if not rent_on:                     # клиент покупает — аренду в чат не шлём
-                    store.save(l, notified=False)
-                    continue
-
-                if not passes_filters(l, eff) or not passes_user_filters(l, settings):
-                    store.save(l, notified=False)
-                    continue
-
-                reject = relevance_reject(l, cfg, settings, store)
-                if reject:
-                    store.save(l, notified=False)
-                    log.info("[%s] не по теме — %s: %s", name, reject, l["title"][:45])
-                    continue
-
-                dup_of = store.find_dup(l, cfg)
-                if dup_of:
-                    store.save(l, notified=False, dup_of=dup_of)
-                    log.info("[%s] дубль (%s ← %s): %s",
-                             name, dup_of, l["key"], l["title"][:50])
-                    if cfg["notify_duplicates"]:
-                        send_telegram(cfg, f'🔁 Дубль в {escape_html(l["source"])}: '
-                                           f'<a href="{l["url"]}">{escape_html(l["title"][:60])}</a>')
-                    continue
-
-                if settings.get("paused"):
-                    store.save(l, notified=False)
-                    continue
-
-                if settings.get("photos", True) and not l.get("photo_urls"):
-                    store.save(l, notified=False)          # без фото не сравнить — не показываем
-                    log.info("[%s] без фото — не показываю: %s", name, l["title"][:50])
-                    continue
-                likely_makler = seller_cnt >= cfg["makler_user_threshold"]
-                try:
-                    analyst.score_listing(l, store, cfg, market, settings)
-                except Exception as e:
-                    log.warning("анализ %s не удался: %s", l.get("key"), e)
-                ok = send_listing(cfg, settings, l, likely_makler, silent=is_night())
-                store.save(l, notified=ok)
-                if ok:
-                    fresh += 1
-                    log.info("[%s] уведомление: %s", name, l["title"][:60])
-                time.sleep(1)
-              except Exception as e:
-                log.warning("[%s] объявление %s пропущено из-за ошибки: %s",
-                            name, l.get("key"), e)
-                try:
-                    store.save(l, notified=False)   # чтобы не спотыкаться о него снова
-                except Exception:
-                    pass
-
-            if warm and listings:
-                store.set_kv(f"src_warm:{name}", True)
-            if fresh:
-                log.info("[%s] новых: %d", name, fresh)
+            _rent_listings(cfg, store, settings, name, listings, first_run, market)
+            for t_ in tenants.others():                # те же объявления — другим пользователям, каждому по-своему
+                with tenants.ctx(t_):
+                    try:
+                        _rent_listings(t_.cfg, t_.store, t_.settings(), name, [dict(x) for x in listings],
+                                       t_.store.counts()[0] == 0, analyst.market_stats(t_.store), harvest=False)
+                    except Exception as e:
+                        log.warning("[%s] пользователь %s: %s", name, t_.chat, e)
 
         if not once and now >= next_sale_brokers:   # маклеры по продаже — для запросов на покупку
             next_sale_brokers = now + (sale_cfg.get("broker_interval_seconds") or BROKER_HARVEST_EVERY)
@@ -5133,6 +5234,8 @@ def run():
                 sale_sources.maybe_daily_pick(cfg, sale_store)   # 19:30 — подборка дня
             except Exception as e:
                 log.warning("[продажа] подборка: %s", e)
+        if not once:
+            tenant_sales(next_sale_t, now)                       # поиск покупки — каждому пользователю
 
         if first_run:
             total, _ = store.counts()

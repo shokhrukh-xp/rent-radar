@@ -122,10 +122,23 @@ def fetch_realt24(ss, cfg, store):
 
 # ------------------------------------------------------------------- Joymee --
 
+_JM_DET = {}
+
+
 def _joymee_detail(rr, lid):
+    """Деталь объявления. Много пользователей — одна загрузка на всех за 5 минут (ссылки на фото живут 10)."""
+    import tenants
+    hit = _JM_DET.get(lid) if tenants.REG["multi"] else None
+    if hit and time.time() - hit[0] < 300:
+        return json.loads(hit[1])
     r = requests.get(f"{rr.JOYMEE_API}{lid}/", headers=rr.HEADERS, timeout=20)
     r.raise_for_status()
-    return r.json()
+    d = r.json()
+    if tenants.REG["multi"]:
+        if len(_JM_DET) > 500:
+            _JM_DET.clear()
+        _JM_DET[lid] = (time.time(), json.dumps(d))
+    return d
 
 
 def _joymee_listing(rr, lid, det):

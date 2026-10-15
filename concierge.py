@@ -406,6 +406,19 @@ def _fmt_budget(ans, uz=False):
     return (f"byudjet oyiga {pretty} gacha" if uz else f"бюджет до {pretty}/мес")
 
 
+def _b36(n) -> str:
+    try:
+        n = int(str(n))
+    except (TypeError, ValueError):
+        return ""
+    digits, out = "0123456789abcdefghijklmnopqrstuvwxyz", ""
+    while True:
+        n, r = divmod(n, 36)
+        out = digits[r] + out
+        if not n:
+            return out
+
+
 def compose_request(cfg, store, username=None, lang=None):
     """Запрос маклеру из ответов анкеты. Без lang — на двух языках в одном сообщении: маклеры в Ташкенте
     пишут кто по-русски, кто по-узбекски; первым — язык клиента (иностранцу — русский: английский маклеры
@@ -535,6 +548,9 @@ def compose_request(cfg, store, username=None, lang=None):
 
     who = ans.get("contact", "bot")
     bot_un = cfg.get("bot_username") or "rano_smart_bot"
+    # метка «маклер клиента N»: по ней воркер отличает маклера от нового пользователя и знает, чей это запрос
+    bot_link = f"https://t.me/{bot_un}?start=m{_b36(cfg.get('telegram_chat_id'))}" if cfg.get("telegram_chat_id") \
+        else f"https://t.me/{bot_un}"
     assistant = cfg.get("assistant_name", "Ra'no")
     # в латинском письме имя тоже латиницей, иначе выходит «Раноga»
     assistant_lat = {"Рано": "Rano", "Амина": "Amina"}.get(assistant, assistant)
@@ -552,11 +568,11 @@ def compose_request(cfg, store, username=None, lang=None):
         # Имя оставляем в именительном падеже — иначе выходит «помощнице Рано».
         if uz:
             parts.append(f"Variantlarni yordamchim {assistant_lat}ga yuboring: "
-                         f"https://t.me/{bot_un}\n"
+                         f"{bot_link}\n"
                          f"Havolani bosib yozing — u menga darhol yetkazadi.")
         else:
             parts.append(f"Варианты присылайте, пожалуйста, моей помощнице — "
-                         f"{assistant}: https://t.me/{bot_un}\n"
+                         f"{assistant}: {bot_link}\n"
                          f"Нажмите на ссылку и напишите ей, она сразу передаёт мне.")
     if who in ("me", "both") and username:
         parts.append(("Yoki to'g'ridan-to'g'ri menga: @" if uz
@@ -1406,11 +1422,11 @@ def locate_offer(store, oid):
 
 def _site_listing(key):
     rr = _rr()
-    if not rr.SALE_DB_PATH.exists():
+    if not rr.sale_path().exists():
         return None
     try:
         import sale_sources
-        st = rr.Store(rr.SALE_DB_PATH)
+        st = rr.open_sale()
         try:
             row = st.conn.execute("SELECT data FROM listings WHERE key=?", (key,)).fetchone()
         finally:
@@ -1430,10 +1446,10 @@ def offer_photos(cfg, o) -> list:
     rr = _rr()
     photos = list(o.get("photos") or [])
     key = (o.get("extra") or {}).get("site_key")
-    if key and rr.SALE_DB_PATH.exists():
+    if key and rr.sale_path().exists():
         try:
             import sale_sources
-            st = rr.Store(rr.SALE_DB_PATH)
+            st = rr.open_sale()
             try:
                 row = st.conn.execute("SELECT data FROM listings WHERE key=?", (key,)).fetchone()
             finally:

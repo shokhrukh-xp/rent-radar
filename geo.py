@@ -220,7 +220,7 @@ def load(store, rebuild=False):
         cols = {r[1] for r in conn.execute("PRAGMA table_info(market)")}
         if "lat" not in cols:
             return GAZ
-        gaz = None if rebuild else store.get_kv("geo_gazetteer")
+        gaz = None if rebuild else (_shared_kv(conn, "geo_gazetteer") or store.get_kv("geo_gazetteer"))
         if not gaz:
             gaz = build(conn)
             try:
@@ -238,9 +238,23 @@ def load(store, rebuild=False):
     return GAZ
 
 
-def _db_name(conn):
+def _shared_kv(conn, key):
+    """Значение из kv базы владельца (если она подключена как «shared») — справочник ориентиров общий."""
+    import json
     try:
-        return conn.execute("PRAGMA database_list").fetchone()[2]
+        if any(r[1] == "shared" for r in conn.execute("PRAGMA database_list")):
+            row = conn.execute("SELECT value FROM shared.kv WHERE key=?", (key,)).fetchone()
+            return json.loads(row[0]) if row else None
+    except Exception:
+        return None
+    return None
+
+
+def _db_name(conn):
+    """Откуда срез: у пользователя (tenants.py) — общая база владельца, подключённая как «shared»."""
+    try:
+        rows = conn.execute("PRAGMA database_list").fetchall()
+        return next((r[2] for r in rows if r[1] == "shared"), rows[0][2])
     except Exception:
         return None
 

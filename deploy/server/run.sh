@@ -10,7 +10,7 @@ git -C state config user.email "rano@sonar"
 while true; do
   git -C app pull -q --ff-only || echo "код не обновился — работаю на прежнем"
   (cd app && python rent_radar.py --minutes 10) || sleep 20
-  git -C state add radar.db sale.db 2>/dev/null
+  git -C state add radar.db sale.db users 2>/dev/null      # users/<chat>/ — базы пользователей (этап 2)
   git -C state commit -q --amend -m "state $(date -u +'%Y-%m-%d %H:%M') (сервер)" 2>/dev/null
   git -C state push -q --force origin HEAD:main || echo "бэкап не отправился — попробую через 10 минут"
 done

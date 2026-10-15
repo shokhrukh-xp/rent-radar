@@ -654,3 +654,54 @@ console.log("OK — языки: клиенту на английском/узб�
   assert.equal(await watchdog({ ...env, WAKE_GH: "" }, now), "skip");
 }
 console.log("OK — сторож сервера: молчит 25+ минут — сообщение владельцу, ожил — тоже");
+
+// ── много пользователей (этап 2): Start — клиент до лимита, дальше лист ожидания; маклер — по метке m<id>
+{
+  const W = await import("../src/index.js");
+  W.resetUsersCache();
+  const envM = { ...env, MULTI_USER: "on", USER_LIMIT: "2", WAKE_GH: "off" };
+  await env.DB.prepare("DELETE FROM kv WHERE k='last_upd'").run();     // номера апдейтов выше — не «повтор»
+  const before = sent.length;
+  assert.equal(await W.isClient(envM, "7001"), false);
+  await handleUpdate(envM, msg("/start", "7001"));
+  await handleUpdate(envM, msg("/start", "7002"));
+  assert.ok(await W.isClient(envM, "7001") && await W.isClient(envM, "7002"));
+  const adminNew = sent.slice(before).filter(x => String(x.chat_id) === OWNER && /Новый пользователь/.test(x.text || ""));
+  assert.equal(adminNew.length, 2);
+  assert.ok(sent.slice(before).some(x => String(x.chat_id) === "7001" && /Ra'no/.test(x.text || "")));   // приветствие
+  assert.equal(await handleUpdate(envM, msg("/start", "7003")), "waitlist");
+  assert.ok(/лист ожидания/.test(sent.filter(x => String(x.chat_id) === "7003").at(-1).text));
+  const n7003 = sent.filter(x => String(x.chat_id) === "7003").length;
+  assert.equal(await handleUpdate(envM, msg("ну что там?", "7003")), "waitlist");
+  assert.equal(sent.filter(x => String(x.chat_id) === "7003").length, n7003);             // не чаще раза в сутки
+  assert.ok(sent.some(x => String(x.chat_id) === OWNER && /В лист ожидания/.test(x.text || "")));
+  // маклер пришёл по ссылке из запроса клиента 7001 — его сообщения идут этому клиенту
+  qq = await (await svc(`/svc/updates?after=0`)).json();
+  const base = qq.result.length ? qq.result.at(-1).update_id : 0;
+  await handleUpdate(envM, msg("/start m" + (7001).toString(36), "8001"));
+  await handleUpdate(envM, msg("Есть 2 комн Мирабад 60 000$", "8001"));
+  const q2 = await (await worker.fetch(new Request(`https://w.example/svc/updates?after=${base}`, { headers: { "x-svc": "svc" } }), envM, { waitUntil() {} })).json();
+  const fromBroker = q2.result.filter(u => String(u.message?.chat?.id) === "8001");
+  assert.ok(fromBroker.length >= 1 && fromBroker.every(u => u.message._client === "7001"), JSON.stringify(fromBroker));
+  assert.ok(!(await W.isClient(envM, "8001")));
+  // клиенту-пользователю кнопок тоже не шлём
+  await W.tg(envM, "sendMessage", { chat_id: 7001, text: "x", reply_markup: { inline_keyboard: [[{ text: "a", callback_data: "b" }]] } });
+  assert.ok(!sent.at(-1).reply_markup);
+  // команды владельца
+  await handleUpdate(envM, msg("/users"));
+  assert.ok(/Пользователи<\/b>: 2\/2/.test(sent.at(-1).text) && /Лист ожидания/.test(sent.at(-1).text));
+  await handleUpdate(envM, msg("/limit 3"));
+  await handleUpdate(envM, msg("/approve 7003"));
+  assert.ok(await W.isClient(envM, "7003"));
+  assert.ok(sent.some(x => String(x.chat_id) === "7003" && /Место освободилось/.test(x.text || "")));
+  await handleUpdate(envM, msg("/remove 7002"));
+  assert.ok(!(await W.isClient(envM, "7002")));
+  assert.equal(await handleUpdate(envM, msg("привет", "7002")), "removed");
+  const us = await (await worker.fetch(new Request("https://w.example/svc/users", { headers: { "x-svc": "svc" } }), envM, { waitUntil() {} })).json();
+  assert.ok(us.multi && us.limit === 3 && us.users.filter(u => u.status === "active").length === 2);
+  // без MULTI_USER — как раньше: не владелец — маклер
+  W.resetUsersCache();
+  assert.equal(await W.isClient(env, "7001"), false);
+  await env.DB.prepare("DELETE FROM users").run(); W.resetUsersCache();
+}
+console.log("OK — много пользователей: Start — клиент до лимита, лист ожидания, маклер по метке, команды владельца");
