@@ -932,7 +932,7 @@ class Store:
             "floor", "floors_total", "furnished", "house_type", "commission",
             "seller_ads", "premium", "seller_kind", "listed_since", "new_building", "repair",
             "site", "seller_hint", "mortgage", "price_note", "score", "why", "alts", "repair_photo",
-            "geo", "text_place", "near_km", "geo_tried")
+            "geo", "text_place", "near_km", "geo_tried", "rt_detail")
 
     def pack(self, listing: dict) -> str:
         d = {k: listing.get(k) for k in self.KEEP}
@@ -3618,6 +3618,13 @@ def ensure_place(cfg, store, l: dict):
     названия в тексте → модель читает описание и находит адрес/ориентир → хотя бы район (круг «где-то тут»)."""
     if l.get("geo"):
         return l["geo"]
+    if (l.get("key") or "").startswith("sale:realting:") and l.get("lat") is None and not l.get("rt_detail") \
+            and not TESTING:
+        try:                                        # у Realting точка и полный текст — на странице объявления
+            import sale_sources
+            sale_sources.refresh_listing(l)
+        except Exception as e:
+            log.info("[место] %s: %s", l.get("key"), e)
     try:
         geo.ensure(store)
         if geo.locate(l):

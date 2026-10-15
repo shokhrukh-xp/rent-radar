@@ -433,14 +433,34 @@ def _uybor_by_id(rr, uid):
     return l, o.get("operationType") or "sale"
 
 
-def realting_photos(rr, pid) -> list:
-    """Галерея со страницы объявления Realting (в списке — только одно превью)."""
+def realting_detail(rr, pid) -> dict:
+    """Страница объявления Realting: галерея (в списке — одно превью), точка на карте и полное описание
+    (в списке оно обрезано «…»). Адрес из разметки не берём — там часто адрес агентства."""
     r = requests.get(f"https://realting.uz/property/{pid}", headers=rr.HEADERS, timeout=25)
     r.raise_for_status()
+    s = r.text
     hs = list(dict.fromkeys(re.findall(
         r'https://static\d?\.realting\.com/uploads/(?:bigSlider|bigMax|images|thumbs\d*)/([0-9a-f]{3}/[0-9a-f]+\.(?:webp|jpe?g|png))',
-        r.text)))
-    return [f"https://static2.realting.com/uploads/bigSlider/{h}" for h in hs[:6]]
+        s)))
+    out = {"photo_urls": [f"https://static2.realting.com/uploads/bigSlider/{h}" for h in hs[:6]]}
+    m = re.search(r'"latitude"\s*:\s*"?(4[01]\.\d{3,})"?\s*,\s*"longitude"\s*:\s*"?(6[89]\.\d{3,})', s)
+    if m:
+        out["lat"], out["lon"] = float(m.group(1)), float(m.group(2))
+    for blob in re.findall(r'<script type="application/ld\+json">(.*?)</script>', s, re.S):
+        try:
+            j = json.loads(blob)
+        except ValueError:
+            continue
+        d = j.get("description") if isinstance(j, dict) else None
+        if d and (j.get("floorSize") is not None or j.get("numberOfRooms") is not None):
+            t = re.sub(r"<[^>]+>", " ", d).replace("&nbsp;", " ")
+            out["text"] = re.sub(r"[ \t\r]+", " ", re.sub(r"\n\s*\n+", "\n", t)).strip()[:1500]
+            break
+    return out
+
+
+def realting_photos(rr, pid) -> list:
+    return realting_detail(rr, pid)["photo_urls"]
 
 
 def has_photos(l) -> bool:
@@ -462,8 +482,12 @@ def refresh_listing(l) -> bool:
             new = _joymee_listing(rr, lid, _joymee_detail(rr, lid))
         elif key.startswith("sale:uybor:") and not l.get("photo_urls"):
             new, _ = _uybor_by_id(rr, key.rsplit(":", 1)[-1])
-        elif key.startswith("sale:realting:") and len(l.get("photo_urls") or []) < 2:
-            new = {"photo_urls": realting_photos(rr, key.rsplit(":", 1)[-1])}
+        elif key.startswith("sale:realting:") and (len(l.get("photo_urls") or []) < 2 or
+                                                   (l.get("lat") is None and not l.get("rt_detail"))):
+            l["rt_detail"] = True                     # страницу читаем один раз: фото, точка, полный текст
+            new = realting_detail(rr, key.rsplit(":", 1)[-1])
+            if len(new.get("text") or "") <= len((l.get("text") or "").rstrip("…. ")):
+                new.pop("text", None)
         else:
             return False
     except (requests.RequestException, ValueError, KeyError) as e:
@@ -474,6 +498,11 @@ def refresh_listing(l) -> bool:
     for k in ("photo_urls", "text", "floor", "floors_total", "area", "phones", "lat", "lon", "district_raw"):
         if new.get(k):
             l[k] = new[k]
+    if not l.get("district") and new.get("text"):      # в полном тексте часто есть район
+        try:
+            l["district"] = rr.canon_district(l.get("title") or "", new["text"]) or None
+        except Exception:
+            pass
     if new.get("lat") and not (l.get("geo") or {}).get("src") == "сайт":
         l.pop("geo", None)                       # появились координаты сайта — место пересчитаем
         l.pop("geo_tried", None)
