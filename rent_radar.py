@@ -3094,6 +3094,12 @@ BROKER_QUIET_SECONDS = 40      # маклер замолчал — значит,
 
 def _offer_parts(msg):
     text = (msg.get("text") or msg.get("caption") or "").strip()
+    ve = msg.get("venue") or {}
+    loc = ve.get("location") or msg.get("location") or {}
+    if loc.get("latitude") is not None:              # маклер прислал точку на карте (или место)
+        place = " ".join(x for x in (ve.get("title"), ve.get("address")) if x)
+        text = "\n".join(x for x in (text, f"📍 Локация: {loc['latitude']:.6f}, {loc['longitude']:.6f}"
+                                      + (f" ({place})" if place else "")) if x)
     photos = []
     ph = msg.get("photo") or []
     if ph:                                  # берём самый крупный размер
@@ -3220,6 +3226,8 @@ def handle_broker_message(cfg, store, msg, key=None, quiet=False):
         return
     if quiet:
         k = key or f"biz:{chat_id}"
+        if not photos and concierge.handle_viewing_reply(cfg, store, k, text):   # ответ про время просмотра
+            return
         asked = (store.get_kv("biz_asked") or {}).get(k) or {}
         if asked.get("oid") and time.time() - asked.get("at", 0) < 72 * 3600:
             # ответ на наши уточнения: дописываем в тот же вариант и покажем обновлённую карточку
@@ -3237,6 +3245,9 @@ def handle_broker_message(cfg, store, msg, key=None, quiet=False):
 
     if msg.get("_welcomed"):                 # воркер уже познакомил маклера с запросом
         store.set_kv(f"welcomed:{chat_id}", time.time())
+        return
+    # ответ на «можно посмотреть …?» — клиенту (раньше приветствий: «Да, можно» — короткий ответ)
+    if not photos and not text.startswith("/") and concierge.handle_viewing_reply(cfg, store, chat_id, text):
         return
     # /start, «здравствуйте» — это не вариант: знакомим и показываем, что ищем
     if not photos and (text.startswith("/") or (len(text) < 25 and not re.search(r"\d", text))):
@@ -3338,6 +3349,7 @@ def flush_pending_offer(cfg, store, sale_store=None):
                 continue
             if ai:
                 concierge.enrich_offer(cfg, store, int(k), ai, fill_only=bool(due_meta.get(k, {}).get("update")))
+            concierge.locate_offer(store, int(k))         # точка, ссылка на карту, координаты — для карты на карточке
             if due_meta.get(k, {}).get("update"):        # маклер ответил на уточнения в чате клиента
                 send_telegram(cfg, f"💬 Маклер дослал по варианту #{k} — обновила карточку.")
             concierge.notify_offer(cfg, store, int(k))
@@ -3360,7 +3372,8 @@ def send_offer_analysis(cfg, store, oid, sale_store=None) -> bool:
         l = {"key": f"offer:{oid}", "price_usd": o["price_usd"], "area": o.get("area"),
              "rooms": o.get("rooms"), "district": o.get("district"), "text": o.get("text") or "",
              "title": "", "created_at": o.get("created_at"), "floor": o.get("floor"),
-             "repair": o.get("repair") or ""}
+             "repair": o.get("repair") or "",
+             "lat": (o.get("extra") or {}).get("lat"), "lon": (o.get("extra") or {}).get("lon")}
         if o.get("photos") and cfg.get("worker_url"):
             r = worker_post(cfg, "/svc/repair", {"file_ids": o["photos"][:4]}, timeout=90)
             if (r or {}).get("ok"):
@@ -3491,8 +3504,9 @@ def process_commands(cfg: dict, store, long_poll: int = 0) -> dict:
                     v["oid"] = concierge.add_site_offer(cfg, store, l_)[0]
         if msg.get("_view"):                 # воркер разобрал время просмотра и уже ответил
             v = msg["_view"]
-            concierge.set_viewing(cfg, store, int(v.get("oid") or 0), v.get("at"), v.get("label", ""),
-                                  v.get("notime"), msg.get("text") or "")
+            if concierge.set_viewing(cfg, store, int(v.get("oid") or 0), v.get("at"), v.get("label", ""),
+                                     v.get("notime"), msg.get("text") or ""):
+                concierge.arrange_viewing(cfg, store, int(v.get("oid") or 0))   # договориться с маклером
             changed = snap = True
             continue
         if msg.get("_note"):                 # заметка к варианту — воркер уже подтвердил

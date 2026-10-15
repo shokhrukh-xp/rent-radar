@@ -833,6 +833,11 @@ def enrich_offer(cfg, store, oid, ai, fill_only=False):
     for k in EXTRA_KEYS:
         if ai.get(k) and (not fill_only or not extra.get(k)):
             extra[k] = ai[k]
+    idx = {int(x) for x in re.findall(r"\d+", str(ai.get("map_photos") or ""))}
+    if idx and o.get("photos"):                     # скриншот карты — не фото квартиры: в галерею не берём
+        keep = [p for i, p in enumerate(o["photos"], 1) if i not in idx]
+        extra["map_files"] = [p for i, p in enumerate(o["photos"], 1) if i in idx][:2]
+        sets["photos"] = json.dumps(keep)
     sets["extra"] = json.dumps(extra, ensure_ascii=False)
     store.conn.execute("UPDATE broker_offers SET " + ", ".join(f"{k}=?" for k in sets)
                        + " WHERE oid=?", (*sets.values(), oid))
@@ -1166,11 +1171,14 @@ def biz_guide(cfg, store=None) -> str:
         "<b>Что вы получаете:</b>\n"
         "• Не нужно отвечать каждому маклеру и разбирать десятки сообщений — я читаю их ответы сама.\n"
         "• Фото, точный адрес, этаж, цену, документы, комиссию — уточняю у маклера сама, пока он на связи.\n"
-        "• Из каждого ответа делаю карточку: карта, фото, честный разбор цены — сравнивать варианты легко.\n"
+        "• Из каждого ответа делаю карточку: карта, фото, честный разбор цены — сравнивать варианты легко. "
+        "Маклер прислал локацию или ссылку на карту — отмечу точку на карте.\n"
+        "• Договорюсь о просмотре: скажите, когда вам удобно, — согласую время с маклером, передам ответ и напомню "
+        "за 2 часа.\n"
         "• Ничего не теряется и не нужно ничего пересылать: все варианты от всех маклеров — в одном месте.\n"
         "• Вам остаётся только решать: «нравится», «не то», «давай посмотрим».\n\n"
-        "<b>Что остаётся за вами:</b> первое сообщение маклеру (нажать «Отправить»), а договориться о просмотре, "
-        "торговаться или отказать я могу только после вашего «да».\n\n"
+        "<b>Что остаётся за вами:</b> первое сообщение маклеру (нажать «Отправить») и решения: когда смотреть, "
+        "торговаться ли, отказать ли — без вашего слова я этого не делаю.\n\n"
         "<b>Как подключить</b> — один раз, около минуты:\n"
         "<b>1.</b> Откройте <b>Настройки</b> → <b>Telegram для бизнеса</b> (Telegram Business).\n"
         "<b>2.</b> Нажмите <b>Чат-боты</b> (ChatBots).\n"
@@ -1398,7 +1406,25 @@ def offer_media(cfg, o) -> dict:
             return l
     where = ", ".join(x for x in (ex.get("landmark"), ex.get("address")) if x)
     return {"photo_urls": list(o.get("photos") or [])[:6], "district": o.get("district"),
+            "lat": ex.get("lat"), "lon": ex.get("lon"),           # маклер прислал точку или ссылку на карту
             "text": (f"Ориентир: {where}. " if where else "") + (o.get("text") or "")}
+
+
+def locate_offer(store, oid):
+    """Где квартира из варианта маклера: точка Telegram, ссылка Яндекс/Google/2ГИС/Apple (короткую раскрываем),
+    координаты в тексте. Нашли — в extra (lat, lon); дальше карта на карточке и сравнение с соседями."""
+    o = get_offer(store, oid)
+    if not o:
+        return None
+    try:
+        import geo
+        c = geo.coords_from_text(o.get("text") or "")
+    except Exception as e:
+        _rr().log.info("[место] вариант #%s: %s", oid, e)
+        return None
+    if c:
+        _set_extra(store, oid, lat=round(c[0], 6), lon=round(c[1], 6), loc_src=c[2])
+    return c
 
 
 def _site_listing(key):
@@ -1507,6 +1533,68 @@ def set_viewing(cfg, store, oid, at, label="", notime=False, text=""):
     o = get_offer(store, oid)
     if o and o["status"] not in ("shortlist", "asked"):
         set_offer_status(store, oid, "shortlist")
+    return True
+
+
+VIEW_OK_RE = re.compile(r"\b(да|давайте|хорошо|можно|ок|okay|ok|договорились|жду|подходит|удобно|приходите|"
+                        r"mayli|bo['ʻ’]?ladi|kelishdik|xo['ʻ’]?p|kuting|keling)\b", re.I)
+
+
+def arrange_viewing(cfg, store, oid) -> str:
+    """Клиент сказал, когда удобно смотреть, — Ra'no сама договаривается с маклером. Ответ маклера
+    (handle_viewing_reply) — клиенту: подтвердил или предлагает другое время. Писать маклеру нельзя —
+    готовый текст клиенту."""
+    rr = _rr()
+    o = get_offer(store, oid)
+    v = (o or {}).get("extra", {}).get("viewing") or {}
+    if not o or not v.get("at"):
+        return ""
+    when = v.get("label") or _when(v["at"]).strftime("%d.%m в %H:%M")
+    if v.get("notime"):
+        when = (v.get("label") or "в этот день") + " — в какое время удобно"
+    tag = _offer_tag(o)
+    biz = str(o.get("broker_chat") or "").startswith("biz:")
+    if biz or is_site_offer(o) or not can_message_broker(o):
+        text = (f"Здравствуйте! По варианту{f' ({tag})' if tag else ''} — можно посмотреть квартиру {when}? "
+                "Если неудобно — подскажите, когда можно.")
+    else:
+        a = cfg.get("assistant_name", "Ra'no")
+        text = (f"Здравствуйте! Это {a}, ИИ-ассистент клиента. По варианту"
+                f"{f' ({tag})' if tag else ''}: клиент хотел бы посмотреть квартиру {when}. "
+                "Удобно? Если нет — подскажите своё время, я передам.")
+    if can_message_broker(o) and broker_send(cfg, store, o["broker_chat"], text) is not None:
+        wait = store.get_kv("viewing_wait") or {}
+        wait[str(o["broker_chat"])] = {"oid": oid, "at": time.time()}
+        store.set_kv("viewing_wait", wait)
+        _set_extra(store, oid, viewing={**v, "asked_broker": datetime.now(TZ).isoformat(), "confirmed": False})
+        return "asked"
+    ex = o.get("extra") or {}
+    who = ", ".join(rr.fmt_phone(p) for p in (ex.get("phones") or [])[:2])
+    rr.send_telegram(cfg, f"📅 Чтобы договориться о просмотре #{oid}, отправьте маклеру"
+                          + (f" ({rr.escape_html(who)})" if who else "") + " этот текст:\n\n"
+                          f"<code>{rr.escape_html(text)}</code>\n\nОтвет перешлите мне — запишу.")
+    return "manual"
+
+
+def handle_viewing_reply(cfg, store, broker_key, text) -> bool:
+    """Ответ маклера на «можно посмотреть …?» — клиенту; «да» — просмотр подтверждён."""
+    rr = _rr()
+    wait = store.get_kv("viewing_wait") or {}
+    w = wait.get(str(broker_key))
+    if not w or time.time() - w.get("at", 0) > 48 * 3600 or not (text or "").strip():
+        return False
+    wait.pop(str(broker_key), None)
+    store.set_kv("viewing_wait", wait)
+    oid = int(w["oid"])
+    o = get_offer(store, oid)
+    v = (o or {}).get("extra", {}).get("viewing") or {}
+    ok = bool(VIEW_OK_RE.search(text)) and not re.search(r"\bнет\b|не\s+(получится|могу|удобно)|yo['ʻ’]?q", text, re.I)
+    if ok and v:
+        _set_extra(store, oid, viewing={**v, "confirmed": True})
+    head = f"📅 Маклер ответил про просмотр варианта #{oid}:\n«{rr.escape_html(text.strip()[:500])}»\n\n"
+    tail = (f"✅ Договорились: {rr.escape_html(v.get('label') or '')}. Напомню за 2 часа." if ok else
+            "Если предлагает другое время — скажите, подходит ли или на когда перенести, я передам.")
+    rr.send_telegram(cfg, head + tail)
     return True
 
 
@@ -1658,8 +1746,9 @@ def biz_followup_text(o, deal="rent", uz=False):
     if not o.get("photos"):
         items.append("Yuborolasizmi rasmlarini (xonalar, oshxona, sanuzel)?" if uz else
                      "Пришлите, пожалуйста, фото (комнаты, кухня, санузел).")
-    if not (ex.get("address") or ex.get("landmark")):
-        items.append("Aniq manzil yoki mo'ljal?" if uz else "Точный адрес или ориентир?")
+    if not (ex.get("address") or ex.get("landmark") or ex.get("lat")):
+        items.append("Aniq manzil yoki mo'ljal (lokatsiya ham bo'ladi)?" if uz else
+                     "Точный адрес или ориентир? Можно просто прислать локацию.")
     if not o.get("floor"):
         items.append("Qavati va necha qavatli?" if uz else "Какой этаж и этажность?")
     if not o.get("area"):

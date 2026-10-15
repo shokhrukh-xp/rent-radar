@@ -323,7 +323,7 @@ export async function gemini(env, system, userText, opts = {}) {
 // ───────────────────────────── разбор варианта маклера ─────────────────────────────
 export const OFFER_KEYS = ["is_offer", "deal", "price", "currency", "price_period", "rooms", "area", "floor",
   "floors_total", "district", "address", "landmark", "repair", "building", "furniture", "commission",
-  "mortgage", "documents", "summary"];
+  "mortgage", "documents", "summary", "map_photos"];
 const OFFER_SCHEMA = {
   type: "object",
   properties: {
@@ -346,7 +346,10 @@ rooms: число комнат. Формат «2/5/9» = 2 комнаты, 5 э�
 area: общая площадь, м², число
 floor, floors_total: этаж и этажность, числа
 district: только если назван или однозначен — один из: ${DISTRICTS.join(", ")}
-address: улица/массив/ЖК/дом, как написано; landmark: ориентир (метро, школа, ТЦ)
+address: улица/массив/ЖК/дом, как написано; landmark: ориентир (метро, школа, ТЦ).
+Если одно из фото — скриншот карты или локации (Яндекс, Google, 2ГИС, Telegram): прочитай с него улицу, дом, ЖК
+или ориентир рядом с меткой и запиши в address/landmark
+map_photos: номера таких фото-карт (с 1, по порядку присланных), через запятую — это не фото квартиры
 repair: коротко, как в тексте (евроремонт, дизайнерский, требует ремонта, без ремонта)
 building: new (новостройка/ЖК) | secondary (вторичка); можно с материалом: «новостройка, монолит»
 furniture: yes | no | частично; commission: как написано («50%», «нет», «за счёт продавца»)
@@ -394,7 +397,7 @@ async function tgPhoto(env, fileId) {
 
 export async function parseOffer(env, { text = "", photos = [], deal = "" }) {
   const images = [];
-  for (const id of photos.slice(0, 2)) { try { const im = await tgPhoto(env, id); if (im) images.push(im); } catch (e) {} }
+  for (const id of photos.slice(0, 4)) { try { const im = await tgPhoto(env, id); if (im) images.push(im); } catch (e) {} }
   if (!String(text).trim() && !images.length) return { is_offer: false };
   const out = await gemini(env, OFFER_SYSTEM,
     (deal ? `Клиент ищет: ${deal === "sale" ? "покупку" : "аренду"}.\n` : "") + `Сообщение маклера:\n${String(text).slice(0, 3000) || "(только фото)"}`,
@@ -1104,7 +1107,8 @@ export async function cardAction(env, chat, raw, card, recent, iv, text) {
     if (!w) out = `Когда хотите смотреть ${what}? Напишите день и время, как удобно 🙂`;
     else {
       await queueMsg({ _view: { ...(L ? { key: ref } : { oid: +ref }), at: w.at, label: w.label, notime: w.notime } });
-      out = `📅 Записала просмотр ${what}: <b>${w.label}</b>. Утром в этот день напомню` + (w.notime ? "." : ", а за 2 часа — ещё раз.");
+      out = `📅 Записала просмотр ${what}: <b>${w.label}</b>. Согласую время с маклером и передам его ответ. ` +
+        `Утром в этот день напомню` + (w.notime ? "." : ", а за 2 часа — ещё раз.");
     }
   } else if (act === "note") {
     const t = String(raw.note_text || text).trim();
@@ -1525,10 +1529,9 @@ export async function handleUpdate(env, upd) {
     iv.mode = ""; await kvSet(env, ivKey(chat), iv);
     upd.message = { ...msg, _view: { oid, at: w.at, label: w.label, notime: w.notime } };
     await queueAndWake(env, upd);
-    await say(env, chat, `📅 Записала просмотр варианта #${oid}: <b>${w.label}</b>.\n`
+    await say(env, chat, `📅 Записала просмотр варианта #${oid}: <b>${w.label}</b>. Согласую время с маклером и передам его ответ.\n`
       + (w.notime ? "Утром в этот день напомню." : "Утром в этот день напомню, а за 2 часа — ещё раз, чтобы точно не забыли 😉")
-      + "\nПотом расскажете, как вам?",
-      { parse_mode: "HTML", reply_markup: { inline_keyboard: [[{ text: "📂 Карточка", callback_data: `s:o:${oid}` }, { text: "📋 Шортлист", callback_data: "s:show" }]] } });
+      + "\nПотом расскажете, как вам?", { parse_mode: "HTML" });
     return "viewing";
   }
   if (iv && iv.mode === "await_text") {          // «✏️ Изменить текст» — это для Python

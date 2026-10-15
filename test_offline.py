@@ -2829,3 +2829,55 @@ with mock.patch.object(rr, "tg_call", lambda c, m, p, **k: MN.append((m, p)) or 
 rr.concierge._BIZ_STORE["store"] = None
 mnd.unlink(missing_ok=True)
 print("OK — без подключения: выбор словами, инструкция по пересылке, ссылка на бота в запросе, уточнения готовым текстом")
+
+# ============ локация от маклера и просмотр: Ra'no договаривается сама ============
+lvd = Path("/tmp/test_loc_view.db"); lvd.unlink(missing_ok=True); lv = rr.Store(lvd)
+LV = []
+lcfg = dict(cfg, telegram_chat_id="700", worker_url="")
+cg.save_anketa(lv, {"i": 99, "ans": {"lang": "ru", "deal": "buy", "object": "flat", "city": "tashkent", "rooms": ["2"]}})
+with mock.patch.object(rr, "tg_call", lambda c, m, p, **k: LV.append((m, p)) or {"ok": True, "result": {"message_id": 9}}), \
+        mock.patch.object(rr, "send_offer_analysis", lambda *a, **k: None):
+    rr.concierge._BIZ_STORE["store"] = lv
+    lv.set_kv("biz_conn", {"id": "BC7", "user_id": 700, "enabled": True, "can_reply": True})
+    lv.set_kv("biz_chats", {"biz:8101": {"since": time.time()}})
+    bm = lambda **kw: {"business_message": {"business_connection_id": "BC7", "chat": {"id": 8101, "type": "private",
+                                                                                         "first_name": "Ойбек"},
+                                            "from": {"id": 8101}, **kw}}
+    # точка Telegram в ответе маклера → координаты варианта, на карточке — точка, а не район
+    rr.handle_business_update(lcfg, lv, bm(text="2 комн Яккасарай 60 000$ 3/9"))
+    rr.handle_business_update(lcfg, lv, bm(location={"latitude": 41.29, "longitude": 69.26}))
+    oid = lv.conn.execute("SELECT oid FROM broker_offers WHERE broker_chat='biz:8101'").fetchone()[0]
+    pend = lv.get_kv("pending_offers"); pend[str(oid)]["at"] -= 1000; lv.set_kv("pending_offers", pend)
+    rr.flush_pending_offer(lcfg, lv)
+    ex = cg.get_offer(lv, oid)["extra"]
+    assert (ex["lat"], ex["lon"], ex["loc_src"]) == (41.29, 69.26, "точка")
+    assert cg.offer_media(lcfg, cg.get_offer(lv, oid))["lat"] == 41.29
+    ask = [p for m, p in LV if p.get("business_connection_id")][-1]["text"]
+    assert "адрес" not in ask.lower()                                         # точка есть — адрес не спрашиваем
+    # скриншот карты среди фото — в галерею не идёт
+    cg.enrich_offer(lcfg, lv, oid, {"map_photos": "1"})
+    cg.merge_into_offer(lv, lcfg, oid, "", ["mapshot", "flat1"])
+    cg.enrich_offer(lcfg, lv, oid, {"map_photos": "1", "address": "ул. Бобура 5"})
+    o_ = cg.get_offer(lv, oid)
+    assert o_["photos"] == ["flat1"] and o_["extra"]["map_files"] == ["mapshot"] and o_["extra"]["address"] == "ул. Бобура 5"
+    # клиент сказал, когда удобно → Ra'no пишет маклеру; «Да, давайте» → подтверждено, клиенту — ответ
+    LV.clear()
+    when = (datetime.now(cg.TZ) + timedelta(days=2)).replace(hour=11, minute=0)
+    assert cg.set_viewing(lcfg, lv, oid, when.isoformat(), "в субботу в 11:00")
+    assert cg.arrange_viewing(lcfg, lv, oid) == "asked"
+    q = [p for m, p in LV if p.get("business_connection_id")][-1]
+    assert q["chat_id"] == 8101 and "в субботу в 11:00" in q["text"] and "Ra'no" not in q["text"]
+    LV.clear()
+    rr.handle_business_update(lcfg, lv, bm(text="Да, давайте"))
+    note = LV[-1][1]["text"]
+    assert "Договорились" in note and "Да, давайте" in note and cg.get_offer(lv, oid)["extra"]["viewing"]["confirmed"]
+    # пересланный вариант (маклеру не написать) — готовый текст клиенту
+    o2, _ = cg.save_offer(lv, lcfg, "owner", "Азиз", "2 комн Мирабад https://maps.google.com/?q=41.3001,69.2401", [])
+    assert cg.locate_offer(lv, o2)[:2] == (41.3001, 69.2401)
+    cg.set_viewing(lcfg, lv, o2, when.isoformat(), "в субботу в 11:00")
+    LV.clear()
+    assert cg.arrange_viewing(lcfg, lv, o2) == "manual" and "<code>" in LV[-1][1]["text"]
+    assert "Договорюсь о просмотре" in cg.biz_guide(lcfg) and "локацию" in cg.biz_guide(lcfg)
+rr.concierge._BIZ_STORE["store"] = None
+lvd.unlink(missing_ok=True)
+print("OK — локация от маклера (точка, ссылки карт, скриншот) и просмотр: Ra'no согласует время с маклером")

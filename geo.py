@@ -735,3 +735,85 @@ def resolve_text(text: str, district=None):
         return None
     v, g = best[1], best[2]
     return v[0], v[1], v[3], g
+
+
+# ================================================ ЛОКАЦИЯ ОТ МАКЛЕРА ======
+# Маклер присылает точку Telegram, ссылку Яндекс/Google/2ГИС/Apple/OSM (в т.ч. короткую) или координаты текстом.
+
+_NUM = r"(-?\d{1,3}\.\d{2,})"           # в ссылках карт бывает и 2 знака («ll=41.30,69.24»)
+_NUM_TXT = r"(-?\d{2}\.\d{4,})"         # в тексте — только точные (≥4 знака), чтобы не путать с ценой/этажом
+MAP_URL_RE = re.compile(r"https?://[^\s<>\"']*(?:yandex\.[a-z.]+/(?:maps|web-maps)|maps\.yandex|ya\.cc|"
+                        r"google\.[a-z.]+/maps|maps\.google|goo\.gl/maps|maps\.app\.goo\.gl|g\.co/kgs|"
+                        r"2gis\.[a-z.]+|go\.2gis\.com|maps\.apple\.com|openstreetmap\.org|osm\.org|"
+                        r"waze\.com)[^\s<>\"']*", re.I)
+SHORT_MAP_RE = re.compile(r"maps\.app\.goo\.gl|goo\.gl/maps|g\.co/kgs|go\.2gis\.com|ya\.cc|"
+                          r"yandex\.[a-z.]+/maps/-/|2gis\.[a-z.]+/[a-z]+/firm/|/maps/org/", re.I)
+_URL_CACHE = {}
+
+
+def _pair(a, b, lonlat=False):
+    try:
+        la, lo = (float(b), float(a)) if lonlat else (float(a), float(b))
+    except (TypeError, ValueError):
+        return None
+    return (la, lo) if in_city(la, lo) else None
+
+
+def coords_in_url(url: str):
+    """Координаты из адреса карты. Порядок: Яндекс и 2ГИС пишут «долгота,широта», остальные — «широта,долгота»."""
+    from urllib.parse import unquote
+    u = unquote(url or "")
+    for pat, lonlat in ((rf"[?&](?:pt|ll|whatshere%5Bpoint%5D|whatshere\[point\])={_NUM},{_NUM}", "yandex" in u.lower()),
+                        (rf"!3d{_NUM}!4d{_NUM}", False),                      # google: …!3d41.31!4d69.27
+                        (rf"@{_NUM},{_NUM}", False),                          # google: /@41.31,69.27,17z
+                        (rf"[?&](?:q|query|ll|sll|daddr|destination)={_NUM},\s*{_NUM}", False),
+                        (rf"[?&]m={_NUM},{_NUM}", True),                      # 2gis: ?m=69.27,41.31/16
+                        (rf"/geo/{_NUM},{_NUM}", True),                       # 2gis: /geo/69.27,41.31
+                        (rf"mlat={_NUM}&mlon={_NUM}", False),                 # osm
+                        (rf"#map=\d+/{_NUM}/{_NUM}", False)):
+        m = re.search(pat, u, re.I)
+        if m:
+            p = _pair(m.group(1), m.group(2), lonlat)
+            if p:
+                return p
+    return None
+
+
+def resolve_map_link(url: str, timeout=8):
+    """Короткая ссылка (maps.app.goo.gl, go.2gis.com, yandex …/maps/-/…) → полный адрес карты. С кэшем."""
+    if url in _URL_CACHE:
+        return _URL_CACHE[url]
+    import requests
+    out = url
+    try:
+        r = requests.get(url, headers={"User-Agent": TILE_UA}, timeout=timeout, allow_redirects=True)
+        out = r.url or url
+        if not coords_in_url(out):                     # Яндекс/Google иногда отдают точку только в странице
+            m = re.search(r"(?:ll|center)[\"'=:\[\s]+" + _NUM + r"[,\s\]]+" + _NUM, r.text[:200000])
+            if m:
+                out += f"&ll={m.group(1)},{m.group(2)}" if "yandex" in out else f"?q={m.group(1)},{m.group(2)}"
+    except Exception as e:
+        log.info("[место] ссылка на карту %s не открылась: %s", url[:60], e)
+    _URL_CACHE[url] = out
+    return out
+
+
+def coords_from_text(text: str, resolve=True):
+    """(lat, lon, откуда) из сообщения маклера или None: точка Telegram («📍 41.31,69.27»), ссылка на карту,
+    координаты числами."""
+    t = text or ""
+    m = re.search(rf"📍[^\d-]{{0,20}}{_NUM}\s*,\s*{_NUM}", t)
+    if m and _pair(m.group(1), m.group(2)):
+        return (*_pair(m.group(1), m.group(2)), "точка")
+    for url in MAP_URL_RE.findall(t):
+        p = coords_in_url(url)
+        if not p and resolve and SHORT_MAP_RE.search(url):
+            p = coords_in_url(resolve_map_link(url))
+        if p:
+            return (*p, "ссылка на карту")
+    m = re.search(rf"(?<![\d.]){_NUM_TXT}\s*[,;\s]\s*{_NUM_TXT}(?![\d.])", t)
+    if m:
+        p = _pair(m.group(1), m.group(2)) or _pair(m.group(1), m.group(2), lonlat=True)
+        if p:
+            return (*p, "координаты")
+    return None
