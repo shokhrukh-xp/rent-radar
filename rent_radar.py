@@ -931,7 +931,7 @@ class Store:
             "seller", "seller_id", "is_business", "photo_urls", "lat", "lon", "area",
             "floor", "floors_total", "furnished", "house_type", "commission",
             "seller_ads", "premium", "seller_kind", "listed_since", "new_building", "repair",
-            "site", "seller_hint", "mortgage", "price_note", "score", "why", "alts", "repair_photo",
+            "site", "seller_hint", "mortgage", "mortgage_src", "price_note", "score", "why", "alts", "repair_photo",
             "geo", "text_place", "near_km", "geo_tried", "rt_detail")
 
     def pack(self, listing: dict) -> str:
@@ -3767,14 +3767,16 @@ def format_sale_card(store, l: dict, cfg: dict, head: str = "", note: str = "") 
                 f'{kinds.get(a.get("kind"), "")})' for a in alts[:2]]
         top.append("Эту же продают ещё: " + ", ".join(refs) + (f" и ещё {len(alts) - 2}" if len(alts) > 2 else ""))
     if "dorm" in (x.get("flags") or []):
-        top.append("⚠️ Бывшее общежитие — проверьте кадастр; ипотеку без него не дают")
+        top.append("⚠️ Бывшее общежитие — проверьте кадастр")
 
     # экономика — три строки
     econ = []
     m = x.get("mortgage")
-    if m:
-        econ.append(f'<b>Ипотека</b> — взнос ${_money(m["down"])}, ≈ {market._mln(m["pay_uzs"])} млн сум/мес '
-                    f'на {m["years"]} лет')
+    if x:                                            # можно ли в ипотеку — прямо, как написал продавец
+        mline = escape_html(market.mortgage_line(x).removeprefix("Ипотека — "))
+        if m:
+            mline += f' · взнос ${_money(m["down"])}, ≈ {market._mln(m["pay_uzs"])} млн сум/мес на {m["years"]} лет'
+        econ.append(f'<b>Ипотека</b> — {mline}')
     bg = x.get("bargain")
     if bg:
         econ.append(f'<b>Торг</b> — просите ~${_money(bg["offer"])}, цена уже ниже рынка' if bg["calm"] else

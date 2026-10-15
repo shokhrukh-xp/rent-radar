@@ -1539,7 +1539,7 @@ assert abs(x["invest"][1]["base"] - (gain1 * 0.88 + x["rent"] * 11 * 0.88)) < 0.
 assert abs(x["invest"][3]["base"] - (27600 * (1.03 ** 3 - 1) + x["rent"] * 11 * 0.88 * 3)) < 0.01
 txt = mk.format_analysis(mst, dorm_l, ss_all)
 for part in ("📊 <b>Анализ</b>", "на 8% ниже похожих", "Цена через 1 / 3 / 5 лет", "Бывшее общежитие",
-             "висит 100 дн.", "🟠 <b>", mk.REPORT_URL, "средняя по району: $1 441/м²", "🏦 Ипотека: взнос $6 900 (25%)",
+             "висит 100 дн.", "🟠 <b>", mk.REPORT_URL, "средняя по району: $1 441/м²", "🏦 Ипотека — в объявлении не указано", "взнос $6 900 (25%)",
              "🤝 Торг: начните с", "Ремонт не понять", "<blockquote expandable>", "📈 Как вложение"):
     assert part in txt, (part, txt)
 # аренда по объявлениям нереально высокая → в расчёте осторожная средняя, цифра из объявлений рядом
@@ -1997,7 +1997,7 @@ la = dict(r24[1]); SS.normalize(la, cfg)
 assert rr.sale_reject(la, ssx, xs, cfg) == ("", False) and la["seller_kind"] == "agency"
 # оценка: собственник + ипотека выше; ниже рынка — «сильный»
 sc_j, why_j, strong_j, _ = SS.score(xs, lj, cfg, ssx)
-assert "собственник" in why_j and "ипотека" in why_j and not strong_j
+assert "собственник" in why_j and "можно в ипотеку" in why_j and not strong_j
 with mock.patch("market.analyze", lambda *a: {"gap": -0.12, "flags": []}):
     sc2, why2, strong2, _ = SS.score(xs, lj, cfg, ssx)
 assert strong2 and sc2 > sc_j and "-12% к рынку" in why2[0]
@@ -2227,6 +2227,18 @@ rs_.conn.execute("DELETE FROM market WHERE key LIKE 'sale:uybor:80%'"); rs_.conn
 xnb2 = mk.analyze(rs_, dict(nb_l, price_usd=40000), cfg_r)
 assert xnb2["verdict"][1] == "Сравнить не с чем" and "в основном с ремонтом" in xnb2["verdict"][2], xnb2["verdict"]
 rs_.conn.execute("DELETE FROM market WHERE key LIKE 'sale:uybor:70%'"); rs_.conn.commit()
+# можно ли в ипотеку — прямо: да / нет / не указано; «в ипотеке» — это залог, а не «можно»
+assert mk.mortgage_status({"text": "Срочно, в ипотеку не даём, только наличные"})[:3] == ("no", "описание", "в ипотеку не даём")
+assert mk.mortgage_status({"text": "Ipotekaga beriladi"})[0] == "yes"
+assert mk.mortgage_status({"text": "Ремонт хороший", "mortgage": True, "mortgage_src": "site"})[:2] == ("yes", "пометка сайта")
+assert mk.mortgage_status({"text": "Ипотеки нет", "mortgage": True, "mortgage_src": "site"})[0] == "no"      # слова важнее пометки
+held = mk.mortgage_status({"text": "Квартира в ипотеке, осталось 2 года"})
+assert held[0] is None and held[3] is True
+xno = mk.analyze(rs_, dict(base_l, price_usd=60000, text="Средний ремонт. В ипотеку не даём"), cfg_r)
+assert xno["mortgage_ok"] == "no" and "mortgage" not in xno and mk.mortgage_line(xno) == "Ипотека — нет: «В ипотеку не даём»"
+xun = mk.analyze(rs_, dict(base_l, price_usd=60000, text="Средний ремонт"), cfg_r)
+assert xun["mortgage_ok"] is None and xun.get("mortgage") and "не указано" in mk.mortgage_line(xun)
+assert "в залоге у банка" in mk.mortgage_line(mk.analyze(rs_, dict(base_l, price_usd=60000, text="Квартира в ипотеке"), cfg_r))
 # ипотека: 25% взнос, аннуитет 10 лет под 25% в сумах
 mm = mk.mortgage(48000, mk.DEFAULT_ASSUMPTIONS["mortgage"], 12000)
 r_, n_ = 0.25 / 12, 120

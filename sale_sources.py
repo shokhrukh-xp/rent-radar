@@ -156,7 +156,7 @@ def _joymee_listing(rr, lid, det):
         seller_hint={1: "owner", 2: "agency"}.get(det.get("advertiser_type"), ""),
         photo_urls=photos, repair=JOYMEE_REPAIR.get(dt.get("repair")),
         new_building=dt.get("apartment_type") == 2 or "новостро" in (det.get("title") or "").lower(),
-        mortgage=bool(det.get("mortgage_available")))
+        mortgage=True if det.get("mortgage_available") else None, mortgage_src="site")
 
 
 def fetch_joymee(ss, cfg, store):
@@ -285,7 +285,7 @@ def fetch_tg_sale(ss, cfg, store):
                                "floor": rr.sane(rr.as_int(fl.group(1)), 1, 60) if fl else None,
                                "floors_total": rr.sane(rr.as_int(fl.group(2)), 1, 60) if fl else None,
                                "seller_hint": "agency" if any(w in txt.lower() for w in rr.BROKER_POST_WORDS) else "",
-                               "mortgage": True if "ипотек" in txt.lower() or "ipotek" in txt.lower() else None}))
+                               "mortgage": None}))       # да/нет читает market.mortgage_status по тексту
     return out
 
 
@@ -526,7 +526,9 @@ def listing_from_facts(url, f):
         district=rr.canon_district(f.get("district") or "", f.get("address") or "", f.get("landmark") or ""),
         district_raw=f.get("address"), phones=rr.extract_phones(f.get("phone") or ""),
         seller_hint={"owner": "owner", "agency": "agency", "developer": "developer"}.get(f.get("seller_type") or "", ""),
-        repair=f.get("repair"), mortgage=True if re.search(r"да|есть|возможн|bor|yes", f.get("mortgage") or "", re.I) else None)
+        repair=f.get("repair"), mortgage_src="site",
+        mortgage=(False if re.search(r"\bнет\b|не\s|yo['ʻ’]?q|\bno\b", f.get("mortgage") or "", re.I) else
+                  True if re.search(r"да|есть|возможн|bor|yes", f.get("mortgage") or "", re.I) else None))
 
 
 def listing_from_url(cfg, url):
@@ -772,9 +774,14 @@ def score(store, l, cfg, ss):
         s += 4
     if l.get("area"):
         s += 3
-    if ss.get("mortgage") and (l.get("mortgage") or "ипотек" in (l.get("text") or "").lower()):
-        s += 6
-        why.append("ипотека")
+    if ss.get("mortgage"):                           # клиенту нужна ипотека: «нет» — сильно вниз
+        ms = x.get("mortgage_ok") if "mortgage_ok" in x else market.mortgage_status(l)[0]
+        if ms == "yes":
+            s += 6
+            why.append("можно в ипотеку")
+        elif ms == "no":
+            s -= 25
+            why.append("в ипотеку не дают")
     if "dorm" in (x.get("flags") or []):
         s -= 30
         why.append("бывшее общежитие")

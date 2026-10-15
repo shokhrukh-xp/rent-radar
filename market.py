@@ -16,6 +16,7 @@ Ra'no · рыночный анализ вариантов на покупку.
 """
 
 import logging
+import re
 import statistics
 import time
 from datetime import datetime, timezone
@@ -383,6 +384,67 @@ def _median(xs):
     return statistics.median(xs) if xs else None
 
 
+_AP = "['ʻ’`]?"
+MORTGAGE_NO_RE = re.compile(
+    r"без\s+ипотек|не\s+(?:под|для)\s+ипотек|(?:в\s+)?ипотек\w*\s*(?:[:\-–—]\s*)?(?:нет\b|❌|не\s+(?:да|подход|возмож|рассматр|офор|работ|прод|бер|прин))"
+    r"|ипотек\w*\s+(?:не\s+)?(?:исключ|невозмож)|только\s+(?:за\s+)?налич|наличный\s+расч[её]т\s+только"
+    rf"|ipoteka\w*\s*(?:yo{_AP}q|emas|berilmaydi|mumkin\s+emas|❌)|ipotekaga\s+(?:berilmaydi|to{_AP}g{_AP}ri\s+kelmaydi|chiqmaydi|o{_AP}tmaydi)"
+    r"|ипотекага\s+(?:берилмайди|тўғри\s+келмайди|ўтмайди)|ипотека\s+йўқ|faqat\s+naqd|фақат\s+нақд", re.I)
+MORTGAGE_YES_RE = re.compile(
+    r"ипотек\w*\s*(?:[:\-–—]\s*)?(?:есть|да\b|✅|✔|☑|возможн|доступн|подход|оформ)|(?:можно|возможн\w*|подход\w*|подойд\w*|доступн\w*|оформ\w*)\s+"
+    r"(?:в\s+|под\s+|на\s+)?ипотек|(?:под|в)\s+ипотеку|есть\s+ипотека|ипотека\s+от\s+(?:банк|застройщ)"
+    rf"|ipoteka\w*\s*(?:bor|mumkin|ham\s+bor|beriladi|✅)|ipotekaga\s+(?:beriladi|to{_AP}g{_AP}ri\s+keladi|mos|chiqadi|o{_AP}tadi)"
+    r"|ипотекага\s+(?:берилади|тўғри\s+келади|мос|ўтади)|ипотека\s+(?:бор|ҳам\s+бор)", re.I)
+MORTGAGE_HELD_RE = re.compile(  # квартира сама в залоге: продавец ещё платит банку
+    r"(?:квартира|она|сейчас)?\s*в\s+ипотеке|под\s+залогом|в\s+залоге\s+(?:у\s+)?банк|ипотеку\s+(?:ещё\s+)?плат|переоформ\w*\s+ипотек"
+    rf"|ipotekada|ипотекада|kredit\w*\s+(?:bor|davom|to{_AP}la)|кредити?\s+(?:бор|давом)", re.I)
+
+
+def _quote(text: str, m) -> str:
+    """Совпадение до конца слова: «в ипотеку не даём», а не «в ипотеку не да»."""
+    end = m.end()
+    while end < len(text) and text[end].isalnum():
+        end += 1
+    return text[m.start():end].strip(" .,:–—-")[:50]
+
+
+def mortgage_status(l: dict):
+    """Ипотека по объявлению: ("yes" | "no" | None, откуда, цитата, в залоге ли сама квартира).
+    Слова продавца «в ипотеку не даём» главнее пометки сайта."""
+    text = f"{l.get('title') or ''}. {l.get('text') or ''}"
+    held = bool(MORTGAGE_HELD_RE.search(text))
+    m = MORTGAGE_NO_RE.search(text)
+    if m:
+        return "no", "описание", _quote(text, m), held
+    if l.get("mortgage") is False and l.get("mortgage_src") == "site":
+        return "no", "пометка сайта", "", held
+    if l.get("mortgage") is True and l.get("mortgage_src") == "site":
+        return "yes", "пометка сайта", "", held
+    clean = MORTGAGE_HELD_RE.sub(" ", text)
+    m = MORTGAGE_YES_RE.search(clean)
+    if m:
+        return "yes", "описание", _quote(clean, m), held
+    if l.get("mortgage") is True:
+        return "yes", "пометка сайта", "", held
+    return None, "", "", held
+
+
+def mortgage_line(x: dict) -> str:
+    """«Ипотека — можно / нет / не указано» простыми словами, без суммы платежа."""
+    ok, src, q = x.get("mortgage_ok"), x.get("mortgage_src"), x.get("mortgage_quote")
+    if ok == "no":
+        s = "Ипотека — нет" + (f": «{q}»" if q else " (по пометке сайта)")
+    elif src == "общежитие":
+        s = "Ипотека — в объявлении не указано. Бывшее общежитие: без кадастра банки не дают"
+    elif ok == "yes":
+        s = "Ипотека — можно" + (f" («{q}»)" if q else " (по пометке сайта)")
+    else:
+        s = "Ипотека — в объявлении не указано, спросите продавца"
+    if x.get("mortgage_held"):
+        s += "; квартира сама в залоге у банка — узнайте, как снимут залог при сделке"
+    return s
+
+
 def is_dorm(l: dict) -> bool:
     text = f"{l.get('title', '')} {l.get('text', '')}".lower()
     return any(w in text for w in DORM_WORDS)
@@ -588,8 +650,12 @@ def analyze(store, l: dict, cfg: dict) -> dict:
     out["invest"] = {y: {k: total(y, k) for k in scen} for y in (1, 3, 5)}
     out["deposit_usd"] = {y: price * ((1 + a["usd_deposit"]) ** y - 1) for y in (1, 3, 5)}
     out["forgone_month"] = base_cost * a["usd_deposit"] / 12
+    ms, msrc, mquote, mheld = mortgage_status(l)
+    out["mortgage_ok"], out["mortgage_src"], out["mortgage_quote"], out["mortgage_held"] = ms, msrc, mquote, mheld
+    if is_dorm(l) and ms is None:
+        out["mortgage_src"] = "общежитие"          # дадут, только если есть кадастр
     m = a.get("mortgage")
-    if m:
+    if m and out["mortgage_ok"] != "no":
         rate = cfg.get("uzs_per_usd") or 11900
         out["mortgage"] = mortgage(price, m, rate)
         if m.get("soft"):
@@ -759,16 +825,15 @@ def format_analysis(store, l: dict, cfg: dict) -> str:
 
     # ипотека
     m = x.get("mortgage")
+    lines.append("🏦 " + mortgage_line(x))
     if m:
-        lines.append(f'🏦 Ипотека: взнос ${_money(m["down"])} ({m["down_share"] * 100:.0f}%), '
+        lines.append(f'   взнос ${_money(m["down"])} ({m["down_share"] * 100:.0f}%), '
                      f'≈ {_mln(m["pay_uzs"])} млн сум/мес (~${_money(m["pay_usd"])}) на {m["years"]} лет')
         if x.get("rent"):
             diff = m["pay_usd"] - x["rent"]
             lines.append(f'   снимать такую же — ~${_money(x["rent"])}/мес'
                          + (f': ипотека дороже на ~${_money(diff)}/мес, зато квартира ваша' if diff > 30 else
                             ": платёж как аренда — выгоднее брать"))
-        if "dorm" in x["flags"]:
-            lines.append("   ⚠️ Бывшее общежитие: без кадастра банки ипотеку не дают")
 
     # торг
     bg = x.get("bargain")
