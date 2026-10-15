@@ -37,6 +37,11 @@ import i18n_texts
 from i18n import t, dist
 import geo
 
+if __name__ == "__main__":
+    # Запуск скриптом: модуль называется __main__, а concierge/sale_sources/followup делают `import rent_radar` —
+    # без этого получили бы вторую копию модуля со своим состоянием (дедлайн прохода, pump, кэши).
+    sys.modules.setdefault("rent_radar", sys.modules[__name__])
+
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "config.json"
 # Базы с данными (объявления, маклеры, телефоны) в публичный репозиторий не
@@ -1991,6 +1996,9 @@ def harvest_realting(store, pages=3) -> int:
     n, page = 0, start
     for page in range(start, start + pages):
         r = requests.get(REALTING_AGENCIES, params={"page": page}, headers=HEADERS, timeout=25)
+        if r.status_code == 404:                       # страниц стало меньше — каталог кончился
+            page = 0
+            break
         r.raise_for_status()
         cards = parse_realting_agencies(r.text)
         if not cards:                                  # каталог кончился — в следующий раз с начала
@@ -2011,6 +2019,7 @@ def harvest_market_brokers(cfg, store) -> int:
     n = 0
     for deal in ("sale", "rent"):
         for name, fn in (("Realt24", harvest_realt24), ("Joymee", harvest_joymee)):
+            pump()
             try:
                 k = fn(store, deal)
                 n += k
@@ -3221,6 +3230,8 @@ def handle_business_update(cfg, store, upd) -> bool:
     if outgoing:
         if m.get("sender_business_bot"):            # это наше же сообщение маклеру
             return True
+        seen = store.get_kv("biz_out_seen") or {}    # для диагностики: исходящие клиента до нас доходят
+        store.set_kv("biz_out_seen", {"n": int(seen.get("n", 0)) + 1, "at": time.time()})
         text = m.get("text") or m.get("caption") or ""
         if k not in chats and BIZ_REQUEST_RE.search(text):
             ch = m.get("chat") or {}
@@ -3235,12 +3246,43 @@ def handle_business_update(cfg, store, upd) -> bool:
                 store.conn.commit()
             log.info("[бизнес] запрос ушёл маклеру %s", chats[k]["name"] or un or peer)
         return True
-    if k not in chats:                               # чат без нашего запроса — не читаем
-        return True
+    if k not in chats:                               # чат без нашего запроса — не читаем…
+        ch = m.get("chat") or {}
+        how = biz_chat_fallback(store, ch, m)        # …если только это не ответ маклеру, которому мы дали ссылку
+        if not how:
+            return True
+        chats[k] = {"since": time.time(), "username": ch.get("username"), "via": how,
+                    "name": " ".join(x for x in [ch.get("first_name"), ch.get("last_name")] if x)}
+        store.set_kv("biz_chats", chats)
+        log.info("[бизнес] чат с маклером %s узнала по ответу (%s)", chats[k]["name"] or peer, how)
     if upd.get("edited_business_message"):
         return True
     handle_broker_message(cfg, store, m, key=k, quiet=True)
     return True
+
+
+BIZ_FALLBACK_DAYS = 14
+
+
+def biz_chat_fallback(store, ch: dict, m: dict) -> str:
+    """Исходящий запрос клиента до нас мог не дойти (Telegram присылает их не всегда) — узнаём чат по ответу:
+    это маклер из выданной подборки (тот же юзернейм) или ответ цитатой на наш запрос. Иначе — чужой чат, не читаем."""
+    rep = m.get("reply_to_message") or {}
+    if BIZ_REQUEST_RE.search(rep.get("text") or rep.get("caption") or ""):
+        return "reply"
+    un = (ch.get("username") or "").lower().lstrip("@")
+    if not un:
+        return ""
+    since = (datetime.now(timezone.utc) - timedelta(days=BIZ_FALLBACK_DAYS)).isoformat()
+    row = store.conn.execute(
+        "SELECT bid FROM brokers WHERE lower(ltrim(COALESCE(tg,''),'@'))=? AND status IN ('offered', 'contacted') "
+        "AND COALESCE(last_contact, first_seen, '') >= ?", (un, since)).fetchone()
+    if not row:
+        return ""
+    store.conn.execute("UPDATE brokers SET status='contacted', last_contact=? WHERE bid=?",
+                       (datetime.now(timezone.utc).isoformat(), row[0]))
+    store.conn.commit()
+    return "username"
 
 
 def handle_broker_message(cfg, store, msg, key=None, quiet=False):
@@ -4500,6 +4542,7 @@ def run_sale_search(cfg: dict, store, settings: dict, force: bool = False) -> in
             listings = fetch_uybor_sale(ss, cfg)
         except Exception as e:
             log.warning("[продажа] Uybor: %s", e)
+    pump()
     try:
         listings += sale_sources.fetch_due(ss, cfg, store, force=force)
     except Exception as e:
@@ -4526,6 +4569,8 @@ def run_sale_search(cfg: dict, store, settings: dict, force: bool = False) -> in
         try:
             if store.known(l["key"]):
                 continue
+            if pump():                             # клиент поменял условия — этот разбор уже не нужен
+                return 0
             seen += 1
             sale_sources.normalize(l, cfg)
             why, retry = ("в цене только первый взнос, полной цены нет", False) \
@@ -4586,6 +4631,8 @@ def run_sale_search(cfg: dict, store, settings: dict, force: bool = False) -> in
     photo_budget = [ss.get("photo_checks_per_run", 25)]   # ремонт по фото — модель, не больше стольких за проход
     sent = queued = capped = 0                 # capped — в счёт дневного лимита «сразу»
     for l in unique[:ss.get("first_run_limit", 25) * 4]:
+        if pump():                                 # условия поменялись — остальное разберём по новым
+            break
         dup = find_sale_dup(l, store, cfg) or sale_sources.structural_dup(store, l)
         if dup:
             act = sale_sources.attach_dup(cfg, store, l, dup, ss)
@@ -4796,6 +4843,38 @@ def sale_status_text(cfg: dict) -> str:
     return "\n".join(lines)
 
 
+BROKER_HARVEST_EVERY = 3 * 3600
+PUMP_EVERY = 3                                   # с; как часто заглядывать в сообщения посреди долгой работы
+_PUMP = {"ctx": None, "last": 0.0, "busy": False, "n": 0}
+
+
+def pump(force: bool = False) -> bool:
+    """Ответить клиенту, не дожидаясь конца прохода: посреди долгой работы (сайты, фото, разборы)
+    раз в несколько секунд забираем сообщения и обрабатываем их. Без вложенности: если обработка
+    сама дошла до pump — просто выходим. True — клиент поменял условия/сбросил поиск: текущий
+    разбор пора прервать (необработанное придёт в следующий раз — оно ещё не сохранено)."""
+    ctx = _PUMP["ctx"]
+    if not ctx or _PUMP["busy"]:
+        return False
+    now = time.time()
+    if not force and now - _PUMP["last"] < PUMP_EVERY:
+        return False
+    _PUMP["last"], _PUMP["busy"] = now, True
+    cfg, store, sale_store = ctx
+    try:
+        before = (store.get_kv("sale_force"), store.get_kv("fresh_start"))
+        process_commands(cfg, store, long_poll=0)
+        flush_pending_offer(cfg, store, sale_store)
+        _PUMP["n"] += 1
+        after = (store.get_kv("sale_force"), store.get_kv("fresh_start"))
+        return after != before and any(after)
+    except Exception as e:
+        log.warning("не обработала сообщения посреди прохода: %s", e)
+        return False
+    finally:
+        _PUMP["busy"] = False
+
+
 def run():
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(levelname)s %(message)s",
@@ -4839,19 +4918,23 @@ def run():
     load_geo()                                 # справочник ориентиров — для «где квартира» и поиска у ориентира
     sale_cfg = effective_sale_cfg(cfg, store).get("sale_search") or {}   # покупка из чата включает поиск
     sale_store, next_sale = None, 0.0
-    next_sale_brokers = time.time() + 120     # сначала — поиск по сайтам, сбор маклеров потом
+    # сбор маклеров: справочники меняются медленно — раз в BROKER_HARVEST_EVERY, срок храним в базе
+    # (проход живёт 10 минут; раньше сбор шёл в каждом проходе и съедал ~35 с)
+    next_sale_brokers = max(time.time() + 120, float(store.get_kv("next_brokers_at") or 0))
     if sale_cfg.get("enabled") and (sale_cfg.get("uybor") or {}).get("enabled", True):
         sale_store = Store(SALE_DB_PATH)
         sale_store.prune()
         log.info("Покупка: %s", sale_criteria_text(sale_cfg).replace("\n", " "))
     if first_run:
         log.info("Первый запуск: текущие объявления запоминаю без уведомлений")
+    _PUMP["ctx"] = None if once else (cfg, store, sale_store)
 
     while not stop["flag"]:
         now = time.time()
         # long-poll: команды и нажатия кнопок ловим за ~секунду, а не раз в проход
         settings = process_commands(cfg, store, long_poll=0 if once else 20)
         flush_pending_offer(cfg, store, sale_store)
+        _PUMP["last"] = time.time()
         push_snapshot(cfg, store, settings)
         if not once:
             followup.run(cfg, store, sale_store)     # напоминания, просмотры, вечерняя сводка
@@ -4883,6 +4966,7 @@ def run():
             fresh = 0
             warm = not store.get_kv(f"src_warm:{name}")     # новый источник: текущее — запомнить молча
             for l in listings:
+              pump()                                    # клиент пишет — отвечаем, не дожидаясь конца прохода
               # одно битое объявление не должно ронять весь радар
               try:
                 if store.known(l["key"]):
@@ -4956,7 +5040,8 @@ def run():
                 log.info("[%s] новых: %d", name, fresh)
 
         if not once and now >= next_sale_brokers:   # маклеры по продаже — для запросов на покупку
-            next_sale_brokers = now + (sale_cfg.get("broker_interval_seconds") or 900)
+            next_sale_brokers = now + (sale_cfg.get("broker_interval_seconds") or BROKER_HARVEST_EVERY)
+            store.set_kv("next_brokers_at", next_sale_brokers)
             try:
                 backfill_sale_brokers(store, sale_store)
                 harvest_sale_brokers(cfg, store)

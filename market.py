@@ -310,6 +310,14 @@ def _fetch(params: dict) -> list:
     return (r.json() or {}).get("results") or []
 
 
+def _pump():
+    """Долгий срез — между страницами ответить клиенту (rent_radar.pump)."""
+    import sys
+    rr = sys.modules.get("rent_radar")
+    if rr is not None and hasattr(rr, "pump"):
+        rr.pump()
+
+
 def scan(store, cfg: dict, district_ids=None) -> dict:
     """Полный срез: продажа по всему Ташкенту + свежая аренда в районах поиска.
     Объявления, которых нет в полном срезе продажи, помечаются снятыми."""
@@ -332,6 +340,7 @@ def scan(store, cfg: dict, district_ids=None) -> dict:
         if len(res) < 100:
             complete = True
             break
+        _pump()
         time.sleep(0.4)
     if complete:
         conn.execute("UPDATE market SET removed_at=? WHERE op='sale' AND removed_at IS NULL "
@@ -349,6 +358,7 @@ def scan(store, cfg: dict, district_ids=None) -> dict:
                     stats["rent"] += 1
             if len(res) < 100:
                 break
+            _pump()
             time.sleep(0.4)
     conn.commit()
     store.set_kv("market_scan_at", started)

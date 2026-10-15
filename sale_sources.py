@@ -394,6 +394,7 @@ def fetch_due(ss, cfg, store, force=False):
     for name, (fn, every) in SOURCES.items():
         if name in off or (not force and now < nxt.get(name, 0)):
             continue
+        rr.pump()                                    # между сайтами — ответить клиенту
         try:
             got = fn(ss, cfg, store)
             out += got

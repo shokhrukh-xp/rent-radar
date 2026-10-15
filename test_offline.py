@@ -2773,6 +2773,18 @@ with mock.patch.object(rr, "tg_call", bz_tg):
                                          "is_enabled": True, "rights": {"can_reply": True}}})
     assert any("Вот маклеры" in pl.get("text", "") for m, pl in BZ) and any(
         "Маклеры под ваш запрос" in pl.get("text", "") for m, pl in BZ) and not bz.get_kv("brokers_pending")
+    # исходящий запрос до бота не дошёл — узнаём чат по ответу: маклер из подборки или ответ цитатой на запрос
+    assert bz.conn.execute("SELECT status FROM brokers WHERE tg='mk0'").fetchone()[0] == "offered"
+    def bm2(peer, un, text, **kw):
+        return {"business_message": {"business_connection_id": "BC1", "from": {"id": peer}, "text": text,
+                                     "chat": {"id": peer, "type": "private", "first_name": "М", "username": un}, **kw}}
+    rr.handle_business_update(bcfg, bz, bm2(9003, "mk0", "Есть 2 комн Мирабад 60 000$"))
+    rr.handle_business_update(bcfg, bz, bm2(9004, None, "Есть вариант 2 комн", reply_to_message={"text": req}))
+    rr.handle_business_update(bcfg, bz, bm2(9005, "friend", "Привет, как дела?"))
+    ch_ = bz.get_kv("biz_chats")
+    assert ch_["biz:9003"]["via"] == "username" and ch_["biz:9004"]["via"] == "reply" and "biz:9005" not in ch_
+    assert bz.conn.execute("SELECT status FROM brokers WHERE tg='mk0'").fetchone()[0] == "contacted"
+    assert (bz.get_kv("biz_out_seen") or {}).get("n", 0) >= 1
     # отключили — больше не пишем маклерам из аккаунта клиента
     rr.handle_business_update(bcfg, bz, {"business_connection": {"id": "BC1", "user": {"id": 500}, "user_chat_id": 500,
                                          "is_enabled": False, "rights": {"can_reply": True}}})
@@ -2940,3 +2952,35 @@ with mock.patch.object(I18, "ai", lambda c, text, lang=None, post=None: "ест�
     assert I18.quote_for_client(cfg, "variant bor, narxi yaxshi") == "variant bor, narxi yaxshi\n(перевод: есть вариант)"
 Path("/tmp/test_lang.db").unlink(missing_ok=True)
 print("OK — языки: карточки и инструкции на ru/uz/en, остальное переводит модель, маклеру — на его языке")
+
+# ============ скорость: сообщения клиента обрабатываем посреди долгого прохода ============
+pd_ = Path("/tmp/test_pump.db"); pd_.unlink(missing_ok=True)
+ps_ = rr.Store(pd_)
+CALLS = []
+def _pc(c, st, long_poll=0):
+    CALLS.append(long_poll)
+    if len(CALLS) == 2:
+        st.set_kv("sale_force", True)            # клиент поменял условия
+    return {}
+with mock.patch.object(rr, "process_commands", _pc), mock.patch.object(rr, "flush_pending_offer", lambda *a: None):
+    rr._PUMP.update(ctx=None, last=0.0, busy=False)
+    assert rr.pump() is False and not CALLS                       # вне прохода — ничего
+    rr._PUMP["ctx"] = ({}, ps_, None)
+    assert rr.pump() is False and CALLS == [0]                    # без long-poll
+    assert rr.pump() is False and CALLS == [0]                    # чаще раза в PUMP_EVERY — не дёргаем
+    rr._PUMP["last"] = 0
+    assert rr.pump() is True and len(CALLS) == 2                  # условия поменялись — разбор прервать
+    rr._PUMP.update(last=0, busy=True)
+    assert rr.pump() is False and len(CALLS) == 2                 # без вложенности
+    rr._PUMP.update(ctx=None, busy=False)
+import sale_sources as _ss_p
+assert _ss_p._rr() is rr                                          # один модуль на всех
+# Realting: страниц стало меньше (404) — каталог с начала, а не застревать навсегда
+class _R404:
+    status_code = 404; text = ""
+    def raise_for_status(self): raise RuntimeError("404")
+ps_.set_kv("realting_page", 26)
+with mock.patch.object(rr.requests, "get", lambda *a, **k: _R404()):
+    assert rr.harvest_realting(ps_) == 0 and ps_.get_kv("realting_page") == 1
+pd_.unlink(missing_ok=True)
+print("OK — скорость: сообщения клиента посреди прохода, без вложенности; Realting не застревает на 404")
