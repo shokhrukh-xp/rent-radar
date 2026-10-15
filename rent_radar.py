@@ -3729,6 +3729,8 @@ def format_sale_card(store, l: dict, cfg: dict, head: str = "", note: str = "") 
     by = {"фото": "по фото", "описание": "по описанию", "пометка сайта": "по пометке сайта"}.get(rsrc, "")
     if cls:
         r = f"Ремонт {short[cls]}" + (f" ({by})" if by else "")
+        if x.get("repair_as_box"):
+            r = "Ремонт коробка" + (f" ({by}: «без ремонта» в новостройке)" if by else " (новостройка без ремонта)")
         if cls == "good":
             r += " — можно заезжать"
         elif x.get("reno"):

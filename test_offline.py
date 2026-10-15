@@ -2207,6 +2207,26 @@ assert xb["verdict"][0] == "🟢" and "даже с ремонтом" in xb["verd
 xn = mk.analyze(rs_, dict(base_l, price_usd=72000, text="Без ремонта"), cfg_r)
 assert xn["repair"] == "none" and xn["reno"] == 4750 and xn["gap_all_in"] > -0.05 and xn["verdict"][0] != "🟢"
 assert "нужен ремонт ~$4 750" in xn["bargain"]["args"]
+# новостройка «без ремонта» = коробка: сравниваем с коробками, а не с евроремонтом рядом
+for i in range(8):
+    rs_.conn.execute("INSERT INTO market(key, op, district, rooms, area, price_usd, new_building, dorm, repair, "
+                     "first_seen, last_seen) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                     (f"sale:uybor:{700 + i}", "sale", "Яшнабад", 2, 42, 2000 * 42, 1, 0, "evro", "x", "x"))
+for i in range(6):
+    rs_.conn.execute("INSERT INTO market(key, op, district, rooms, area, price_usd, new_building, dorm, repair, "
+                     "first_seen, last_seen) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                     (f"sale:uybor:{800 + i}", "sale", "Яшнабад", 2, 42, 1400 * 42, 1, 0, "chernovaya", "x", "x"))
+rs_.conn.commit()
+nb_l = dict(base_l, key="sale:joymee:2", district="Яшнабад", area=42, price_usd=47000, new_building=True,
+            repair="без ремонта")
+xnb = mk.analyze(rs_, nb_l, cfg_r)
+assert xnb["repair"] == "box" and xnb.get("repair_as_box") and xnb["comp_same_repair"], xnb.get("comp")
+assert round(xnb["comp"]["median_m2"]) == 1400 and xnb["verdict"][0] == "🟢" and "Подозрительно" not in xnb["verdict"][1]
+# коробок рядом нет: не «подозрительно дёшево», а честно — сравнить не с чем
+rs_.conn.execute("DELETE FROM market WHERE key LIKE 'sale:uybor:80%'"); rs_.conn.commit()
+xnb2 = mk.analyze(rs_, dict(nb_l, price_usd=40000), cfg_r)
+assert xnb2["verdict"][1] == "Сравнить не с чем" and "в основном с ремонтом" in xnb2["verdict"][2], xnb2["verdict"]
+rs_.conn.execute("DELETE FROM market WHERE key LIKE 'sale:uybor:70%'"); rs_.conn.commit()
 # ипотека: 25% взнос, аннуитет 10 лет под 25% в сумах
 mm = mk.mortgage(48000, mk.DEFAULT_ASSUMPTIONS["mortgage"], 12000)
 r_, n_ = 0.25 / 12, 120

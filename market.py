@@ -502,6 +502,9 @@ def analyze(store, l: dict, cfg: dict) -> dict:
     except Exception as e:
         log.info("[место] %s: %s", l.get("key"), e)
     cls, rsrc, claimed = repair_info(l)
+    if cls == "none" and looks_new(l.get("new_building"), l.get("text")):
+        cls = "box"                                # в новостройке «без ремонта» — это коробка/черновая, а не
+        out["repair_as_box"] = True                # старый ремонт под замену: сравниваем с коробками
     out["repair"], out["repair_src"], out["repair_claimed"] = cls, rsrc, claimed
     signs = [t.strip() for t in str((l.get("repair_photo") or {}).get("signs") or "").split(",") if t.strip()]
     out["repair_signs"] = ", ".join(t for t in signs[:3] if len(t) <= 45) if rsrc == "фото" else ""
@@ -644,8 +647,18 @@ def analyze(store, l: dict, cfg: dict) -> dict:
     elif gap is not None and gap <= -0.10:
         verdict = ("🟢", "Хорошая цена", f"на {pct} дешевле похожих{near}{with_reno}")
     elif gap is None and out.get("comp_unreliable") is not None and out["comp_unreliable"] < 0:
-        verdict = ("⚪", "Подозрительно дёшево", "в разы дешевле похожих в районе — проверьте адрес, "
-                                                  "документы и состояние")
+        c = out["comp"]
+        cpct = f'{abs(out["comp_unreliable"]) * 100:.0f}%'
+        med = f'${_money(c["median_m2"])}/м², {c["n"]} объявл.'
+        if cls in ("none", "box", "average") and not out.get("comp_same_repair"):
+            # похожих с таким же ремонтом мало, а с ремонтом получше сравнивать нечестно
+            verdict = ("⚪", "Сравнить не с чем",
+                       f"рядом продают в основном с ремонтом ({med}), а {('коробок' if cls == 'box' else 'таких')} "
+                       "мало — оценивайте на месте")
+        else:
+            verdict = ("⚪", "Подозрительно дёшево",
+                       f"на {cpct} дешевле похожих{' с таким же ремонтом' if out.get('comp_same_repair') else ''} "
+                       f"({med}) — проверьте адрес, документы и состояние")
     elif gap is None:
         verdict = ("⚪", "Сравнить не с чем", "мало похожих объявлений — оценивайте на месте")
     else:
