@@ -1547,8 +1547,8 @@ def handle_command(text: str, settings: dict, store, cfg: dict):
         if not concierge.broker_mode(store):        # сначала предлагаем подключить Telegram — маклеров пришлю после
             store.set_kv("brokers_pending", True)
             store.set_kv("biz_offered_at", time.time())
-            send_telegram(cfg, "📇 Маклеров подберу — а сначала давайте подключим меня к вашему Telegram, "
-                               "так удобнее всего.\n\n" + concierge.biz_guide(cfg, store) +
+            send_telegram(cfg, "📇 Маклеров подберу. Но сначала предлагаю подключить меня к вашему Telegram — "
+                               "тогда общаться с маклерами буду я, а не вы.\n\n" + concierge.biz_guide(cfg, store) +
                                "\n\nКак подключите — сразу пришлю маклеров.")
             push_snapshot(cfg, store, settings, force=True)
             return "", None
