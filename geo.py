@@ -45,10 +45,12 @@ STOP = {
     "sad", "bolnitsa", "park", "mechet", "masjid", "ryad", "taraf", "tarafi", "yaqin", "yakin",
     "yanida", "oldida", "raparasida", "ryadom", "lyuboy", "vid", "vidam", "yuli",
     "arientir", "arientiri", "maljal", "mulijal", "muljal", "ar r", "shase", "radam", "masiv",
+    "avenue", "avenyu", "residence", "rezidens", "residens", "city", "siti", "tower", "taver", "plaza", "garden",
+    "house", "haus", "premium", "luxury", "komfort", "comfort", "elite", "elit", "bisnes", "biznes", "klass",
     "naberejnaya", "plashad", "ploshad", "kalledj", "litsey", "instutut", "institut", "universitet",
     "yangi", "nahiyasi", "naviy", "navaya", "stariy", "staraya", "raspalajen",
 }
-DISTRICT_WORDS = {"mirabad", "mirzaulugbek", "ulugbek", "yunusabad", "shayhantahur", "shayhantaur",
+DISTRICT_WORDS = {"mirabad", "mirzaulugbek", "ulugbek", "yunusabad", "yunsabad", "shayhantahur", "shayhantaur",
                   "chilanzar", "yakkasaray", "sergeli", "yangihayat", "almazar", "yashnabad",
                   "bektemir", "uchtepa", "mirzaulugbekskiy", "mirabadskiy", "yunusabadskiy",
                   "chilanzarskiy", "yakkasarayskiy", "sergeliyskiy", "almazarskiy", "yashnabadskiy",
@@ -61,6 +63,11 @@ METRO_AFTER_RE = re.compile(r"((?:[A-Za-zА-Яа-яЁёЎўҚқҒғҲҳʻ'’\-]
 METRO_RE = re.compile(r"(?:метро|м\.|ст\.?\s*м\.?|metro|бекат)\s*[«\"“]?([A-Za-zА-Яа-яЁёЎўҚқҒғҲҳʻ'’\- ]{3,30})", re.I)
 
 
+NUM_JUNK = {"arientir", "arientiri", "maljal", "muljal", "mulijal", "etaj", "etajni", "etaji", "kvm", "kv m",
+            "ham", "hanali", "hana", "kamnat", "kamnatnaya", "kamnati", "sotih", "kvadrat", "metr", "ue", "usd",
+            "mln", "ming", "yil", "gad", "uy", "dam", "dama", "padezd", "kvartira", "kvartiru", "kvartiri"}
+
+
 def skel(s: str) -> str:
     """Запись, в которой «Яшнабад», «Yashnobod» и «Яшнобод» совпадают:
     кириллица → латиница, о→а, x→h, q→k, без апострофов и двойных букв."""
@@ -69,7 +76,10 @@ def skel(s: str) -> str:
     s = "".join(_CYR.get(ch, ch) for ch in s)
     s = s.replace("x", "h").replace("q", "k").replace("w", "v").replace("o", "a")
     s = re.sub(r"[^a-z0-9]+", " ", s)
+    s = re.sub(r"(?<=[a-z])(?=\d)|(?<=\d)(?=[a-z])", " ", s)           # «Чиланзар6», «23кв» → «chilanzar 6», «23 kv»
     s = re.sub(r"\b(\d+) ?(?:y|iy|ya|e|go|chi|nchi|ji)\b", r"\1", s)      # «14-й», «4-chi» → 14, 4
+    s = re.sub(r"\b(?:kv|kvartal|kvartala|mavze|mavzesi|hudud|hududi|massiv)\b", "kvartal", s)   # 6 кв = 6 квартал = 6-mavze
+    s = re.sub(r"\b(?:bekat|bekati|st|stantsiya)\b", "bekat", s)
     s = re.sub(r"([a-z])\1+", r"\1", s)
     return " ".join(s.split())
 
@@ -89,11 +99,15 @@ def _grams_part(toks: list) -> set:
             out.add(t)
         if i + 1 < len(toks):
             a, b = t, toks[i + 1]
-            if a in DISTRICT_WORDS and b in STOP and not b.isdigit():
-                out.add(f"{a} {b}")              # «Мирабадский рынок», «Чиланзарский парк» — это места
+            if a in DISTRICT_WORDS and (b in STOP or b.isdigit()):
+                out.add(f"{a} {b}")              # «Мирабадский рынок», «Чиланзар 9», «Сергели 5» — это места
             elif (a not in DISTRICT_WORDS and b not in DISTRICT_WORDS
-                    and not (a in STOP and b in STOP) and (len(a) >= 2 or a.isalpha())):
-                if b.isdigit() or a.isdigit() or (a not in STOP and b not in STOP):
+                    and not (a in STOP and b in STOP) and (len(a) >= 2 or a.isalpha() or a.isdigit())):
+                if b.isdigit() or a.isdigit():
+                    w = a if b.isdigit() else b
+                    if len(w) >= 2 and w not in NUM_JUNK:     # «3/4/4 Ориентир», «55 м2», «2 этаж» — не места
+                        out.add(f"{a} {b}")
+                elif a not in STOP and b not in STOP:
                     out.add(f"{a} {b}")
     return out
 
@@ -300,6 +314,10 @@ def locate(l: dict) -> dict:
             mt = metro_in_text(text)
             if mt and ok(mt[1], mt[2]):
                 g = {"lat": mt[1], "lon": mt[2], "src": "метро", "label": f"м. {mt[0]}", "spread": 0.6}
+        if g is None:                               # «Ориентир:» не написан — знакомые названия в тексте (ЖК, массив)
+            rt = resolve_text(text, d)
+            if rt and ok(rt[0], rt[1]):
+                g = {"lat": rt[0], "lon": rt[1], "src": "ориентир", "label": "", "spread": max(0.5, rt[2])}
     if g:
         if not d:                                  # район не указан — по соседям на карте
             dd = district_at(g["lat"], g["lon"])
@@ -391,7 +409,7 @@ def too_far(l: dict, near: dict):
     if not near or near.get("lat") is None:
         return ""
     g = l.get("geo") or locate(l)
-    if g:
+    if g and g.get("src") != "район":
         dkm = km(near["lat"], near["lon"], g["lat"], g["lon"])
         l["near_km"] = round(dkm, 1)
         if dkm > near.get("km", 2) + (g.get("spread") or 0) * 0.5:
@@ -482,7 +500,7 @@ def static_map(lat, lon, approx_km=None, w=800, h=560):
         from PIL import Image, ImageDraw
     except ImportError:
         return None
-    z = 15                                           # 15 — видно улицы и знакомые места вокруг
+    z = 13 if (approx_km or 0) > 1.2 else 15         # 15 — улицы и места вокруг; 13 — весь район
     cx, cy = _tile_xy(lat, lon, z)
     px, py = cx * 256, cy * 256                      # центр в пикселях мира
     x0, y0 = px - w / 2, py - h / 2
@@ -499,7 +517,7 @@ def static_map(lat, lon, approx_km=None, w=800, h=560):
     mx, my = w / 2, h / 2
     if approx_km:
         m_per_px = 156543.03 * math.cos(math.radians(lat)) / 2 ** z
-        r = max(40, min(220, approx_km * 1000 / m_per_px))
+        r = max(40, min(240, approx_km * 1000 / m_per_px))
         d.ellipse((mx - r, my - r, mx + r, my + r), fill=(47, 111, 222, 60), outline=(47, 111, 222, 230), width=4)
         d.ellipse((mx - 7, my - 7, mx + 7, my + 7), fill=(47, 111, 222, 255), outline=(255, 255, 255, 255), width=3)
     else:                                            # метка-«капля»
@@ -696,3 +714,24 @@ def center_from_research(city: dict, facts: dict, resolve=None) -> dict:
                sources=facts.get("sources") or [], researched=True,
                checked=f"{len(d_in)} внутри, {len(d_out)} вне — по карте")
     return out
+
+
+def resolve_text(text: str, district=None):
+    """Место по всему тексту объявления, когда «Ориентир:» не написан: ищем в тексте названия из
+    справочника (ЖК, массивы, улицы, рынки). Берём самое «точечное» (малый разброс) и только пары слов
+    или длинные одиночные названия — чтобы случайное слово не дало точку."""
+    best = None
+    for g in grams(text or ""):
+        if " " not in g and len(g) < 6:
+            continue
+        for scope in ([district] if district else []) + ["*"]:
+            v = GAZ["gaz"].get(f"{scope}|{g}")
+            if v and v[3] <= 0.5 and v[2] >= 3:
+                cand = (v[3] - (0.1 if " " in g else 0) - (0.05 if scope != "*" else 0), v, g)
+                if best is None or cand[0] < best[0]:
+                    best = cand
+                break
+    if not best:
+        return None
+    v, g = best[1], best[2]
+    return v[0], v[1], v[3], g

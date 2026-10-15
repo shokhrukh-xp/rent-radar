@@ -419,7 +419,7 @@ def comparables(store, l: dict, min_n: int = 6, repair=None):
     kind = "бывшие общежития" if dorm else ("новостройки" if nb else "вторичка")
     rep = {"good": ", хороший ремонт", "average": ", средний ремонт", "box": ", коробка"}.get(repair, "")
     g = l.get("geo") or {}
-    if g and geo.GAZ["pts"]:
+    if g and g.get("src") != "район" and geo.GAZ["pts"]:
         # сначала соседи: в одном районе есть и дорогие, и дешёвые части
         where = f' от «{g["label"]}»' if g.get("label") else ""
         for radius, spread in ((1.0, 0.3), (1.0, 0.5), (1.5, 0.5), (2.0, 0.5)):
@@ -493,7 +493,7 @@ def analyze(store, l: dict, cfg: dict) -> dict:
         geo.ensure(store)
         if "geo" not in l:
             geo.locate(l)
-        if l.get("geo"):
+        if l.get("geo") and l["geo"].get("src") != "район":
             l["_nb"] = 1 if looks_new(l.get("new_building"), l.get("text")) else 0
             l["_dorm"] = 1 if is_dorm(l) else 0
             out["place"] = geo.locality(l)
@@ -662,6 +662,9 @@ def place_lines(x: dict, l: dict):
     g = l.get("geo") or {}
     if not g:
         return "", ""
+    if g.get("src") == "район":
+        return (f'Место — точный адрес не указан, где-то в районе {l.get("district") or ""}; спросите ориентир у продавца',
+                "")
     bits = []
     pl = x.get("place")
     if pl:

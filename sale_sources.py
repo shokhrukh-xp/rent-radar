@@ -471,9 +471,12 @@ def refresh_listing(l) -> bool:
         return False
     if not new:
         return False
-    for k in ("photo_urls", "text", "floor", "floors_total", "area", "phones"):
+    for k in ("photo_urls", "text", "floor", "floors_total", "area", "phones", "lat", "lon", "district_raw"):
         if new.get(k):
             l[k] = new[k]
+    if new.get("lat") and not (l.get("geo") or {}).get("src") == "сайт":
+        l.pop("geo", None)                       # появились координаты сайта — место пересчитаем
+        l.pop("geo_tried", None)
     return True
 
 

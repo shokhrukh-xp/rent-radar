@@ -932,7 +932,7 @@ class Store:
             "floor", "floors_total", "furnished", "house_type", "commission",
             "seller_ads", "premium", "seller_kind", "listed_since", "new_building", "repair",
             "site", "seller_hint", "mortgage", "price_note", "score", "why", "alts", "repair_photo",
-            "geo", "text_place", "near_km")
+            "geo", "text_place", "near_km", "geo_tried")
 
     def pack(self, listing: dict) -> str:
         d = {k: listing.get(k) for k in self.KEEP}
@@ -3613,8 +3613,55 @@ def _desc_clean(text: str) -> str:
     return " ".join(t.split())
 
 
+def ensure_place(cfg, store, l: dict):
+    """Где квартира — для карты первым фото. По порядку: координаты сайта → ориентир, метро и знакомые
+    названия в тексте → модель читает описание и находит адрес/ориентир → хотя бы район (круг «где-то тут»)."""
+    if l.get("geo"):
+        return l["geo"]
+    try:
+        geo.ensure(store)
+        if geo.locate(l):
+            return l["geo"]
+    except Exception as e:
+        log.info("[место] %s: %s", l.get("key"), e)
+    if not l.get("geo_tried") and cfg.get("worker_url") and (l.get("text") or l.get("title")) and not TESTING:
+        l["geo_tried"] = True                       # модель спрашиваем один раз на объявление
+        r = worker_post(cfg, "/svc/parse", {"text": f'{l.get("title") or ""}\n{l.get("text") or ""}'[:2500],
+                                            "photos": [], "deal": "sale"}, timeout=40)
+        facts = (r or {}).get("offer") or {}
+        for name, approx in ((facts.get("landmark"), 0.6), (facts.get("address"), 0.4)):
+            if not name:
+                continue
+            pt = geo.point_for(str(name))
+            if not pt:
+                try:
+                    pt_ = geo.geocode_in(str(name), geo.city_center("Ташкент"))
+                except Exception:
+                    pt_ = None
+                pt = {"lat": pt_[0], "lon": pt_[1]} if pt_ else None
+            if pt and geo.in_city(pt["lat"], pt["lon"]):
+                dd = geo.district_at(pt["lat"], pt["lon"], 1.2)
+                if not (l.get("district") and dd and dd != l["district"]):
+                    l["geo"] = {"lat": pt["lat"], "lon": pt["lon"], "src": "ориентир", "spread": approx,
+                                "label": geo.short_label(str(facts.get("landmark") or name))}
+                    return l["geo"]
+    d = l.get("district")                            # последнее — район: круг там, где его объявления
+    pts = [(r[0], r[1]) for r in geo.GAZ["pts"] if r[2] == d] if d else []
+    if len(pts) >= 10:
+        import statistics as _st
+        la, lo = _st.median(p[0] for p in pts), _st.median(p[1] for p in pts)
+        spread = sorted(geo.km(la, lo, *p) for p in pts)[int(len(pts) * 0.6)]
+        l["geo"] = {"lat": la, "lon": lo, "src": "район", "spread": round(min(3.0, max(1.0, spread)), 1), "label": ""}
+        return l["geo"]
+    return None
+
+
 def format_sale_card(store, l: dict, cfg: dict, head: str = "", note: str = "") -> str:
     """Карточка + разбор цены одним текстом для подписи к коллажу."""
+    try:
+        ensure_place(cfg, store, l)
+    except Exception as e:
+        log.info("[место] %s: %s", l.get("key"), e)
     try:
         x = market.analyze(store, l, cfg) if l.get("price_usd") else {}
     except Exception as e:
