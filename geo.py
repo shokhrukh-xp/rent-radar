@@ -84,11 +84,21 @@ def skel(s: str) -> str:
     return " ".join(s.split())
 
 
+AREA_RE = re.compile(r"\d+(?:[.,]\d+)?\s*(?:кв\.?\s*м\.?|м\s*[²2]|kv\.?\s*m\.?|m\s*[²2]|кв\.\s*метр\w*|sotix|сотих|сотки)", re.I)
+
+
 def grams(phrase: str) -> set:
-    """Слова и пары слов ориентира. Номер — только в паре («ц 1», «квартал 14», «школа 64»)."""
+    """Слова и пары слов ориентира. Номер — только в паре («ц 1», «квартал 14», «школа 64»).
+    Площадь («40 кв.м») — не место: иначе «кв» станет «кварталом». Названия, которые пишут то слитно, то
+    раздельно («Каракамыш» / «Қора қамиш», «Юнусабад» / «Юнус обод»), дают ещё и слитную форму."""
     out = set()
-    for part in re.split(r"[,;/|]", phrase or ""):
-        out |= _grams_part(skel(part).split())
+    for part in re.split(r"[,;/|]", AREA_RE.sub(" ", phrase or "")):
+        toks = skel(part).split()
+        out |= _grams_part(toks)
+        for a, b in zip(toks, toks[1:]):
+            if (a.isalpha() and b.isalpha() and len(a) >= 3 and len(b) >= 3 and len(a + b) >= 7
+                    and a not in STOP and b not in STOP and a not in DISTRICT_WORDS and b not in DISTRICT_WORDS):
+                out.add(a + b)
     return out
 
 
