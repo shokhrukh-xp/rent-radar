@@ -2571,7 +2571,7 @@ for i, (la, lo) in enumerate([(41.35, 69.20), (41.25, 69.33), (41.32, 69.35), (4
     ins(f"sale:uybor:k{i}", "Юнусабад", la, lo, 1700, lm="рядом Корзинка")
 gs.conn.commit()
 gaz = G.build(gs.conn)
-assert "*|mirabadskiy rinak" in gaz or "*|mirabadskiy" in gaz, sorted(gaz)[:20]
+assert "*|mirabad rinak" in gaz, sorted(gaz)[:20]                       # «Мирабадский рынок» без окончания
 assert not any("karzinka" in k for k in gaz)                                  # разброс по городу — не точка
 G.load(gs, rebuild=True)
 assert G.district_at(41.298, 69.274) == "Мирабад"
@@ -3226,6 +3226,10 @@ try:
     g5_ = _geo_t.locate(kk_)
     assert g5_ and abs(g5_["lat"] - 41.35826) < 1e-4 and g5_["src"] == "ориентир", g5_
     assert "40 kvartal" not in _geo_t.grams("2 хона 40 кв.м, 5 этаж") and "karakamish" in _geo_t.grams("Қора қамиш")
+    _geo_t.GAZ["gaz"]["Юнусабад|yunusabad 16"] = [41.37, 69.29, 5, 0.3]
+    g6_ = _geo_t.locate({"district": "Юнусабад", "text": "Продам 1в2 квартиру в юнусабаде 16 квартале, всё остаётся"})
+    assert g6_ and abs(g6_["lat"] - 41.37) < 1e-6, g6_                  # «16 квартале» = «Юнусабад-16»
+    assert _geo_t.skel("Чиланзарский район 3 квартал") == "chilanzar rayan 3 kvartal"
 finally:
     _geo_t.GAZ["gaz"], _geo_t.GAZ["pts"] = _gz5
 print("OK — место: узбекская кириллица и раздельное написание массива находят ориентир, площадь — не квартал")

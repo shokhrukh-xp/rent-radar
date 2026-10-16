@@ -4529,8 +4529,12 @@ def send_site_cards(cfg, sst, items, title="", more=0, more_cb="R:pick", limit=5
             (f"🔎 <b>{ttl}</b>" if title else "")
         if more and i == len(ready):                 # кнопок нет — подсказка словами
             head += "\n" + t("Есть ещё {n} — скажите, если хотите посмотреть", n=more)
+        g0 = l.get("geo")
         if send_card(cfg, l, format_sale_card(sst, l, cfg, head=head), ref="L:" + l["key"]):
             sent += 1
+        if l.get("geo") and l.get("geo") != g0 and sst.known(l["key"]):   # нашли место — запомнить, не искать снова
+            sst.conn.execute("UPDATE listings SET data=? WHERE key=?", (sst.pack(l), l["key"]))
+            sst.conn.commit()
         time.sleep(1)
     return sent
 

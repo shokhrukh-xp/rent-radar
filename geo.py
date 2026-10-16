@@ -59,7 +59,8 @@ DISTRICT_WORDS = {"mirabad", "mirzaulugbek", "ulugbek", "yunusabad", "yunsabad",
 LANDMARK_RE = re.compile(
     r"(?:ориентир[ыа]?|ор-р|мўлжал|мулжал|mo['ʻ`’]?ljal|orientir)\s*[:\-–—]?\s*([^\n.;!?]{3,90})", re.I)
 NEAR_RE = re.compile(r"(?:рядом с|возле|напротив|около|недалеко от|yonida|yaqinida)\s+([^\n.,;!?]{3,50})", re.I)
-METRO_AFTER_RE = re.compile(r"((?:[A-Za-zА-Яа-яЁёЎўҚқҒғҲҳʻ'’\-]+\s+){1,3}?)(?:метро|metro)\b", re.I)
+# «Buyuk ipak yo'li metrosidan», «Ойбек метроси ёнида» — по-узбекски у слова «метро» бывают окончания
+METRO_AFTER_RE = re.compile(r"((?:[A-Za-zА-Яа-яЁёЎўҚқҒғҲҳʻ'’\-]+\s+){1,3}?)(?:метро|metro)\w*\b", re.I)
 METRO_RE = re.compile(r"(?:метро|м\.|ст\.?\s*м\.?|metro|бекат)\s*[«\"“]?([A-Za-zА-Яа-яЁёЎўҚқҒғҲҳʻ'’\- ]{3,30})", re.I)
 
 
@@ -72,13 +73,17 @@ def skel(s: str) -> str:
     """Запись, в которой «Яшнабад», «Yashnobod» и «Яшнобод» совпадают:
     кириллица → латиница, о→а, x→h, q→k, без апострофов и двойных букв."""
     s = (s or "").lower().replace("ё", "е")
-    s = re.sub(r"[ʻ'’`]", "", s)
+    s = re.sub(r"[ʻ'’`‘]", "", s)
     s = "".join(_CYR.get(ch, ch) for ch in s)
     s = s.replace("x", "h").replace("q", "k").replace("w", "v").replace("o", "a")
     s = re.sub(r"[^a-z0-9]+", " ", s)
     s = re.sub(r"(?<=[a-z])(?=\d)|(?<=\d)(?=[a-z])", " ", s)           # «Чиланзар6», «23кв» → «chilanzar 6», «23 kv»
     s = re.sub(r"\b(\d+) ?(?:y|iy|ya|e|go|chi|nchi|ji)\b", r"\1", s)      # «14-й», «4-chi» → 14, 4
-    s = re.sub(r"\b(?:kv|kvartal|kvartala|mavze|mavzesi|hudud|hududi|massiv)\b", "kvartal", s)   # 6 кв = 6 квартал = 6-mavze
+    s = re.sub(r"\b(?:kv|kvartal\w*|mavze\w*|hudud\w*|massiv\w*)\b", "kvartal", s)   # 6 кв = 6 квартал = 6-mavze, «квартале»
+    # «Чиланзарский», «в юнусабаде», «Учтепинский», «Yunusobodda» — район без окончаний
+    s = re.sub(r"\b(chilanzar|yunusabad|yakkasaray|mirabad|sergeli|almazar|yashnabad|bektemir|shayhantahur|ulugbek)"
+               r"(?:skiy|skay|skam|skii|ski|sk|e|a|da|dagi|ning|ga|i)\b", r"\1", s)
+    s = re.sub(r"\buchtepin\w*\b", "uchtepa", s)
     s = re.sub(r"\b(?:bekat|bekati|st|stantsiya)\b", "bekat", s)
     s = re.sub(r"([a-z])\1+", r"\1", s)
     return " ".join(s.split())
@@ -196,6 +201,7 @@ def metro_in_text(text: str):
 # ------------------------------------------------------- справочник ----
 
 GAZ = {"gaz": {}, "pts": [], "at": 0, "db": None}     # в памяти процесса: справочник и точки среза
+GAZ_VERSION = 2      # 16.10.2026: слитные формы, районы без окончаний, «квартале» → квартал
 
 
 def build(conn) -> dict:
@@ -231,8 +237,11 @@ def load(store, rebuild=False):
         if "lat" not in cols:
             return GAZ
         gaz = None if rebuild else (_shared_kv(conn, "geo_gazetteer") or store.get_kv("geo_gazetteer"))
+        if gaz and gaz.get("_v") != GAZ_VERSION:      # поменялось, как пишем названия (skel/grams) — собрать заново
+            gaz = None
         if not gaz:
             gaz = build(conn)
+            gaz["_v"] = GAZ_VERSION
             try:
                 store.set_kv("geo_gazetteer", gaz)
             except Exception:                  # база только для чтения — справочник живёт в памяти
@@ -781,7 +790,14 @@ def resolve_text(text: str, district=None):
     справочника (ЖК, массивы, улицы, рынки). Берём самое «точечное» (малый разброс) и только пары слов
     или длинные одиночные названия — чтобы случайное слово не дало точку."""
     best = None
-    for g in grams(text or ""):
+    gs = grams(text or "")
+    if district:                                 # «16 квартал» в Юнусабаде = «Юнусабад-16» в справочнике
+        dw = skel(district).replace(" ", "")
+        for g in list(gs):
+            m = re.fullmatch(r"(\d{1,2}) kvartal|kvartal (\d{1,2})", g)
+            if m:
+                gs.add(f"{dw} {m.group(1) or m.group(2)}")
+    for g in gs:
         if " " not in g and len(g) < 6:
             continue
         for scope in ([district] if district else []) + ["*"]:
