@@ -141,6 +141,11 @@ def repair_info(l: dict):
     ph = l.get("repair_photo") or {}
     if ph.get("state") in REPAIR_RANK and (ph.get("confidence") or 0) >= 0.6:
         return ph["state"], "фото", claimed
+    if (l.get("offplan") or {}).get("year"):
+        return None, "строится", claimed            # дом не сдан: ремонт — только обещание в договоре
+    if ph.get("photos") and (ph.get("interior") is False or
+                             (ph.get("state") == "unknown" and (ph.get("confidence") or 0) >= 0.6)):
+        return None, "нет фото", claimed            # на фото планировки и документы — словам сайта не верим
     return claimed, src, claimed
 
 
@@ -905,6 +910,13 @@ def format_analysis(store, l: dict, cfg: dict) -> str:
                       t(", на {p}% дороже похожих с хорошим ремонтом", p=f"{abs(g) * 100:.0f}"))
                      if abs(g) >= 0.02 else t(", как похожие с хорошим ремонтом"))
         lines.append(line)
+    elif rsrc == "строится":
+        lines.append(t("🛠 Дом строится, сдача {y} — фото квартиры ещё нет", y=(l.get("offplan") or {}).get("year"))
+                     + (t("; ремонт обещан по договору: «{c}»", c=t(short[claimed])) if claimed else ""))
+    elif rsrc == "нет фото":
+        lines.append(t("🛠 Ремонт: в объявлении «{c}», но на фото только планировки и документы — попросите фото комнат",
+                       c=t(short[claimed])) if claimed else
+                     t("🛠 Фото комнат нет — только планировки и документы; попросите фото у продавца"))
     elif area:
         lines.append(t("🛠 Ремонт не понять ни по фото, ни по описанию — уточните. Если нужен капитальный, добавьте ~${v}",
                        v=_money((a.get("renovation_m2") or {}).get("none", 95) * area)))

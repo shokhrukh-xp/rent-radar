@@ -483,7 +483,15 @@ console.log("OK — воркер: интервью, нормализация, о
 geminiCalls.length = 0;
 geminiQueue.push({ state: "average", confidence: 1.7, signs: "старый линолеум, деревянные окна" });
 let rp = await repairFromPhotos(env, { urls: ["https://img.test/1.jpg", "https://img.test/404.jpg", "https://img.test/2.jpg"] });
-assert.deepEqual(rp, { state: "average", confidence: 1, signs: "старый линолеум, деревянные окна", photos: 2 });
+assert.equal(rp.state, "average"); assert.equal(rp.confidence, 1); assert.equal(rp.photos, 2);
+assert.equal(rp.signs, "старый линолеум, деревянные окна"); assert.ok(rp.interior);
+// только планировки и график платежей: ремонт не оценить, зато ЖК и полная цена с фото
+geminiQueue.push({ kinds: "plan, plan, document", interior: false, state: "good", confidence: 0.8, signs: "ламинат",
+  complex: "Bashkent", total_price: "750 820 000", down_payment: 324000000, price_currency: "UZS", installment: true });
+const rpp = await repairFromPhotos(env, { urls: ["https://img.test/1.jpg"] });
+assert.equal(rpp.state, "unknown"); assert.equal(rpp.confidence, 0); assert.equal(rpp.signs, ""); assert.equal(rpp.interior, false);
+assert.equal(rpp.complex, "Bashkent"); assert.equal(rpp.total_price, 750820000); assert.equal(rpp.down_payment, 324000000);
+assert.equal(rpp.price_currency, "UZS"); assert.ok(rpp.installment);
 assert.equal((geminiCalls[0].match(/inlineData/g) || []).length, 2);
 geminiQueue.push({ state: "average", confidence: 0.9, signs: "советские обои, ковры на стенах, старая плитка" });
 assert.equal((await repairFromPhotos(env, { urls: ["https://img.test/1.jpg"] })).state, "none");      // признаки капитального

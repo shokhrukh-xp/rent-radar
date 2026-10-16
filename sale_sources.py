@@ -365,18 +365,111 @@ def _usd_amounts(text):
     return out
 
 
+# ------------------------------------------------- район из текста, стройка, рассрочка --
+_TUMAN = r"(?:tuman\w*|туман\w*|район\w*|р-н\w*|районе)"
+APOS = "['ʻ’`‘]?"
+OFFPLAN_YEAR_RE = [
+    re.compile(r"(20[23]\d)\s*(?:-?\s*(?:yil|йил|год\w*|г\.))?[^.\n]{0,30}?(?:topshiril|топширил|сда[её]тся|сдач|foydalanishga|ввод)", re.I),
+    re.compile(r"(?:сдач[аиуе]|сда[её]тся|topshiril\w*|топширил\w*|ввод в эксплуатац\w*)[^.\n]{0,30}?(20[23]\d)", re.I),
+]
+RESALE_RE = re.compile(r"переуступ|переоформ|qayta\s+rasmiylashtir|investitsiya\s+shartnoma|инвестиционн\w*\s+договор|"
+                       r"договор\w*\s+(?:долевого|инвест)|ДДУ\b", re.I)
+INSTALL_RE = re.compile(r"рассрочк|bo" + APOS + r"lib\s+to" + APOS + r"la|oylik\s+to" + APOS + r"lov|ежемесячн\w*\s+плат|"
+                        r"график\w*\s+плат|qolgan\s+to" + APOS + r"lov|to" + APOS + r"lov\s+grafig", re.I)
+_MLN = r"(\d+(?:[.,]\d+)?)\s*(?:mln|млн|million|миллион)\w*"
+MONTHS_LEFT_RE = re.compile(r"(\d{1,3})\s*(?:oy|ой|мес\w*)[^.\n\d]{0,15}(?:qol\w*|қол\w*|остал\w*)|"
+                            r"(?:остал\w*|qolgan|qoldi)[^.\n\d]{0,10}(\d{1,3})\s*(?:oy|ой|мес)", re.I)
+MONTHLY_RE = re.compile(r"(?:oylik|ойлик|ежемесячн\w*|ежемес\.?|в месяц по|har\s+oy)[^.\n\d]{0,20}" + _MLN, re.I)
+FINAL_RE = re.compile(r"(?:oxirida|охирида|в конце|последн\w*\s+(?:плат|взнос)\w*|oxirgi\s+to" + APOS + r"lov)[^.\n\d]{0,20}" + _MLN,
+                      re.I)
+
+
+def text_district(text):
+    """Район, прямо названный в тексте («Uy Olmazor tumani», «в Алмазарском районе»); несколько разных — None."""
+    rr = _rr()
+    low = (text or "").lower()
+    hits = set()
+    for name, variants in rr.DISTRICTS.items():
+        for v in variants:
+            if re.search(re.escape(v) + r"\w{0,6}\s*" + _TUMAN, low):
+                hits.add(name)
+    return hits.pop() if len(hits) == 1 else None
+
+
+def offplan_info(text, now=None):
+    """Дом ещё строится / переуступка договора / рассрочка застройщика — по тексту объявления."""
+    now = now or datetime.now(timezone.utc)
+    years = [int(m.group(1)) for rx in OFFPLAN_YEAR_RE for m in rx.finditer(text or "")]
+    future = [y for y in years if y >= now.year]
+    out = {}
+    if future:
+        out["year"] = min(future)
+    if RESALE_RE.search(text or ""):
+        out["resale"] = True
+    if INSTALL_RE.search(text or ""):
+        out["installment"] = True
+    return out
+
+
+def _sp(v):
+    """12 345 — тысячи через пробел."""
+    return f"{v:,.0f}".replace(",", " ")
+
+
+def _f(x):
+    return float(str(x).replace(",", "."))
+
+
+def remaining_payments_uzs(text):
+    """Сколько ещё платить застройщику по тексту: месяцы × ежемесячный + последний платёж (в сумах); 0 — не понять."""
+    t = text or ""
+    m = MONTHS_LEFT_RE.search(t)
+    months = int(next(g for g in m.groups() if g)) if m else 0
+    mo = MONTHLY_RE.search(t)
+    monthly = _f(mo.group(1)) * 1e6 if mo else 0
+    fi = FINAL_RE.search(t)
+    final = _f(fi.group(1)) * 1e6 if fi else 0
+    total = (months * monthly if months and monthly else 0) + final
+    return total, months, monthly, final
+
+
 def normalize(l, cfg):
     """Общая доводка цены.
     - «700$» за 52 м² — это цена за м² → полная цена;
     - в цене первый взнос («П/В 23 300 у.е., цена 77 550») → берём полную цену из текста,
       а если её нет — помечаем, чтобы не принять взнос за стоимость квартиры."""
     rr = _rr()
+    text = f"{l.get('title') or ''} {l.get('text') or ''}"
+    td = text_district(text)
+    if td and l.get("district") and td != l["district"]:
+        # сайт ошибся районом («Яшнабад»), а в тексте прямо: «Uy Olmazor tumani» — верим тексту
+        l["district_site"], l["district"] = l["district"], td
+        if (l.get("geo") or {}).get("src") in (None, "район"):
+            l.pop("geo", None)
+    elif td and not l.get("district"):
+        l["district"] = td
+    op = offplan_info(text)
+    if op:
+        l["offplan"] = op
+        if op.get("year"):
+            l["new_building"] = True                 # строится — значит новостройка, сравниваем с ними
     p = rr.to_usd(l.get("price_value"), l.get("price_currency"), cfg)
+    if p and op and (op.get("resale") or op.get("installment")) and not l.get("price_listed_usd"):
+        rest, months, monthly, final = remaining_payments_uzs(text)
+        rest_usd = rest / cfg.get("uzs_per_usd", 11900) if rest else 0
+        if rest_usd >= max(2000, p * 0.15):
+            # переуступка: в цене — что уже выплачено; дальше ещё платежи застройщику
+            full = round(p + rest_usd, -2)
+            l["price_listed_usd"], l["price_value"], l["price_currency"] = p, full, "USD"
+            parts = ([f"{months} × {monthly / 1e6:g} млн"] if months and monthly else []) + \
+                ([f"{final / 1e6:g} млн в конце"] if final else [])
+            l["price_note"] = (f"${_sp(p)} — продавцу за договор, ещё ~{_sp(rest / 1e6)} млн сум застройщику"
+                               + (f" ({' и '.join(parts)})" if parts else ""))
+            return l
     if p and l.get("area") and 250 <= p <= 4000 and p * l["area"] >= 10000:
         l["price_value"], l["price_currency"] = round(p * l["area"]), "USD"
         l["price_note"] = f"цена указана за м² (${p:,.0f}) — пересчитала на площадь".replace(",", " ")
         return l
-    text = f"{l.get('title') or ''} {l.get('text') or ''}"
     if p and DOWN_RE.search(text):
         bigger = [v for v in _usd_amounts(text) if v > p * 1.3]
         if bigger:
@@ -754,6 +847,63 @@ def photo_repair(cfg, l) -> bool:
     rr.log.info("[продажа] ремонт по фото: %s (%.2f) %s — %s", r["repair"].get("state"),
                 r["repair"].get("confidence") or 0, r["repair"].get("signs", ""), l.get("title", "")[:40])
     return True
+
+
+def photo_facts(cfg, store, l) -> bool:
+    """Что разглядела модель на фото (график платежей, логотип ЖК на плане) — в объявление.
+    True — поменялись цена или место: отсев (бюджет, радиус) надо пройти заново."""
+    rr = _rr()
+    import geo
+    ph = l.get("repair_photo") or {}
+    changed = False
+    if ph.get("installment"):
+        l.setdefault("offplan", {})["installment"] = True
+    tot = ph.get("total_price") or 0
+    p = l.get("price_usd") or 0
+    if tot and p and not l.get("price_listed_usd"):
+        cur = ph.get("price_currency") or ("UZS" if tot >= 1e6 else "USD")
+        tot_usd = rr.to_usd(tot, cur, cfg) or 0
+        if tot_usd > p * 1.3 and (not l.get("area") or 200 <= tot_usd / l["area"] <= 8000):
+            l["price_listed_usd"], l["price_usd"] = p, round(tot_usd, -2)
+            l["price_value"], l["price_currency"] = l["price_usd"], "USD"
+            amt = (f"{tot / 1e6:.1f}".replace(".", ",") + " млн сум") if cur == "UZS" else f"${_sp(tot)}"
+            l["price_note"] = f"в объявлении ${_sp(p)} — не вся цена: по графику платежей на фото {amt}"
+            changed = True
+    cx = (ph.get("complex") or "").strip()
+    if cx:
+        l["complex"] = cx
+        g = l.get("geo") or {}
+        if g.get("src") in (None, "район"):
+            pt = None
+            for q in (cx, "ЖК " + cx):
+                try:
+                    pt = geo.point_for(q)
+                except Exception:
+                    pt = None
+                if pt and pt.get("src") in ("ориентир", "метро"):  # из справочника по объявлениям, не первый попавшийся OSM
+                    break
+                pt = None
+            if pt and geo.in_city(pt["lat"], pt["lon"]):
+                dd = geo.district_at(pt["lat"], pt["lon"], 1.2)
+                if not (l.get("district") and dd and dd != l["district"]):
+                    l["geo"] = {"lat": pt["lat"], "lon": pt["lon"], "src": "ориентир", "spread": 0.6,
+                                "label": "ЖК " + cx if not cx.lower().startswith(("жк", "jk")) else cx}
+                    changed = True
+    return changed
+
+
+def recheck(l, ss, store, cfg):
+    """После уточнений по фото: бюджет и радиус ещё раз. Причина отказа или ''."""
+    import geo
+    p = l.get("price_usd") or 0
+    if p and ss.get("max_price_usd") and p > ss["max_price_usd"]:
+        return f"дороже бюджета с учётом всех платежей (${p:,.0f})".replace(",", " ")
+    near = ss.get("near") or {}
+    if near.get("lat") is not None:
+        return geo.too_far(l, near)
+    if ss.get("districts") and l.get("district") not in ss["districts"]:
+        return f"район {l.get('district')}"
+    return ""
 
 
 def score(store, l, cfg, ss):

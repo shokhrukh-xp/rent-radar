@@ -660,23 +660,34 @@ export const REPAIR_STATES = ["good", "average", "none", "box", "unknown"];
 const REPAIR_SCHEMA = {
   type: "object",
   properties: {
-    signs: { type: "string", description: "сначала — что видно на фото, 3–8 признаков через запятую, по-русски" },
+    kinds: { type: "string", description: "что на каждом фото по порядку, через запятую: interior | plan | render | document | exterior | map | other" },
+    interior: { type: "boolean", description: "есть ли хоть одно настоящее фото комнат этой квартиры (не план, не рендер, не документ)" },
+    signs: { type: "string", description: "что видно на фото интерьера, 3–8 признаков через запятую, по-русски; нет интерьера — пусто" },
     state: { type: "string", description: REPAIR_STATES.join(" | ") },
     confidence: { type: "number", description: "0…1 — насколько уверена по этим фото" },
+    complex: { type: "string", description: "название ЖК или застройщика, если написано на фото (логотип, шапка плана, договор), как написано; иначе пусто" },
+    address: { type: "string", description: "адрес или ориентир, если он написан на фото; иначе пусто" },
+    total_price: { type: "number", description: "полная стоимость квартиры, если она есть на фото (график платежей, договор, прайс); иначе 0" },
+    down_payment: { type: "number", description: "первоначальный взнос с фото; иначе 0" },
+    price_currency: { type: "string", description: "UZS | USD | пусто — валюта цен с фото" },
+    installment: { type: "boolean", description: "на фото график рассрочки/платежей от застройщика" },
   },
-  required: ["signs", "state", "confidence"],
+  required: ["kinds", "interior", "signs", "state", "confidence"],
 };
-const REPAIR_SYSTEM = `Ты оцениваешь состояние ремонта квартиры в Ташкенте по фотографиям из объявления о продаже.
-Смотри только на то, что видно на фото, а не на слова продавца. Категории:
+const REPAIR_SYSTEM = `Ты смотришь фотографии из объявления о продаже квартиры в Ташкенте: что на них и в каком состоянии ремонт.
+Сначала для каждого фото — что это: interior (комнаты этой квартиры), plan (планировка, схема этажа), render (3D-визуализация),
+document (график платежей, договор, прайс, скриншот приложения), exterior (дом, двор), map, other.
+Ремонт оцениваешь ТОЛЬКО по фото interior, а не по словам продавца. Категории:
 good — свежий современный ремонт: ровные стены, современные пол и плитка, новая сантехника и двери, пластиковые окна; можно заезжать без вложений.
 average — ремонт не новый, но из современных материалов: ламинат, пластиковые окна, кафель не советский, потёртости, немодные обои; заехать можно, хватит косметики.
 none — советский или очень старый ремонт, либо разруха: старые обои и ковры на стенах, советская плитка и сантехника, деревянные окна, старый линолеум или дощатый пол, облезлые стены, следы протечек; по-хорошему менять всё.
 box — коробка или черновая: голый бетон, стяжка, штукатурка без отделки.
-unknown — на фото нет интерьера квартиры (фасад, двор, план, схема, реклама, рендер) или по фото не понять.
-Если фото — рендеры или явно чужие картинки, ставь unknown. Мебель и вещи не путай с ремонтом.
-confidence ниже 0.5 — если комнат почти не видно или фото противоречат друг другу.
-signs — коротко, что именно видно: «старый линолеум, деревянные окна, советская плитка».
-Сначала выпиши признаки, потом выбери категорию по ним: два и больше признаков из описания none — это none, даже если в целом «жить можно».`;
+unknown — нет ни одного фото interior (только планы, рендеры, документы, фасад) или по фото не понять. Тогда interior=false и signs пусто.
+Мебель и вещи не путай с ремонтом. confidence ниже 0.5 — если комнат почти не видно или фото противоречат друг другу.
+Сначала выпиши признаки, потом выбери категорию: два и больше признаков из описания none — это none.
+Если на плане, логотипе или документе написано название ЖК или застройщика — перепиши его в complex как есть (например «Bashkent», «Gardens Residence»).
+Если на фото график платежей, договор или прайс — выпиши полную стоимость (total_price), первоначальный взнос (down_payment) числами
+без пробелов и валюту; installment=true, если это рассрочка застройщика. Ничего не придумывай: не видно — 0 и пусто.`;
 
 const SOVIET_SIGNS = /советск|ковр|деревянн\S* окн|дощат|протеч|облез|старая сантех|старые труб|старая ванн|пожелтевш/g;
 
@@ -706,8 +717,15 @@ export async function repairFromPhotos(env, { urls = [], file_ids = [] }) {
   // страховка: модель перечислила признаки капитального, а поставила «средний»
   const hard = (String(o.signs || "").toLowerCase().match(SOVIET_SIGNS) || []).length;
   if (state === "average" && hard >= 2) state = "none";
-  const conf = Math.max(0, Math.min(1, Number(o.confidence) || 0));
-  return { state, confidence: Math.round(conf * 100) / 100, signs: String(o.signs || "").slice(0, 120), photos: images.length };
+  const interior = o.interior !== false && /interior/.test(String(o.kinds || "interior"));
+  if (!interior) state = "unknown";                 // по планам и документам ремонт не оценить
+  const conf = interior ? Math.max(0, Math.min(1, Number(o.confidence) || 0)) : 0;
+  const num = v => { const x = Number(String(v ?? "").replace(/[^\d.]/g, "")); return Number.isFinite(x) && x > 0 ? x : 0; };
+  const cur = /usd|\$|у\.?е/i.test(String(o.price_currency || "")) ? "USD" : /uzs|сум|so.?m/i.test(String(o.price_currency || "")) ? "UZS" : "";
+  return { state, confidence: Math.round(conf * 100) / 100, signs: interior ? String(o.signs || "").slice(0, 120) : "",
+    photos: images.length, interior, kinds: String(o.kinds || "").slice(0, 80),
+    complex: String(o.complex || "").trim().slice(0, 60), address: String(o.address || "").trim().slice(0, 100),
+    total_price: num(o.total_price), down_payment: num(o.down_payment), price_currency: cur, installment: !!o.installment };
 }
 
 // ───────────────────────────── хранилище (D1) ─────────────────────────────

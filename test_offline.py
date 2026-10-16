@@ -3172,3 +3172,45 @@ with mock.patch.object(rr, "STATE_DIR", _td), mock.patch.object(rr, "DB_PATH", _
 TN.REG.update(owner=None, at=0, multi=False, t={})
 import shutil as _sh; _sh.rmtree(_td, ignore_errors=True)
 print("OK — много пользователей: свои базы и чаты, общий срез рынка, маклер — своему клиенту, без флага — как раньше")
+
+# ============ переуступка в строящемся доме: район из текста, полная цена, ремонт без фото комнат ============
+import market as _mk3
+uzl_ = {"key": "sale:joymee:504599", "site": "Joymee", "district": "Яшнабад", "price_value": 30000, "price_currency": "USD",
+        "area": 54, "rooms": 2, "floor": 13, "floors_total": 15, "repair": "евроремонт", "seller_kind": "owner",
+        "photo_urls": ["https://x/1.png"], "title": "",
+        "text": "Iltimos oxitigacha oʻqing! Uy Olmazor tumani Jomiy krugida. Uy 2027 yil sentyabr oyida topshiriladi "
+                "Uy boʻlib tolashga olingan. 11 oy qismi qolgan. Oylik toʻlov 8 mln. Oxirida yana 322mln. Uy pod klyuch. "
+                "Yaxshi sifatli remont. Investitsiya shartnoma oladigan insonni nomiga qayta rasmiylashtiriladi."}
+SS.normalize(uzl_, cfg)
+assert uzl_["district"] == "Алмазар" and uzl_["district_site"] == "Яшнабад", uzl_.get("district")
+assert uzl_["offplan"] == {"year": 2027, "resale": True, "installment": True}, uzl_["offplan"]
+full_ = 30000 + (11 * 8e6 + 322e6) / cfg["uzs_per_usd"]
+assert uzl_["price_listed_usd"] == 30000 and abs(uzl_["price_value"] - round(full_, -2)) < 1, uzl_["price_value"]
+assert "продавцу за договор" in uzl_["price_note"] and "11 × 8 млн" in uzl_["price_note"]
+uzl_["price_usd"] = rr.to_usd(uzl_["price_value"], uzl_["price_currency"], cfg)
+uzl_["repair_photo"] = {"state": "unknown", "confidence": 1, "signs": "", "photos": 4, "interior": False}
+assert _mk3.repair_info(uzl_)[:2] == (None, "строится")
+kst4_ = rr.Store(Path("/tmp/test_offplan.db"))
+card_ = rr.format_sale_card(kst4_, dict(uzl_), cfg)
+assert "Дом строится, сдача 2027" in card_ and "переуступка" in card_ and "всего" in card_ and "можно заезжать" not in card_, card_
+assert "на сайте ошибочно: Яшнабад" in card_
+# без стройки: фото — только планы → не «хороший ремонт по пометке сайта», а просьба прислать фото комнат
+pl_ = {"key": "sale:joymee:1", "area": 50, "price_usd": 60000, "repair": "евроремонт", "text": "Продаю 2 комн",
+       "repair_photo": {"state": "unknown", "confidence": 1, "photos": 3, "signs": ""}}
+assert _mk3.repair_info(pl_)[:2] == (None, "нет фото")
+assert "попросите фото комнат" in rr.format_sale_card(kst4_, dict(pl_), cfg)
+# фото: график платежей и логотип ЖК на плане → полная цена и точка у ЖК
+ph_ = {"key": "sale:joymee:2", "area": 54, "price_usd": 30000, "district": None, "geo": {"src": "район"},
+       "repair_photo": {"state": "unknown", "photos": 4, "interior": False, "complex": "Bashkent Usta",
+                        "total_price": 750820000, "down_payment": 324000000, "price_currency": "UZS", "installment": True}}
+with mock.patch.object(_geo_t, "point_for", lambda q, *a, **k: {"lat": 41.3506, "lon": 69.2608, "label": q, "src": "ориентир"}
+                       if "Bashkent" in q else None), mock.patch.object(_geo_t, "district_at", lambda *a, **k: "Алмазар"):
+    assert SS.photo_facts(cfg, kst4_, ph_)
+assert ph_["price_listed_usd"] == 30000 and abs(ph_["price_usd"] - round(750820000 / cfg["uzs_per_usd"], -2)) < 1
+assert ph_["geo"]["label"] == "ЖК Bashkent Usta" and ph_["offplan"]["installment"]
+assert "дороже бюджета" in SS.recheck(ph_, {"max_price_usd": 50000}, kst4_, cfg)
+assert SS.text_district("Квартира в Мирабадском районе, ориентир Ойбек") == "Мирабад"
+assert SS.text_district("Мирабад или Яккасарай — рассмотрю, Yunusobod tumanida ham") == "Юнусабад"
+assert SS.text_district("Продаю квартиру, Мирабад") is None                # без «район/tumani» — не перебиваем сайт
+Path("/tmp/test_offplan.db").unlink(missing_ok=True)
+print("OK — переуступка в строящемся доме: район по тексту, полная цена с остатком платежей, ремонт без фото — не «хороший»")

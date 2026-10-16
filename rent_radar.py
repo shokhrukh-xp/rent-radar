@@ -4096,12 +4096,16 @@ def format_sale_card(store, l: dict, cfg: dict, head: str = "", note: str = "") 
     p = l.get("price_usd")
     if p:
         price = f"<b>${_money(p)}</b>"
-        if (l.get("price_currency") or "").upper() == "UZS" and l.get("price_value"):
+        if l.get("price_listed_usd"):                # переуступка / рассрочка: в объявлении — не вся цена
+            price = t("≈ {p} всего", p=price)
+        elif (l.get("price_currency") or "").upper() == "UZS" and l.get("price_value"):
             price = "<b>" + t("{mln} млн сум", mln=market._mln(l["price_value"])) + f"</b> (~${_money(p)})"
         if l.get("area"):
             price += f' · ${_money(p / l["area"])}/м²'
         if x.get("fair") and x.get("gap") is not None:
             price += " · " + t("рынок ≈ ${v}", v=_money(market._r500(x["fair"])))
+        if l.get("price_listed_usd") and l.get("price_note"):
+            price += "\n" + escape_html(l["price_note"])
         top.append(price)
 
     # ремонт
@@ -4120,6 +4124,14 @@ def format_sale_card(store, l: dict, cfg: dict, head: str = "", note: str = "") 
         if rsrc == "фото" and claimed and claimed != cls:
             r += t("; в объявлении «{c}»", c=short[claimed])
         top.append(r)
+    elif rsrc == "строится":
+        yr = (l.get("offplan") or {}).get("year")
+        top.append(t("Дом строится, сдача {y} — фото квартиры ещё нет", y=yr)
+                   + (t("; ремонт обещан по договору: «{c}»", c=short[claimed]) if claimed else ""))
+    elif rsrc == "нет фото":
+        top.append((t("Ремонт: в объявлении «{c}», но на фото только планировки и документы — попросите фото комнат",
+                      c=short[claimed]) if claimed else
+                    t("Фото комнат нет — только планировки и документы; попросите фото у продавца")))
     elif x:
         top.append(t("Ремонт не понять — уточните у продавца"))
     elif l.get("repair"):
@@ -4130,9 +4142,17 @@ def format_sale_card(store, l: dict, cfg: dict, head: str = "", note: str = "") 
                                                                             t("Продавец не проверен"))
     if l.get("seller_hint") == "developer":
         who = t("Застройщик")
+    if (l.get("offplan") or {}).get("resale"):
+        who += t(" (переуступка договора)")
+    if l.get("district_site"):
+        who_d = t("Район по тексту объявления — {d} (на сайте ошибочно: {s})", d=dist(l["district"]), s=dist(l["district_site"]))
+    else:
+        who_d = ""
     if l.get("phones"):
         who += " · " + fmt_phone(l["phones"][0])
     top.append(who)
+    if who_d:
+        top.append(who_d)
     dt = parse_iso(l.get("created_at") or "")
     since = parse_iso(l.get("listed_since") or "")
     when = []
@@ -4704,6 +4724,12 @@ def run_sale_search(cfg: dict, store, settings: dict, force: bool = False) -> in
             continue
         if photo_budget[0] > 0 and sale_sources.photo_repair(cfg, l):
             photo_budget[0] -= 1
+        if sale_sources.photo_facts(cfg, store, l):      # на фото график платежей или ЖК — цена и место точнее
+            why_ = sale_sources.recheck(l, ss, store, cfg)
+            if why_:
+                store.save(l, notified=False)
+                log.info("[продажа] мимо после фото — %s: %s", why_, l["title"][:45])
+                continue
         sc, why, strong, _ = sale_sources.score(store, l, cfg, ss)
         l["score"], l["why"] = sc, why
         mins = fresh_owner_minutes(l, ss) if not first else None     # первый проход — без «горячих»
