@@ -1829,6 +1829,17 @@ def effective_sale_cfg(cfg, store):
         near_txt = "центр"                    # раньше «ближе к центру» лежало в пожеланиях
     city = ans.get("city_other") if ans.get("city") == "other" and ans.get("city_other") else "Ташкент"
     ss["near"] = near_point(cfg, store, near_txt, ans.get("near_km"), city=city) if near_txt else None
+    if ss["near"]:
+        # «в центре», «прямо в центре» — строго: радиус самого центра и только объявления с точным местом.
+        # «рядом с центром», «ближе к центру», «около» — мягко: центр и полоса вокруг.
+        said = f'{ans.get("near") or ""} {ans.get("note") or ""}'.lower()
+        soft = bool(re.search(r"рядом|около|недалеко|ближе|у центра|возле|поблизости|atrof|yaqin|near", said))
+        nr = dict(ss["near"], strict=not soft)
+        if nr["strict"] and nr.get("src") == "центр" and nr.get("center_km"):
+            nr["km"] = nr["center_km"]
+            if city.lower() == "ташкент":
+                nr["districts"] = geo.districts_within(nr["lat"], nr["lon"], nr["km"] + 0.5) or nr.get("districts")
+        ss["near"] = nr
     if ss["near"] and ss["near"].get("districts"):
         ss["districts"] = ss["near"]["districts"]      # сайты спрашиваем по районам круга, отсев — по радиусу
     ss["enabled"] = True
@@ -4144,7 +4155,9 @@ def format_sale_card(store, l: dict, cfg: dict, head: str = "", note: str = "") 
         who = t("Застройщик")
     if (l.get("offplan") or {}).get("resale"):
         who += t(" (переуступка договора)")
-    if l.get("district_site"):
+    if l.get("district_site") and l.get("district_by") == "точка":
+        who_d = t("Район по точке на карте — {d} (на сайте указан {s})", d=dist(l["district"]), s=dist(l["district_site"]))
+    elif l.get("district_site"):
         who_d = t("Район по тексту объявления — {d} (на сайте ошибочно: {s})", d=dist(l["district"]), s=dist(l["district_site"]))
     else:
         who_d = ""
@@ -4544,7 +4557,10 @@ def sale_criteria_text(ss: dict) -> str:
     rooms = t("{r} комн", r=rooms) if rooms else t("любая комнатность")
     districts = ", ".join(dist(d) for d in ss.get("districts") or []) or t("любые районы")
     nr = ss.get("near") or {}
-    if nr.get("src") == "центр":
+    if nr.get("src") == "центр" and nr.get("strict"):
+        districts = t("строго центр города (до {km} км от середины, только с точным адресом)",
+                      km=str(nr.get("km")).replace(".", ","))
+    elif nr.get("src") == "центр":
         districts = t("центр города и рядом с ним")
     elif nr.get("lat") is not None:
         districts = t("до {km} км от «{label}»", km=str(round(nr["km"], 1)).replace(".0", "").replace(".", ","),

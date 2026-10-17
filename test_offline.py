@@ -2581,7 +2581,8 @@ g = G.locate(tl)
 assert g["src"] == "ориентир" and G.km(g["lat"], g["lon"], 41.298, 69.274) < 0.6 and g["label"] == "Мирабадский рынок", g
 # метро — по названию станции; точка в чужом районе — не берём
 assert G.locate({"text": "5 минут до метро Ойбек", "district": "Мирабад"})["label"] == "м. Айбек"
-assert not G.locate({"text": "x", "lat": 41.298, "lon": 69.274, "district": "Сергели"})          # пин в другом районе
+pin_ = {"text": "x", "lat": 41.298, "lon": 69.274, "district": "Сергели"}       # пин в другом районе: верим точке,
+assert G.locate(pin_)["src"] == "сайт" and pin_["district"] == "Мирабад" and pin_["district_site"] == "Сергели"   # район — по ней
 assert G.locate({"text": "x", "lat": 41.298, "lon": 69.274, "district": "Мирабад"})["src"] == "сайт"
 # соседи в радиусе: одна и та же цена — дорого на юге, нормально у Ойбека
 south = dict(SS._listing(key="sale:tg:x:2", rooms=2, area=50, district="Мирабад", text="Ориентир: Госпитальный рынок"),
@@ -3233,3 +3234,21 @@ try:
 finally:
     _geo_t.GAZ["gaz"], _geo_t.GAZ["pts"] = _gz5
 print("OK — место: узбекская кириллица и раздельное написание массива находят ориентир, площадь — не квартал")
+
+# ============ «в центре» — строго: радиус центра, без точного места не показываем; «рядом с центром» — мягко ============
+nc_ = {"lat": 41.3123, "lon": 69.2787, "label": "центр", "src": "центр", "km": 2.6, "center_km": 2.6, "strict": True}
+assert "точный адрес не указан" in _geo_t.too_far({"district": "Мирабад", "geo": {"src": "район", "spread": 1.0}}, nc_)
+assert _geo_t.too_far({"geo": {"lat": 41.305, "lon": 69.28, "src": "сайт"}}, nc_) == ""                # 0,8 км — центр
+assert "км от «центр»" in _geo_t.too_far({"geo": {"lat": 41.2853, "lon": 69.2787, "src": "сайт"}}, nc_)  # 3 км — уже не центр
+assert "примерное" in _geo_t.too_far({"geo": {"lat": 41.305, "lon": 69.28, "src": "ориентир", "spread": 2.0}}, nc_)
+_np = lambda c, st, txt, km=None, city="Ташкент": {"lat": 41.3123, "lon": 69.2787, "label": "центр", "src": "центр",
+                                                   "km": 3.6, "center_km": 2.6, "districts": ["Мирабад", "Юнусабад"]}
+for note_, strict_ in (("прямо в центре", True), ("рядом с центром", False), ("", True)):
+    sst_ = rr.Store(Path("/tmp/test_strict.db"))
+    sst_.set_kv("anketa", {"ans": {"deal": "buy", "object": "flat", "rooms": ["2"], "budget": "60000", "near": "центр",
+                                   "note": note_}})
+    with mock.patch.object(rr, "near_point", _np), mock.patch.object(_geo_t, "districts_within", lambda *a: ["Мирабад"]):
+        nr_ = rr.effective_sale_cfg(cfg, sst_)["sale_search"]["near"]
+    assert nr_["strict"] is strict_ and nr_["km"] == (2.6 if strict_ else 3.6), (note_, nr_)
+    Path("/tmp/test_strict.db").unlink(missing_ok=True)
+print("OK — «в центре» строго: только точное место в радиусе центра; «рядом с центром» — с полосой вокруг")

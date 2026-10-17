@@ -330,7 +330,14 @@ def locate(l: dict) -> dict:
         la, lo = float(la), float(lo)
     except (TypeError, ValueError):
         la = lo = None
-    if la is not None and ok(la, lo):
+    if la is not None and in_city(la, lo):
+        # координаты сайта точнее поля «район»: у Uybor район выведен по id и бывает чужим
+        # (Куйлюк с пометкой «Мирабад»). Точка в другом районе — исправляем район, а не выбрасываем точку.
+        dd = district_at(la, lo) if GAZ["pts"] else None
+        if d and dd and dd != d:
+            l.setdefault("district_site", d)
+            l["district_by"] = "точка"
+            l["district"] = d = dd
         g = {"lat": la, "lon": lo, "src": "сайт", "label": label}
     else:
         g = None
@@ -441,13 +448,19 @@ def too_far(l: dict, near: dict):
     Место неизвестно — подходит, только если район задевает круг."""
     if not near or near.get("lat") is None:
         return ""
+    strict = near.get("strict", False)
     g = l.get("geo") or locate(l)
     if g and g.get("src") != "район":
         dkm = km(near["lat"], near["lon"], g["lat"], g["lon"])
         l["near_km"] = round(dkm, 1)
-        if dkm > near.get("km", 2) + (g.get("spread") or 0) * 0.5:
+        spread = g.get("spread") or 0
+        if strict and spread > 1.0:              # «где-то у рынка» с разбросом в километр-два — центр не проверить
+            return f"место примерное (±{spread:.1f} км), а нужно строго в радиусе {near.get('km', 2):g} км"
+        if dkm > near.get("km", 2) + (0 if strict else spread * 0.5):
             return f"{dkm:.1f} км от «{near.get('label')}»"
         return ""
+    if strict:                                   # строго в центре / у ориентира: без точного места не показываем
+        return "точный адрес не указан — не проверить, что это в нужном месте"
     if not l.get("district"):
         return "место не указано"
     if near.get("districts") and l["district"] not in near["districts"]:
