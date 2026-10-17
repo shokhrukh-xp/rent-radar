@@ -2599,7 +2599,8 @@ assert "Рядом (1 км)" in card_s
 near = {"lat": 41.298, "lon": 69.274, "km": 1.0, "label": "м. Айбек", "districts": ["Мирабад"]}
 assert G.too_far(dict(north), near) == ""
 assert "км от «м. Айбек»" in G.too_far(dict(south), near)
-assert G.too_far({"text": "", "district": "Сергели"}, near).startswith("район Сергели")
+assert "точный адрес не указан" in G.too_far({"text": "", "district": "Сергели"}, near)
+assert "точный адрес не указан" in G.too_far({"text": "", "district": "Мирабад"}, near)    # и «свой» район — не довод
 ssn = dict(ss_all["sale_search"], near=near, max_price_usd=500000, owner_only=False, rooms=[2])
 with mock.patch.object(rr, "classify_sale_seller", lambda *a: ""):
     assert rr.sale_reject(dict(south, price_value=105000), ssn, gs, ss_all)[0].endswith("км от «м. Айбек»")
@@ -3030,23 +3031,14 @@ with mock.patch.object(_ss_p.requests, "get", lambda u, **k: _RI(IMGS[u])):
 pdb_.unlink(missing_ok=True)
 print("OK — дубли по фото: перевыложенная маклером квартира узнаётся по снимкам, разные квартиры не склеиваются")
 
-# ============ «в центре»: без точной точки большой район, который лишь задевает круг, — не берём ============
-_gz_saved = list(_geo_t.GAZ["pts"])
-try:
-    _geo_t.GAZ["pts"] = ([(41.36 + i * 1e-4, 69.39, "Мирзо-Улугбек", "sale", 0, 0, 50, 60000, None, f"k{i}") for i in range(30)]
-                         + [(41.312 + i * 1e-4, 69.283, "Мирзо-Улугбек", "sale", 0, 0, 50, 60000, None, f"q{i}") for i in range(5)]
-                         + [(41.30 + i * 1e-4, 69.28, "Мирабад", "sale", 0, 0, 50, 60000, None, f"m{i}") for i in range(30)])
-    _geo_t._SHARE.clear()
-    near_c = {"lat": 41.31267, "lon": 69.28327, "label": "центр", "km": 3.6, "districts": ["Мирабад", "Мирзо-Улугбек"]}
-    why_ = _geo_t.too_far({"district": "Мирзо-Улугбек", "geo": {"src": "район"}}, near_c)
-    assert "в основном дальше" in why_, why_
-    assert _geo_t.too_far({"district": "Мирабад", "geo": {"src": "район"}}, near_c) == ""
-    assert _geo_t.too_far({"district": "Мирзо-Улугбек", "geo": {"lat": 41.315, "lon": 69.29, "src": "сайт"}}, near_c) == ""
-finally:
-    _geo_t.GAZ["pts"] = _gz_saved; _geo_t._SHARE.clear()
+# ============ «в центре»: без точной точки не проходит никакой район; ориентиры без названия не ищем ============
+near_c = {"lat": 41.31267, "lon": 69.28327, "label": "центр", "km": 3.6, "districts": ["Мирабад", "Мирзо-Улугбек"]}
+for d_ in ("Мирзо-Улугбек", "Мирабад"):
+    assert "точный адрес не указан" in _geo_t.too_far({"district": d_, "geo": {"src": "район"}}, near_c)
+assert _geo_t.too_far({"district": "Мирзо-Улугбек", "geo": {"lat": 41.315, "lon": 69.29, "src": "сайт"}}, near_c) == ""
 assert _geo_t.generic_place("Мечеть") and _geo_t.generic_place("Мебельный магазин") and not _geo_t.generic_place("школа 64")
 assert not _geo_t.generic_place("Рисовый базар") and not _geo_t.generic_place("Массив ТТЗ-2")
-print("OK — «в центре»: большой район без точки не проходит, ориентиры без названия («Мечеть») не ищем на карте")
+print("OK — «в центре»: решает только точка — без неё никакой район не проходит; ориентиры без названия не ищем")
 
 # ============ оценка цены: ближайшие похожие (kNN), не больше 3 от одного продавца, разброс P20–P80 ============
 import market as _mk2

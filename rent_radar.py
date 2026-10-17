@@ -1837,8 +1837,10 @@ def effective_sale_cfg(cfg, store):
         nr = dict(ss["near"], strict=not soft)
         if nr["strict"] and nr.get("src") == "центр" and nr.get("center_km"):
             nr["km"] = nr["center_km"]
-            if city.lower() == "ташкент":
-                nr["districts"] = geo.districts_within(nr["lat"], nr["lon"], nr["km"] + 0.5) or nr.get("districts")
+        if city.lower() == "ташкент":
+            # районы — только чтобы спросить сайты; с запасом 2 км: сайты путают районы (Куйлюк с пометкой
+            # «Мирабад»), а квартира в круге с «чужим» районом иначе до нас бы не дошла. Отсев — по точке.
+            nr["districts"] = geo.districts_within(nr["lat"], nr["lon"], nr["km"] + 2.0) or nr.get("districts")
         ss["near"] = nr
     if ss["near"] and ss["near"].get("districts"):
         ss["districts"] = ss["near"]["districts"]      # сайты спрашиваем по районам круга, отсев — по радиусу

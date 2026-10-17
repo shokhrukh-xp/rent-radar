@@ -445,7 +445,8 @@ def districts_within(lat, lon, radius):
 
 def too_far(l: dict, near: dict):
     """Причина, если объявление дальше радиуса от точки клиента; '' — подходит.
-    Место неизвестно — подходит, только если район задевает круг."""
+    Решает только точка на карте. Название района ничего не говорит: районы Ташкента огромные,
+    в каждом есть и кварталы у центра, и окраины в 10+ км. Нет точки — не показываем (и строго, и мягко)."""
     if not near or near.get("lat") is None:
         return ""
     strict = near.get("strict", False)
@@ -454,40 +455,12 @@ def too_far(l: dict, near: dict):
         dkm = km(near["lat"], near["lon"], g["lat"], g["lon"])
         l["near_km"] = round(dkm, 1)
         spread = g.get("spread") or 0
-        if strict and spread > 1.0:              # «где-то у рынка» с разбросом в километр-два — центр не проверить
-            return f"место примерное (±{spread:.1f} км), а нужно строго в радиусе {near.get('km', 2):g} км"
+        if spread > (1.0 if strict else 1.5):    # «где-то у рынка» с разбросом в километр-два — место не проверить
+            return f"место примерное (±{spread:.1f} км), а нужно в радиусе {near.get('km', 2):g} км"
         if dkm > near.get("km", 2) + (0 if strict else spread * 0.5):
             return f"{dkm:.1f} км от «{near.get('label')}»"
         return ""
-    if strict:                                   # строго в центре / у ориентира: без точного места не показываем
-        return "точный адрес не указан — не проверить, что это в нужном месте"
-    if not l.get("district"):
-        return "место не указано"
-    if near.get("districts") and l["district"] not in near["districts"]:
-        return f"район {l['district']} — далеко от «{near.get('label')}»"
-    share = district_share(l["district"], near)
-    if share is not None and share < DISTRICT_SHARE_MIN:
-        # район лишь задевает круг (Мирзо-Улугбек тянется на 10+ км от центра): без точки — не берём
-        return f"место не указано, а {l['district']} в основном дальше {near.get('km', 2):g} км от «{near.get('label')}»"
-    return ""
-
-
-DISTRICT_SHARE_MIN = 0.5
-_SHARE = {}
-
-
-def district_share(district: str, near: dict):
-    """Какая доля объявлений района (по срезу) попадает в круг клиента; None — мало данных."""
-    k = (district, round(near["lat"], 3), round(near["lon"], 3), near.get("km", 2), len(GAZ["pts"]))
-    if k in _SHARE:
-        return _SHARE[k]
-    pts = [(r[0], r[1]) for r in GAZ["pts"] if r[2] == district and r[3] == "sale"]
-    out = None
-    if len(pts) >= 20:
-        r_ = near.get("km", 2)
-        out = sum(1 for la, lo in pts if km(near["lat"], near["lon"], la, lo) <= r_) / len(pts)
-    _SHARE[k] = out
-    return out
+    return "точный адрес не указан — не проверить, что это в нужном месте"
 
 
 GENERIC_PLACE = {"mechet", "masjid", "shkala", "shkali", "detsad", "sad", "bazar", "rinak", "rinka", "magazin",
