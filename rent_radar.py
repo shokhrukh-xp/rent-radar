@@ -3014,6 +3014,34 @@ def push_snapshot(cfg, store, settings, force=False) -> bool:
     return ok
 
 
+def still_actual(cfg, l, older_h=20) -> str:
+    """Свежо ли объявление сейчас: "ok" | "changed" (цена другая — уже обновили в l) | "gone" (сняли).
+    Проверяем только старше older_h часов и только Uybor/Joymee (их открытые API); не вышло спросить — "ok"."""
+    a = age_days(l.get("created_at") or "")
+    url = str(l.get("url") or "")
+    if a is not None and a * 24 < older_h:
+        return "ok"
+    try:
+        if sale_sources.UYBOR_ID_RE.search(url) or sale_sources.JOYMEE_ID_RE.search(url):
+            n, deal = sale_sources.listing_from_url(cfg, url)
+            if not n:
+                return "gone"
+            pv, pc = n.get("price_value"), n.get("price_currency")
+            if pv and (pv, pc) != (l.get("price_value"), l.get("price_currency")):
+                old = l.get("price_usd")
+                l["price_value"], l["price_currency"] = pv, pc
+                l["price_usd"] = to_usd(pv, pc, cfg)
+                if old and l["price_usd"] and abs(l["price_usd"] - old) >= 1:
+                    l["price_note"] = f"цена изменилась: было ${old:,.0f}".replace(",", " ")
+                    return "changed"
+    except requests.HTTPError as e:
+        if e.response is not None and e.response.status_code in (404, 410):
+            return "gone"
+    except Exception as e:
+        log.info("не проверила, живо ли %s: %s", url, e)
+    return "ok"
+
+
 def run_search(cfg, store, settings, limit=5, days=7) -> str:
     """Анализирует всё, что накоплено за days дней, и присылает лучшее прямо сейчас.
     Свежесть — по тому же окну (не notify_max_age_days: тот предел — для новых уведомлений, иначе поиск
@@ -3084,15 +3112,32 @@ def run_search(cfg, store, settings, limit=5, days=7) -> str:
         return ""
     store.set_kv("empty_search", {})
 
-    head = [f"🔎 <b>Лучшее сейчас</b> — {min(limit, len(ok))} из {len(ok)} новых подходящих "
-            f"(просмотрено {len(pool)} за {days} дн." + (f"; ещё {already} уже присылала" if already else "") + ")"]
+    # из накопленного за дни: объявление могли снять или поменять цену — проверяем до отправки
+    fresh_ok, gone = [], 0
+    for l in [x for x in ok if x.get("photo_urls")]:
+        if len(fresh_ok) >= limit:
+            break
+        st_ = still_actual(cfg, l)
+        if st_ == "gone" or (st_ == "changed" and not passes_filters(l, eff, max_age=days)):
+            gone += 1
+            store.conn.execute("UPDATE listings SET notified=2 WHERE key=?", (l["key"],))   # не предлагать снова
+            store.conn.commit()
+            continue
+        fresh_ok.append(l)
+    if not fresh_ok:
+        send_telegram(cfg, f"🔍 Подходили {gone} {concierge.plural(gone, 'вариант', 'варианта', 'вариантов')}, но их уже "
+                           "сняли или подняли цену выше бюджета. Новые пришлю сразу, как появятся.")
+        return ""
+    head = [f"🔎 <b>Лучшее сейчас</b> — {len(fresh_ok)} из {len(ok) - gone} новых подходящих "
+            f"(просмотрено {len(pool)} за {days} дн." + (f"; ещё {already} уже присылала" if already else "")
+            + (f"; {gone} уже сняли или подняли цену" if gone else "") + ")"]
     med = stats["rooms"]
     if med:
         head.append("📊 Медианы: " + ", ".join(
             f"{r}-комн ${m:.0f}" for r, (m, n) in sorted(med.items())))
     send_telegram(cfg, "\n".join(head))
 
-    for i, l in enumerate([x for x in ok if x.get("photo_urls")][:limit], 1):   # только с фото
+    for i, l in enumerate(fresh_ok, 1):         # только с фото
         l["title"] = f"#{i} · {l.get('title', '')}"
         if send_listing(cfg, settings, l, likely_makler=False):
             store.conn.execute("UPDATE listings SET notified=1 WHERE key=?", (l["key"],))

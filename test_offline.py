@@ -3462,3 +3462,19 @@ with mock.patch.object(_geo_t, "district_at", lambda la, lo, radius=0.8: "Мир
                           "district": "Мирабад"})
     assert not _gok.get("spread")
 print("OK — живые тесты: без повторов карточек, подпись и цена аренды, маклер по числу объявлений, метка против района")
+# из накопленного: снятое не шлём, подорожавшее выше бюджета — тоже
+_rp = Path("/tmp/test_live3.db"); _rp.unlink(missing_ok=True)
+_rs = rr.Store(_rp)
+for _k, _u in (("uybor:91", "https://uybor.uz/listings/91"), ("joymee:92", "https://joymee.uz/announcements/92")):
+    _rs.save(dict(_rl, key=_k, url=_u), notified=False)
+_lfu = {"https://uybor.uz/listings/91": (None, ""),
+        "https://joymee.uz/announcements/92": ({"price_value": 1200, "price_currency": "USD"}, "sale")}
+_RS = []
+with mock.patch.object(rr.sale_sources, "listing_from_url", lambda c, u: _lfu[u]), \
+        mock.patch.object(rr, "send_telegram", lambda c, t_, **k: _RS.append(t_) or True), \
+        mock.patch.object(rr, "send_listing", lambda *a, **k: _RS.append("card") or True):
+    rr.run_search(dict(cfg, telegram_chat_id="1"), _rs, _rset, days=14)
+assert "card" not in _RS and "сняли или подняли цену" in _RS[0], _RS
+assert _rs.conn.execute("SELECT COUNT(*) FROM listings WHERE notified=2").fetchone()[0] == 2
+_rp.unlink(missing_ok=True)
+print("OK — из накопленного: снятые и подорожавшие выше бюджета объявления не присылаются")
