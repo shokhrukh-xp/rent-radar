@@ -3736,7 +3736,7 @@ with mock.patch.object(rr, "tg_call", _mtg), mock.patch.dict(cg._BIZ_STORE, {"st
 _mp.unlink(missing_ok=True)
 print("OK — общение с продавцом: свой вопрос клиента узнаём, ответ — к варианту; номер со скрытого сайта — сразу вопрос")
 
-# ============ Ra'no пишет продавцу первой: свой аккаунт, SMS со ссылкой, лимиты, ответы к карточке ============
+# ============ Ra'no пишет продавцу первой: свой аккаунт, лимиты, ответы к карточке ============
 import outreach as _out
 import tenants as _tn
 _op = Path("/tmp/test_outreach.db"); _op.unlink(missing_ok=True)
@@ -3761,13 +3761,7 @@ class _FakeTG:
         out = [m for m in self.inbox if m["id"] > int(last.get(m["peer"]) or 0)]
         self.inbox = []
         return out
-class _FakeSMS:
-    def __init__(self):
-        self.sent = []
-    def send(self, phone, text):
-        self.sent.append((phone, text))
-        return 1
-_ftg, _fsms = _FakeTG(), _FakeSMS()
+_ftg = _FakeTG()
 _ocfg = dict(cfg, telegram_chat_id="79", card_queue=True, worker_url="", bot_username="rano_smart_bot")
 _ol = {"key": "uybor:601", "source": "uybor", "site": "Uybor", "title": "2-комн, Мирабад", "text": "2-комн, Мирабад",
        "district": "Мирабад", "rooms": 2, "price_value": 700, "price_currency": "USD", "price_usd": 700,
@@ -3778,7 +3772,7 @@ def _otick():
     _out.tick(_ocfg, _os)
 with mock.patch.object(rr, "tg_call", _otg), mock.patch.dict(cg._BIZ_STORE, {"store": _os}), \
         mock.patch.object(rr, "ai_parse", lambda *a, **k: None), mock.patch.object(_tn, "shared_store", lambda s: s), \
-        mock.patch.dict(_out.ADAPTER, {"tg": _ftg, "sms": None}), mock.patch.object(_out, "daytime", lambda now=None: True):
+        mock.patch.dict(_out.ADAPTER, {"tg": _ftg}), mock.patch.object(_out, "daytime", lambda now=None: True):
     _os.set_kv("client_who", {"id": 79, "name": "Шохрух", "username": "shokh"})
     _os.save(dict(_ol), notified=True)
     _oid, _ = cg.add_site_offer(_ocfg, _os, dict(_ol))
@@ -3819,36 +3813,14 @@ with mock.patch.object(rr, "tg_call", _otg), mock.patch.dict(cg._BIZ_STORE, {"st
     _ftg.inbox = [{"peer": "999", "hash": "h9", "id": 2, "text": "Алло?", "photos": [], "name": "Маклер"}]
     _otick()
     assert sum(1 for p, t_ in _ftg.sent if p == "999") == 1 and "@rano_smart_bot" in _ftg.sent[-1][1]
-    # продавца нет в Telegram — SMS со ссылкой на бота
-    _out.ADAPTER["sms"] = _fsms
-    _os.save(dict(_ol, key="uybor:602", phones=["90 555 66 77"], url="https://uybor.uz/listings/602"), notified=True)
-    _o2, _ = cg.add_site_offer(_ocfg, _os, dict(_ol, key="uybor:602", phones=["90 555 66 77"]))
-    _OT.clear()
-    cg.request_details(_ocfg, _os, [_o2])
-    _otick()
-    assert _fsms.sent and _fsms.sent[0][0] == "998905556677"
-    _code = f"s{_out._b36(79)}-{_out._b36(_o2)}"
-    assert f"t.me/rano_smart_bot?start={_code}" in _fsms.sent[0][1] and len(_fsms.sent[0][1]) <= 160
-    assert all(ord(ch) < 128 for ch in _fsms.sent[0][1])           # латиница — одна SMS, а не три
-    assert any("отправила ему SMS" in pl.get("text", "") for m, pl in _OT)
-    # продавец открыл ссылку из SMS — бот сразу задаёт вопросы, его ответ — к этому объявлению
-    _OT.clear()
-    rr.handle_broker_message(_ocfg, _os, {"chat": {"id": 6006, "first_name": "Продавец"}, "text": f"/start {_code}",
-                                          "_seller": _o2})
-    assert any(str(pl.get("chat_id")) == "6006" and "По вашему объявлению" in pl.get("text", "") for m, pl in _OT)
-    _OT.clear()
-    rr.handle_broker_message(_ocfg, _os, {"chat": {"id": 6006, "first_name": "Продавец"}, "text": "Да, свободна",
-                                          "_welcomed": True})
-    assert any(f"ответил по варианту #{_o2}" in pl.get("text", "") for m, pl in _OT), [pl.get("text", "")[:80] for m, pl in _OT]
-    # ни Telegram, ни SMS — прежний путь: готовый текст клиенту
-    _out.ADAPTER["sms"] = None
+    # продавца нет в Telegram — прежний путь: готовый текст клиенту
     _o3, _ = cg.add_site_offer(_ocfg, _os, dict(_ol, key="uybor:603", phones=["90 000 00 01"]))
     _OT.clear()
     cg.request_details(_ocfg, _os, [_o3])
     _otick()
     assert any("Написать продавцу в Telegram" in pl.get("text", "") for m, pl in _OT)
     # лимит новых чатов в день: остальное ждёт завтра
-    _os.set_kv("ra_day", {"d": _out._now_local().strftime("%Y-%m-%d"), "n": _out.NEW_PER_DAY, "sms": 0, "per": {}})
+    _os.set_kv("ra_day", {"d": _out._now_local().strftime("%Y-%m-%d"), "n": _out.NEW_PER_DAY, "per": {}})
     _ftg.known["998900000004"] = ("4343", "h4")
     _o4, _ = cg.add_site_offer(_ocfg, _os, dict(_ol, key="uybor:604", phones=["90 000 00 04"]))
     _OT.clear()
@@ -3877,4 +3849,65 @@ with mock.patch.object(rr, "tg_call", _otg), mock.patch.dict(cg._BIZ_STORE, {"st
         _otick()
         assert len(_ftg.sent) == _ss
 _op.unlink(missing_ok=True)
-print("OK — Ra'no пишет продавцу первой: свой аккаунт, ответы к карточке, SMS со ссылкой, лимиты, пауза, ночь")
+print("OK — Ra'no пишет продавцу первой: свой аккаунт, ответы к карточке, лимиты, пауза, ночь")
+
+# ============ один ответ продавца — всем клиентам: ждём вместе, отдаём свежий, имя первого клиента не показываем ============
+from contextlib import nullcontext as _nc
+_sp = [Path(f"/tmp/test_share_{i}.db") for i in range(4)]
+for _p in _sp:
+    _p.unlink(missing_ok=True)
+_S = {str(79 + i): rr.Store(_p) for i, _p in enumerate(_sp)}
+_C = {c: dict(cfg, telegram_chat_id=c, card_queue=True, worker_url="", bot_username="rano_smart_bot") for c in _S}
+_ST = []
+def _stg(c, m, pl, **k):
+    _ST.append((str(pl.get("chat_id")), m, dict(pl)))
+    return {"ok": True, "result": {"message_id": 1500 + len(_ST)}}
+def _to(chat):
+    return [pl.get("text", "") for c, m, pl in _ST if c == chat and m == "sendMessage"]
+_ftg2 = _FakeTG()
+_ftg2.known = {"998901112244": ("5151", "h5")}
+_sl = dict(_ol, key="uybor:701", phones=["90 111 22 44"], url="https://uybor.uz/listings/701")
+_SO = {}
+with mock.patch.object(rr, "tg_call", _stg), mock.patch.object(rr, "ai_parse", lambda *a, **k: None), \
+        mock.patch.object(_tn, "shared_store", lambda s: _S["79"]), mock.patch.dict(_out.ADAPTER, {"tg": _ftg2}), \
+        mock.patch.object(_out, "daytime", lambda now=None: True), \
+        mock.patch.object(_out, "_tenant", lambda c, s, chat: (_C[str(chat)], _S[str(chat)], _nc())):
+    for _c, _s in _S.items():
+        _s.set_kv("client_who", {"id": int(_c), "name": "Шохрух" if _c == "79" else f"Клиент{_c}", "username": "shokh" if _c == "79" else ""})
+        _s.save(dict(_sl), notified=True)
+        _SO[_c], _ = cg.add_site_offer(_C[_c], _s, dict(_sl))
+    def _ask(c):
+        with mock.patch.dict(cg._BIZ_STORE, {"store": _S[c]}):
+            return cg.request_details(_C[c], _S[c], [_SO[c]])
+    _ask("79")                                                     # первый клиент — Ra'no пишет продавцу
+    _ask("80")                                                     # второй — ждёт тот же ответ, продавцу второй раз не пишем
+    assert any("уже написала по просьбе другого клиента" in x for x in _to("80"))
+    assert len(_S["79"].get_kv("ra_queue")) == 1
+    _out._STATE["poll_at"] = 0; _S["79"].set_kv("ra_last_new", 0)
+    with mock.patch.dict(cg._BIZ_STORE, {"store": _S["79"]}):
+        _out.tick(_C["79"], _S["79"])
+    assert len(_ftg2.sent) == 1
+    _ftg2.inbox = [{"peer": "5151", "hash": "h5", "id": 70, "name": "Акмаль",
+                    "text": "Шохрух, да, актуально. Ул. Навои 5, этаж 4 из 9, депозит 1 месяц", "photos": []}]
+    _out._STATE["poll_at"] = 0
+    with mock.patch.dict(cg._BIZ_STORE, {"store": _S["79"]}):
+        _out.tick(_C["79"], _S["79"])
+    assert any(f"ответил по варианту #{_SO['79']}" in x for x in _to("79"))
+    _b = [x for x in _to("80") if "уже отвечал" in x]
+    assert _b and "Навои 5" in _b[-1] and "Шохрух" not in _b[-1] and "клиент" in _b[-1], _to("80")
+    # третий клиент спросил позже — ответ сразу, продавцу не пишем
+    _ask("81")
+    assert any("уже отвечал" in x and "Навои 5" in x for x in _to("81")) and len(_ftg2.sent) == 1
+    assert cg.get_offer(_S["81"], _SO["81"])["extra"].get("shared_ans")
+    # попросил уточнить ещё раз — теперь Ra'no пишет продавцу сама
+    _ask("81")
+    assert any(j["chat"] == "81" for j in _S["79"].get_kv("ra_queue") or [])
+    # продавец молчит сутки — ждавшие вместе получают готовый текст
+    _S["79"].set_kv("seller_answers", {})
+    _S["79"].set_kv("seller_asks", {"uybor:701": {"chat": "81", "oid": _SO["81"], "at": time.time() - 25 * 3600}})
+    _S["79"].set_kv("seller_waits", {"uybor:701": [{"chat": "82", "oid": _SO["82"], "at": time.time() - 25 * 3600}]})
+    _out.release_stale(_C["79"], _S["79"])
+    assert any("молчит сутки" in x for x in _to("82")) and any("Написать продавцу" in x for x in _to("82"))
+for _p in _sp:
+    _p.unlink(missing_ok=True)
+print("OK — один ответ продавца — всем клиентам: ждут вместе, свежий ответ сразу, без имени первого клиента")

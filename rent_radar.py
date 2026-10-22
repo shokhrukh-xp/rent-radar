@@ -3633,8 +3633,6 @@ def handle_broker_message(cfg, store, msg, key=None, quiet=False):
             o_ = concierge.get_offer(store, int(asked["oid"])) or {}
             if text and not photos and concierge.is_site_offer(o_):   # объявление с сайта — ответ сразу клиенту
                 concierge.attach_answer(cfg, store, int(asked["oid"]), text)
-                if k.isdigit() and not msg.get("_acked"):              # продавец пришёл в бота по SMS
-                    tg_call(cfg, "sendMessage", {"chat_id": k, "text": "Rahmat, передала клиенту! 🙌 / Mijozga yetkazdim!"})
                 return
             concierge.merge_into_offer(store, cfg, int(asked["oid"]), text, photos)
             pend = store.get_kv("pending_offers") or {}
@@ -3648,19 +3646,6 @@ def handle_broker_message(cfg, store, msg, key=None, quiet=False):
             log.warning("не сохранил вариант из чата клиента %s: %s", chat_id, e)
         return
 
-    if msg.get("_seller"):                   # продавец пришёл в бота по ссылке из SMS — сразу вопросы по объявлению
-        oid_s = int(msg["_seller"])
-        o_s = concierge.get_offer(store, oid_s)
-        if o_s:
-            concierge.link_manual_ask(store, oid_s, str(chat_id))
-            deal_s = (concierge.get_anketa(store).get("ans") or {}).get("deal", "rent")
-            concierge.broker_send(cfg, store, chat_id, concierge.seller_question(o_s, cfg, deal_s))
-            log.info("продавец варианта #%s пришёл по SMS", oid_s)
-        return
-    asked_s = (store.get_kv("biz_asked") or {}).get(str(chat_id)) or {}
-    if asked_s.get("oid") and time.time() - asked_s.get("at", 0) < 72 * 3600 and (text or photos) \
-            and not text.startswith("/"):    # продавец из SMS отвечает — к его объявлению
-        return handle_broker_message(cfg, store, msg, key=str(chat_id), quiet=True)
     if msg.get("_welcomed"):                 # воркер уже познакомил маклера с запросом
         store.set_kv(f"welcomed:{chat_id}", time.time())
         return

@@ -809,8 +809,9 @@ def loc_from_answer(cfg, store, o, text) -> str:
     return f"📍 По ответу продавца — {rr.escape_html(reason)}: не подходит."
 
 
-def attach_answer(cfg, store, oid, text):
-    """Ответ маклера на «уточните детали» — к своему варианту, а не новой карточкой."""
+def attach_answer(cfg, store, oid, text, shared=None):
+    """Ответ маклера на «уточните детали» — к своему варианту, а не новой карточкой.
+    shared — когда продавец ответил другому клиенту (время ответа): тот же ответ, без нового вопроса продавцу."""
     rr = _rr()
     o = get_offer(store, oid)
     if not o:
@@ -835,11 +836,29 @@ def attach_answer(cfg, store, oid, text):
         if loc and not loc.startswith("📍 Точного"):
             _set_extra(store, oid, loc_ask=None)
     o = get_offer(store, oid)
+    if shared is None and is_site_offer(o):      # ответ по объявлению пригодится и другим клиентам
+        import outreach
+        try:
+            outreach.on_answer(cfg, store, o, text)
+        except Exception as e:
+            rr.log.warning("[ra] общий ответ продавца: %s", e)
+    if shared is not None:
+        mins = max(0, int((time.time() - float(shared)) // 60))
+        ago = "только что" if mins < 5 else f"{mins} мин назад" if mins < 60 else f"{mins // 60} ч назад"
+        head = (f"💬 <b>Продавец уже отвечал по варианту #{oid}</b> ({ago}) — другому клиенту Ra'no, "
+                "поэтому не беспокою его ещё раз:\n\n")
+        tail = "\n\nНужно уточнить что-то ещё — напишите «уточни у продавца», спрошу сама."
+    else:
+        head = f"💬 <b>{'Продавец' if is_site_offer(o) else 'Маклер'} ответил по варианту #{oid}</b> — принесла:\n\n"
+        tail = ""
+    if shared is not None:
+        _set_extra(store, oid, shared_ans=datetime.now(timezone.utc).isoformat())
+        o = get_offer(store, oid)
     rr.tg_call(cfg, "sendMessage", {
         "chat_id": cfg["telegram_chat_id"], "parse_mode": "HTML",
-        "text": f"💬 <b>{'Продавец' if is_site_offer(o) else 'Маклер'} ответил по варианту #{oid}</b> — принесла:\n\n"
-                f"{rr.escape_html(__import__('i18n').quote_for_client(cfg, (text or '').strip()[:800]))}\n\n"
-                + (loc + "\n\n" if loc else "") + offer_card(store, cfg, o)[:1500],
+        "text": head
+                + f"{rr.escape_html(__import__('i18n').quote_for_client(cfg, (text or '').strip()[:800]))}\n\n"
+                + (loc + "\n\n" if loc else "") + offer_card(store, cfg, o)[:1500] + tail,
         "reply_markup": json.dumps({"inline_keyboard": [[
             {"text": "📂 Карточка", "callback_data": f"s:o:{oid}"},
             {"text": "📋 Шортлист", "callback_data": "s:show"}]]}, ensure_ascii=False)})
@@ -1251,8 +1270,8 @@ def decline_text(cfg, reason=""):
 
 
 def contact_chat(o) -> str:
-    """Куда писать по варианту: маклер в боте, чат клиента (Telegram для бизнеса, biz:<чат>), чат продавца с
-    аккаунтом Ra'no (ra:<id>) или продавец, пришедший в бота по SMS. Пересланным — некуда («»)."""
+    """Куда писать по варианту: маклер в боте, чат клиента (Telegram для бизнеса, biz:<чат>) или чат продавца с
+    аккаунтом Ra'no (ra:<id>). Пересланным — некуда («»)."""
     for c in (str(o.get("broker_chat") or ""), str((o.get("extra") or {}).get("chat") or "")):
         if c.lstrip("-").isdigit() or c.startswith("ra:") or (c.startswith("biz:") and biz_ready_store(None)):
             return c
@@ -2086,7 +2105,7 @@ def link_manual_ask(store, oid, chat_key):
     store.conn.commit()
     _set_extra(store, oid, chat=str(chat_key))
     store.set_kv("manual_asks", [x for x in (store.get_kv("manual_asks") or []) if x.get("oid") != oid])
-    if str(chat_key).startswith(("biz:", "ra:")) or str(chat_key).isdigit():   # ответ узнаем как «ответ на вопросы»
+    if str(chat_key).startswith(("biz:", "ra:")):   # ответ в этом чате узнаем как «ответ на наши вопросы»
         ba = store.get_kv("biz_asked") or {}
         ba[chat_key] = {"oid": oid, "at": time.time()}
         store.set_kv("biz_asked", ba)
@@ -2172,8 +2191,24 @@ def request_details(cfg, store, oids=None):
                               "А если кто-то промолчит сутки — подскажу, напомнить ли.")
     import outreach
     taken = 0
+    me = str(cfg["telegram_chat_id"])
     for o in manual:
-        if is_site_offer(o) and outreach.can_take(o):   # Ra'no напишет продавцу сама — со своего аккаунта / SMS
+        if is_site_offer(o) and not (o.get("extra") or {}).get("shared_ans"):
+            sa = outreach.shared_answer(store, o, me)
+            if sa:                                   # продавец недавно отвечал другому клиенту — тот же ответ
+                attach_answer(cfg, store, o["oid"], sa["text"], shared=sa["at"])
+                taken += 1
+                continue
+            if outreach.pending_elsewhere(store, o, me):   # уже спрашиваем по просьбе другого — ждём вместе
+                outreach.add_waiter(store, o, me)
+                store.conn.execute("UPDATE broker_offers SET status='asked', asked_at=? WHERE oid=?",
+                                   (datetime.now(timezone.utc).isoformat(), o["oid"]))
+                store.conn.commit()
+                rr.send_telegram(cfg, f"📨 Этому продавцу я уже написала по просьбе другого клиента — как ответит, "
+                                      f"принесу ответ и к вашему варианту #{o['oid']}.")
+                taken += 1
+                continue
+        if is_site_offer(o) and outreach.can_take(o):   # Ra'no напишет продавцу сама — со своего аккаунта
             outreach.enqueue(cfg, store, o, fill_client(rr.escape_html(seller_question(o, cfg, deal)), store,
                                                          html=True))
             taken += 1

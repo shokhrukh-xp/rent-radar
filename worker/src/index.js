@@ -2226,28 +2226,6 @@ export async function handleUpdate(env, upd) {
     await say(env, chat, ABOUT[L0] + `\n\n${ORIGIN || ""}/about?lang=${L0}`, { _noTr: true });
     return "about";
   }
-  if (!client) {
-    // продавец по ссылке из SMS Ra'no (start=s<клиент>-<вариант>, base36): чей он и по какому объявлению — Python
-    // задаст вопросы сам; дальше его сообщения — тому же клиенту, без общих приветствий маклерам
-    const ss = /^\/start(?:@\w+)?\s+s([0-9a-z]{1,13})-([0-9a-z]{1,10})$/i.exec(String(msg.text || "").trim());
-    if (ss) {
-      const cid = String(parseInt(ss[1], 36));
-      if (cid === owner || (await userStatus(env, cid)) === "active") {
-        await kvSet(env, "seller_of:" + chat, { c: cid, at: Date.now() });
-        await kvSet(env, "broker_of:" + chat, cid);
-        msg._client = cid;
-        msg._seller = parseInt(ss[2], 36);
-        await queueAndWake(env, upd);
-        return "seller";
-      }
-    }
-    const so = await kvGet(env, "seller_of:" + chat, null);
-    if (so && Date.now() - (so.at || 0) < 30 * 864e5) {
-      msg._client = so.c;
-      await queueAndWake(env, upd);
-      return "seller";
-    }
-  }
   if (!client && isMulti(env)) {
     // много пользователей: Start без метки маклера — новый клиент (или лист ожидания); с меткой m<id> — маклер
     // клиента <id> (ссылка из его запроса). Убранных и ждущих не обслуживаем.

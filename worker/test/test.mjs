@@ -1007,19 +1007,3 @@ console.log("OK — лимит модели: предупреждение вла
 }
 console.log("OK — номер продавца ответом на карточку — к этому объявлению");
 
-// ── продавец по ссылке из SMS Ra'no: чей он и по какому объявлению — в Python, без общих приветствий маклерам
-{
-  qq = await (await svc("/svc/updates?after=0")).json();
-  const base = qq.result.length ? qq.result.at(-1).update_id : 0;
-  const before = sent.length;
-  const code = "s" + Number(OWNER).toString(36) + "-" + (7).toString(36);
-  assert.equal(await handleUpdate(env, msg("/start " + code, "88001")), "seller");
-  assert.equal(await handleUpdate(env, msg("Да, свободна", "88001")), "seller");
-  const q = await (await svc(`/svc/updates?after=${base}`)).json();
-  const mine = q.result.filter(u => String(u.message?.chat?.id) === "88001");
-  assert.equal(mine.length, 2);
-  assert.equal(mine[0].message._seller, 7);
-  assert.ok(mine.every(u => String(u.message._client) === String(OWNER)));
-  assert.equal(sent.slice(before).filter(x => String(x.chat_id) === "88001").length, 0);   // приветствие маклеру не ушло
-}
-console.log("OK — продавец по ссылке из SMS — к своему клиенту и объявлению");

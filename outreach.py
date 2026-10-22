@@ -1,15 +1,19 @@
-"""Ra'no пишет продавцу первой — со своего Telegram-аккаунта, а если продавца в Telegram нет — SMS со ссылкой на бота.
+"""Ra'no пишет продавцу первой — со своего Telegram-аккаунта; ответ продавца по объявлению — всем клиентам.
 
 Бот Telegram не может начать чат с незнакомым человеком, поэтому у Ra'no есть отдельный аккаунт
 («Ra'no · AI-помощник», своя SIM). Клиент нажал «Уточнить» по объявлению — это и есть его просьба написать продавцу:
 Ra'no находит продавца по номеру из объявления, пишет ему от себя (представляется ИИ-помощником клиента), читает
-ответы и приносит их к карточке варианта. Продавца в Telegram нет — SMS (Eskiz) со ссылкой «ответить в боте».
+ответы и приносит их к карточке варианта. Продавца в Telegram нет — прежний путь: готовый текст, клиент отправит сам.
+
+Одно объявление смотрят многие клиенты: свежий ответ продавца (актуально ли, адрес, условия) получает каждый, кто
+спросит про это объявление в ближайшие ANSWER_HOURS, — без нового сообщения продавцу; Ra'no уже ждёт его ответа —
+следующие клиенты ждут вместе с первым. Имя клиента, которому отвечал продавец, из текста убираем.
 
 Бережно, чтобы аккаунт не сочли спамом: только по нажатию клиента, одно сообщение на объявление,
 не больше NEW_PER_DAY новых чатов в день на всех, пауза GAP между ними, только с 9 до 21 по Ташкенту.
 Telegram ограничил аккаунт (PeerFlood) — пауза на сутки, владельцу сообщение, клиентам — прежний путь «отправьте сами».
 
-Ключи (сессия аккаунта, пароль Eskiz) — только в STATE_DIR/agent/*.json (права 600, в бэкап не попадают).
+Ключи (сессия аккаунта) — только в STATE_DIR/agent/*.json (права 600, в бэкап не попадают).
 Записывает их владелец сам: tools/agent_setup.py. Без них модуль молчит и всё работает как раньше.
 """
 import json
@@ -26,17 +30,16 @@ log = logging.getLogger("rent-radar")
 TZ = timezone(timedelta(hours=5))
 NEW_PER_DAY = 15            # новых чатов в день с аккаунта Ra'no — на всех клиентов
 PER_CLIENT_DAY = 5          # и на одного клиента
-SMS_PER_DAY = 10
 GAP = 90                    # секунд между первыми сообщениями незнакомым
 HOURS = (9, 21)             # пишем незнакомым только днём
 POLL_EVERY = 20             # как часто смотреть новые ответы
 PEER_DAYS = 30              # сколько помним, чей это продавец
 UNKNOWN_NOTE_DAYS = 30
-SMS_TEXT = ("Ra'no (AI-yordamchi): e'loningiz bo'yicha mijozimning savoli bor / vopros po vashemu obyavleniyu. "
-            "Javob: t.me/{bot}?start={code}")
+ANSWER_HOURS = 48           # сколько ответ продавца годится другим клиентам
+WAIT_HOURS = 24             # сколько ждём ответа продавца вместе
 
-ADAPTER = {"tg": None, "sms": None}       # тесты подставляют свои
-_STATE = {"tg": None, "tg_err": "", "tg_next": 0.0, "poll_at": 0.0, "sms": None}
+ADAPTER = {"tg": None}       # тесты подставляют свои
+_STATE = {"tg": None, "tg_err": "", "tg_next": 0.0, "poll_at": 0.0}
 
 
 def _rr():
@@ -73,13 +76,6 @@ def tg_ready() -> bool:
     return bool(c.get("session") and c.get("api_id") and c.get("api_hash"))
 
 
-def sms_ready() -> bool:
-    if ADAPTER["sms"] is not None:
-        return True
-    c = _conf("sms") or {}
-    return bool(c.get("email") and c.get("password"))
-
-
 def _shared(store):
     import tenants
     return tenants.shared_store(store)
@@ -97,7 +93,7 @@ def _day(sh, now=None):
     d = _now_local(now).strftime("%Y-%m-%d")
     b = sh.get_kv("ra_day") or {}
     if b.get("d") != d:
-        b = {"d": d, "n": 0, "sms": 0, "per": {}}
+        b = {"d": d, "n": 0, "per": {}}
     return b
 
 
@@ -118,7 +114,7 @@ def phones_of(o):
 
 def can_take(o) -> bool:
     """Ra'no может написать продавцу сама: есть номер и есть чем писать."""
-    return bool(phones_of(o)) and (tg_ready() or sms_ready())
+    return bool(phones_of(o)) and tg_ready()
 
 
 # ----------------------------------------------------------------- очередь --
@@ -133,6 +129,7 @@ def enqueue(cfg, store, o, text) -> str:
     q.append({"chat": chat, "oid": o["oid"], "phones": phones_of(o), "text": text, "at": time.time(),
               "tries": 0})
     sh.set_kv("ra_queue", q)
+    note_ask(store, o, chat)
     rr = _rr()
     when = ""
     b = _day(sh)
@@ -150,9 +147,11 @@ def _tenant(cfg, store, chat):
     import tenants
     from contextlib import nullcontext
     t_ = tenants.get(chat)
-    if t_ is None or t_.owner or str(chat) == str(cfg["telegram_chat_id"]):
+    if t_ is not None:
+        return t_.cfg, t_.store, tenants.ctx(t_)
+    if str(chat) == str(cfg["telegram_chat_id"]):
         return cfg, store, nullcontext()
-    return t_.cfg, t_.store, tenants.ctx(t_)
+    return None, None, None                      # клиента больше нет (убрали) — задачу бросаем
 
 
 def _alert(cfg, sh, key, text, every=6 * 3600):
@@ -174,6 +173,7 @@ def _fallback(cfg, store, job, why=""):
     if why:
         _rr().send_telegram(cfg, f"🙈 Продавцу варианта #{o['oid']} написать не получилось ({why}).")
     concierge.manual_ask(cfg, store, o, deal)
+    release(cfg, store, o)                       # кто ждал ответа этого продавца вместе — тоже пишет сам
 
 
 # ----------------------------------------------------------------- адаптеры --
@@ -256,38 +256,6 @@ class TelethonAdapter:
         return out
 
 
-class EskizSMS:
-    BASE = "https://notify.eskiz.uz/api"
-
-    def __init__(self, conf):
-        self.conf, self.token = conf, None
-
-    def _login(self):
-        import requests
-        r = requests.post(self.BASE + "/auth/login", data={"email": self.conf["email"],
-                                                           "password": self.conf["password"]}, timeout=20)
-        r.raise_for_status()
-        self.token = (r.json().get("data") or {}).get("token")
-        if not self.token:
-            raise RuntimeError("Eskiz: нет токена")
-
-    def send(self, phone, text):
-        import requests
-        for attempt in (0, 1):
-            if not self.token:
-                self._login()
-            r = requests.post(self.BASE + "/message/sms/send", timeout=20,
-                              headers={"Authorization": f"Bearer {self.token}"},
-                              data={"mobile_phone": phone, "message": text, "from": self.conf.get("from") or "4546"})
-            if r.status_code == 401 and attempt == 0:
-                self.token = None
-                continue
-            if r.status_code != 200:
-                raise RuntimeError(f"Eskiz {r.status_code}: {r.text[:200]}")
-            return (r.json() or {}).get("id") or True
-        return None
-
-
 def _tg(cfg, sh):
     if ADAPTER["tg"] is not None:
         return ADAPTER["tg"]
@@ -309,14 +277,6 @@ def _tg(cfg, sh):
         _STATE["tg_next"] = time.time() + 600
         log.warning("[ra] аккаунт не подключился: %s", e)
     return None
-
-
-def _sms():
-    if ADAPTER["sms"] is not None:
-        return ADAPTER["sms"]
-    if _STATE["sms"] is None and sms_ready():
-        _STATE["sms"] = EskizSMS(_conf("sms"))
-    return _STATE["sms"]
 
 
 def _ban_like(e) -> str:
@@ -344,7 +304,7 @@ def _drop_tg():
 
 def tick(cfg, store, now=None):
     """Из основного цикла: отправить очередное первое сообщение и забрать ответы продавцов."""
-    if not (tg_ready() or sms_ready()):
+    if not tg_ready():
         return
     now = now or time.time()
     sh = _shared(store)
@@ -352,6 +312,10 @@ def tick(cfg, store, now=None):
         _send_next(cfg, sh, now)
     except Exception as e:
         log.warning("[ra] отправка: %s", e)
+    try:
+        release_stale(cfg, sh, now)
+    except Exception as e:
+        log.warning("[ra] ожидание ответа: %s", e)
     if now - _STATE["poll_at"] >= POLL_EVERY:
         _STATE["poll_at"] = now
         try:
@@ -376,6 +340,9 @@ def _send_next(cfg, sh, now):
         return
     q = [j for j in q if j is not job]
     tcfg, tstore, ctx = _tenant(cfg, sh, job["chat"])
+    if tcfg is None:
+        sh.set_kv("ra_queue", q)
+        return
     with ctx:
         res = _deliver(tcfg, tstore, sh, job, b, now)
     if res == "retry":
@@ -388,6 +355,8 @@ def _send_next(cfg, sh, now):
     elif res == "pause":
         for j in [job] + q:                  # аккаунт ограничили — всем, кто ждёт, прежний путь
             c2, s2, x2 = _tenant(cfg, sh, j["chat"])
+            if c2 is None:
+                continue
             with x2:
                 _fallback(c2, s2, j)
         q = []
@@ -396,7 +365,7 @@ def _send_next(cfg, sh, now):
 
 
 def _deliver(cfg, store, sh, job, b, now):
-    """Одна задача: Telegram по номеру → SMS → «отправьте сами». Возвращает ok / retry / pause / manual."""
+    """Одна задача: Telegram по номеру → «отправьте сами». Возвращает ok / retry / pause / manual."""
     import concierge
     rr = _rr()
     o = concierge.get_offer(store, job["oid"])
@@ -442,38 +411,8 @@ def _deliver(cfg, store, sh, job, b, now):
                                   "принесу сюда.")
             log.info("[ra] написала продавцу #%s (клиент %s)", o["oid"], job["chat"])
             return "ok"
-    sms = _sms()
-    bd = _day(sh, now)
-    if sms is not None and job["phones"] and bd.get("sms", 0) < SMS_PER_DAY:
-        code = "s" + _b36(int(job["chat"])) + "-" + _b36(int(o["oid"]))
-        text = SMS_TEXT.format(bot=cfg.get("bot_username") or "rano_smart_bot", code=code)
-        try:
-            sms.send(job["phones"][0], text)
-        except Exception as e:
-            log.warning("[ra] SMS продавцу #%s: %s", o["oid"], e)
-            _alert(cfg, sh, "sms", f"⚠️ SMS продавцу не ушло: {str(e)[:200]}", 24 * 3600)
-        else:
-            b["sms"] = b.get("sms", 0) + 1
-            concierge._set_extra(store, o["oid"], sms_at=datetime.now(timezone.utc).isoformat())
-            store.conn.execute("UPDATE broker_offers SET status='asked', asked_at=? WHERE oid=?",
-                               (datetime.now(timezone.utc).isoformat(), o["oid"]))
-            store.conn.commit()
-            who = rr.fmt_phone("+" + job["phones"][0])
-            rr.send_telegram(cfg, f"📨 Продавца варианта #{o['oid']} нет в Telegram — отправила ему SMS со ссылкой "
-                                  f"на меня. Ответит — принесу сюда. Если не ответит до завтра, проще позвонить: 📞 {who}")
-            return "ok"
     _fallback(cfg, store, job, "его нет в Telegram" if tg is not None else "")
     return "manual"
-
-
-def _b36(n: int) -> str:
-    s, n = "", int(n)
-    if n == 0:
-        return "0"
-    while n:
-        n, r = divmod(n, 36)
-        s = "0123456789abcdefghijklmnopqrstuvwxyz"[r] + s
-    return s
 
 
 # ----------------------------------------------------------------- ответы --
@@ -497,6 +436,8 @@ def poll(cfg, store, sh=None):
             _unknown(cfg, sh, tg, m)
             continue
         tcfg, tstore, ctx = _tenant(cfg, sh, p["chat"])
+        if tcfg is None:
+            continue
         with ctx:
             try:
                 handle_reply(tcfg, tstore, m, int(p["oid"]))
@@ -592,9 +533,165 @@ def send_now(cfg, store, key, text):
 def status(store) -> str:
     sh = _shared(store)
     b = _day(sh)
-    parts = [f"аккаунт: {'есть' if tg_ready() else 'нет'}", f"SMS: {'есть' if sms_ready() else 'нет'}",
-             f"сегодня новых чатов {b['n']}/{NEW_PER_DAY}, SMS {b.get('sms', 0)}/{SMS_PER_DAY}",
+    parts = [f"аккаунт: {'есть' if tg_ready() else 'нет'}", f"сегодня новых чатов {b['n']}/{NEW_PER_DAY}",
              f"в очереди {len(sh.get_kv('ra_queue') or [])}"]
     if paused(sh):
         parts.append(f"пауза ещё {int(paused(sh) // 60)} мин")
     return "; ".join(parts)
+
+
+# ------------------------------------------------- один ответ продавца — всем клиентам --
+
+def listing_key(o) -> str:
+    """Ключ объявления, общий для всех клиентов (uybor:123); у вариантов от маклеров — «»."""
+    c = str(o.get("broker_chat") or "")
+    return c[5:] if c.startswith("site:") else ""
+
+
+def shared_answer(store, o, chat, now=None):
+    """Свежий ответ продавца по этому объявлению — другому клиенту (не этому)."""
+    k = listing_key(o)
+    if not k:
+        return None
+    a = (_shared(store).get_kv("seller_answers") or {}).get(k)
+    if not a or a.get("chat") == str(chat) or (now or time.time()) - a.get("at", 0) > ANSWER_HOURS * 3600:
+        return None
+    return a
+
+
+def note_ask(store, o, chat):
+    """Ra'no взялась спросить продавца — остальные клиенты подождут этого ответа, а не напишут ему ещё раз."""
+    k = listing_key(o)
+    if not k:
+        return
+    sh = _shared(store)
+    asks = sh.get_kv("seller_asks") or {}
+    asks[k] = {"chat": str(chat), "oid": o["oid"], "at": time.time()}
+    sh.set_kv("seller_asks", _prune(asks))
+
+
+def pending_elsewhere(store, o, chat, now=None):
+    k = listing_key(o)
+    if not k:
+        return None
+    a = (_shared(store).get_kv("seller_asks") or {}).get(k)
+    if not a or a.get("chat") == str(chat) or (now or time.time()) - a.get("at", 0) > WAIT_HOURS * 3600:
+        return None
+    return a
+
+
+def add_waiter(store, o, chat):
+    k = listing_key(o)
+    sh = _shared(store)
+    w = sh.get_kv("seller_waits") or {}
+    lst = [x for x in w.get(k) or [] if x.get("chat") != str(chat)]
+    lst.append({"chat": str(chat), "oid": o["oid"], "at": time.time()})
+    w[k] = lst[-20:]
+    sh.set_kv("seller_waits", _prune(w, key=lambda v: max((x.get("at", 0) for x in v), default=0)))
+
+
+def _prune(d, key=None, keep=300):
+    if len(d) <= keep:
+        return d
+    key = key or (lambda v: v.get("at", 0))
+    return dict(sorted(d.items(), key=lambda kv: key(kv[1]))[-keep:])
+
+
+def _scrub(text, store):
+    """Из ответа продавца — имя и ник клиента, которому он отвечал: другим клиентам их видеть незачем."""
+    import concierge
+    w = concierge.client_who(store)
+    for x in (w.get("username") and "@" + w["username"], w.get("name")):
+        if x and len(x) >= 2:
+            text = re.sub(r"(?<!\w)" + re.escape(x) + r"(?!\w)", "клиент", text, flags=re.I)
+    return text
+
+
+def on_answer(cfg, store, o, text):
+    """Продавец ответил по объявлению (одному из клиентов): запомнить для всех и отдать тем, кто ждёт."""
+    k = listing_key(o)
+    if not k or not (text or "").strip():
+        return 0
+    sh = _shared(store)
+    chat = str(cfg["telegram_chat_id"])
+    now = time.time()
+    clean = _scrub(text.strip(), store)
+    ans = sh.get_kv("seller_answers") or {}
+    prev = ans.get(k) or {}
+    if prev.get("chat") == chat and now - prev.get("at", 0) < 3600:   # ответ в несколько сообщений — вместе
+        clean = (prev.get("text", "") + "\n" + clean)[-1500:]
+    ans[k] = {"at": now, "text": clean[-1500:], "chat": chat}
+    sh.set_kv("seller_answers", _prune(ans))
+    asks = sh.get_kv("seller_asks") or {}
+    if k in asks:
+        asks.pop(k)
+        sh.set_kv("seller_asks", asks)
+    w = sh.get_kv("seller_waits") or {}
+    waiting = [x for x in w.pop(k, []) if x.get("chat") != chat]
+    sh.set_kv("seller_waits", w)
+    import concierge
+    n = 0
+    for x in waiting:
+        c2, s2, x2 = _tenant(cfg, sh, x["chat"])
+        if c2 is None:
+            continue
+        with x2:
+            try:
+                concierge.attach_answer(c2, s2, int(x["oid"]), clean, shared=now)
+                n += 1
+            except Exception as e:
+                log.warning("[ra] общий ответ клиенту %s: %s", x["chat"], e)
+    return n
+
+
+def release(cfg, store, o):
+    """Ответа не будет (Ra'no не смогла написать) — ждавшим этого продавца: готовый текст, отправят сами."""
+    k = listing_key(o)
+    if not k:
+        return
+    sh = _shared(store)
+    asks = sh.get_kv("seller_asks") or {}
+    if asks.pop(k, None) is not None:
+        sh.set_kv("seller_asks", asks)
+    w = sh.get_kv("seller_waits") or {}
+    waiting = w.pop(k, [])
+    if not waiting:
+        return
+    sh.set_kv("seller_waits", w)
+    import concierge
+    for x in waiting:
+        c2, s2, x2 = _tenant(cfg, sh, x["chat"])
+        if c2 is None:
+            continue
+        with x2:
+            o2 = concierge.get_offer(s2, int(x["oid"]))
+            if o2:
+                deal = (concierge.get_anketa(s2).get("ans") or {}).get("deal", "rent")
+                concierge.manual_ask(c2, s2, o2, deal)
+
+
+def release_stale(cfg, sh, now=None):
+    """Продавец молчит сутки — ждавшие вместе получают готовый текст и могут написать сами."""
+    now = now or time.time()
+    w = sh.get_kv("seller_waits") or {}
+    asks = sh.get_kv("seller_asks") or {}
+    import concierge
+    for k in list(w):
+        a = asks.get(k) or {}
+        if a and now - a.get("at", 0) <= WAIT_HOURS * 3600:
+            continue
+        waiting = w.pop(k)
+        asks.pop(k, None)
+        sh.set_kv("seller_waits", w)
+        sh.set_kv("seller_asks", asks)
+        for x in waiting:
+            c2, s2, x2 = _tenant(cfg, sh, x["chat"])
+            if c2 is None:
+                continue
+            with x2:
+                o2 = concierge.get_offer(s2, int(x["oid"]))
+                if o2:
+                    _rr().send_telegram(c2, f"⏳ Продавец варианта #{o2['oid']} молчит сутки — вот текст, "
+                                            "можно написать ему самим.")
+                    deal = (concierge.get_anketa(s2).get("ans") or {}).get("deal", "rent")
+                    concierge.manual_ask(c2, s2, o2, deal)
