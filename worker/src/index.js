@@ -326,7 +326,19 @@ export async function gemini(env, system, userText, opts = {}) {
       if (r.status !== 400) break;                          // 400 — пробуем другой формат схемы
     }
   }
+  await aiDownAlert(env, lastErr).catch(() => null);
   throw new Error(lastErr || "Gemini недоступен");
+}
+/** Модель не отвечает из-за лимита/оплаты — сказать владельцу (не чаще раза в 3 часа), иначе бот молча «запинается». */
+async function aiDownAlert(env, err) {
+  if (!env.OWNER_CHAT || !/spend|quota|exceeded|billing|exhausted|RESOURCE_EXHAUSTED|API key/i.test(String(err || ""))) return;
+  const last = await kvGet(env, "ai_down_at", 0);
+  if (Date.now() - last < 3 * 3600e3) return;
+  await kvSet(env, "ai_down_at", Date.now());
+  await tg(env, "sendMessage", { chat_id: env.OWNER_CHAT, _noTr: true, parse_mode: "HTML",
+    text: "⚠️ <b>Модель Gemini не отвечает</b> — анкета, ответы и переводы для клиентов не работают.\n" +
+      `Причина: <code>${esc(String(err).slice(0, 200))}</code>\n` +
+      "Проверьте лимит расходов и оплату: https://ai.studio/spend" });
 }
 
 // ───────────────────────────── перевод для клиента (uz/en) ─────────────────────────────
@@ -2564,11 +2576,13 @@ export default {
         return json({ ok: r.ok, models: (d.models || []).map(m => ({ name: m.name, methods: m.supportedGenerationMethods })) });
       }
       if (p === "/svc/image" && req.method === "POST") {   // картинка по описанию (бренд: аватар, логотип) — PNG в base64
+        // только отдельным ключом: картинки дорогие и не должны съедать лимит, на котором живёт бот
+        if (!env.GEMINI_IMAGE_KEY) return json({ ok: false, error: "нет GEMINI_IMAGE_KEY — картинки только отдельным ключом" }, 400);
         const b = await req.json().catch(() => ({}));
         if (!b.prompt || !b.model) return json({ ok: false, error: "prompt и model" }, 400);
         const m = String(b.model).replace(/^models\//, "");
         const base = `https://generativelanguage.googleapis.com/v1beta/models/${m}`;
-        const hdr = { "content-type": "application/json", "x-goog-api-key": env.GEMINI_KEY };
+        const hdr = { "content-type": "application/json", "x-goog-api-key": env.GEMINI_IMAGE_KEY };
         if (/^imagen/.test(m)) {
           const r = await fetch(base + ":predict", { method: "POST", headers: hdr, body: JSON.stringify({
             instances: [{ prompt: String(b.prompt) }], parameters: { sampleCount: Math.min(+b.n || 1, 4), aspectRatio: b.aspect || "1:1" } }) });

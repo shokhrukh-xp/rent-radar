@@ -968,3 +968,24 @@ console.log("OK — по приглашению: ждущий, который п
   await env.DB.prepare("DELETE FROM users").run(); W.resetUsersCache();
 }
 console.log("OK — бета: приглашения, знакомство и язык, поддержка, тарифы, оплата звёздами, отзыв, сводка, лимит модели");
+
+// ── модель упёрлась в лимит расходов — владельцу предупреждение (раз в 3 часа), картинки — только отдельным ключом
+{
+  geminiQueue.length = 0;
+  const before = sent.length;
+  const W = await import("../src/index.js");
+  await env.DB.prepare("DELETE FROM kv WHERE k='ai_down_at'").run();
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (url, opt) => String(url).includes("generativelanguage")
+    ? new Response(JSON.stringify({ error: { message: "Your project has exceeded its monthly spending cap." } }), { status: 429 })
+    : realFetch(url, opt);
+  await W.translateText(env, "Привет! Сегодня нашла для вас три новые квартиры в Мирабаде.", "en");
+  await W.translateText(env, "Привет! Сегодня нашла для вас ещё две квартиры в Юнусабаде.", "en");
+  globalThis.fetch = realFetch;
+  const alerts = sent.slice(before).filter(x => String(x.chat_id) === OWNER && /Gemini не отвечает/.test(x.text || ""));
+  assert.equal(alerts.length, 1);
+  const r = await worker.fetch(new Request("https://w.example/svc/image", { method: "POST", headers: { "x-svc": "svc" },
+    body: JSON.stringify({ model: "m", prompt: "p" }) }), env, { waitUntil() {} });
+  assert.equal(r.status, 400);
+}
+console.log("OK — лимит модели: предупреждение владельцу; картинки не тратят ключ бота");
