@@ -27,6 +27,23 @@ from difflib import SequenceMatcher
 from pathlib import Path
 
 import requests
+import socket
+
+_getaddrinfo = socket.getaddrinfo
+
+
+def _getaddrinfo_retry(*a, **kw):
+    """DNS на сервере иногда отвечает «Temporary failure» (десяток раз в сутки) — две повторные попытки."""
+    for i in range(3):
+        try:
+            return _getaddrinfo(*a, **kw)
+        except socket.gaierror as e:
+            if e.errno != socket.EAI_AGAIN or i == 2:
+                raise
+            time.sleep(1 + i)
+
+
+socket.getaddrinfo = _getaddrinfo_retry
 
 import analyst
 import concierge
@@ -1922,8 +1939,8 @@ def effective_sale_cfg(cfg, store):
         ss["districts"] = list(DISTRICT_LIST)
     ss["mortgage"] = "ипотек" in str(ans.get("note") or "").lower() or ans.get("payment") == "mortgage"
     near_txt = ans.get("near")
-    if not near_txt and geo.is_center_query(str(ans.get("note") or "")):
-        near_txt = "центр"                    # раньше «ближе к центру» лежало в пожеланиях
+    if not near_txt and not ds and geo.is_center_query(str(ans.get("note") or "")):
+        near_txt = "центр"                    # раньше «ближе к центру» лежало в пожеланиях; районы, выбранные явно, важнее
     city = ans.get("city_other") if ans.get("city") == "other" and ans.get("city_other") else "Ташкент"
     ss["near"] = near_point(cfg, store, near_txt, ans.get("near_km"), city=city) if near_txt else None
     areas = (store.get_kv("settings") or {}).get("areas") or []

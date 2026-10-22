@@ -117,7 +117,8 @@ def fake_tg(cfg, method, payload, timeout=20, quiet=False):
 
 
 SCEN = "init"
-P = [mock.patch.object(rr, "tg_call", fake_tg), mock.patch.object(rr, "SALE_DB_PATH", WORK / "sale.db"),
+P = [mock.patch.object(rr, "tg_call", fake_tg),
+     mock.patch.object(rr, "tg_call_files", lambda cfg, m, data, files=None, **k: fake_tg(cfg, m, data)), mock.patch.object(rr, "SALE_DB_PATH", WORK / "sale.db"),
      mock.patch.object(rr, "send_photo_upload", lambda *a, **k: False),
      mock.patch.object(rr.time, "sleep", lambda *a: None), mock.patch.object(SS.time, "sleep", lambda *a: None)]
 for p in P:
@@ -398,6 +399,78 @@ def _():
     expect(ctx.get("last_pick") and ctx.get("shortlist") is not None, f"контекст: {list(ctx)}")
     print(f"   контекст для разговора: {len(json.dumps(ctx, ensure_ascii=False))} символов, "
           f"подборка {len(ctx.get('last_pick', []))}, шортлист {len(ctx.get('shortlist', []))}")
+
+
+def _site_offer():
+    rows = store.conn.execute("SELECT oid FROM broker_offers ORDER BY oid DESC").fetchall()
+    for (oid,) in rows:
+        o = cg.get_offer(store, oid)
+        if o and cg.is_site_offer(o):
+            return o
+    return None
+
+
+@scen("15. мини-приложение: снимок и действия")
+def _():
+    import miniapp
+    snap = miniapp.app_snapshot(cfg, store, settings)
+    json.dumps(snap, ensure_ascii=False)
+    offers = snap.get("offers") or []
+    expect(offers, "в снимке есть варианты")
+    kinds = {"liked", "think", "view", "answer", "wait", "saved"}
+    for x in offers:
+        expect(x.get("kind") in kinds, f"этап #{x.get('id')}: {x.get('kind')}")
+        expect(isinstance(x.get("photos"), list), f"фото #{x.get('id')} — список")
+        for f in ("answer", "check_note"):
+            if x.get(f) and re.search(r"(?:\+?998)?[\s-]?\(?\d{2}\)?[\s-]?\d{3}[\s-]?\d{2}[\s-]?\d{2}", str(x[f])):
+                ERRS.append(f"{SCEN}: телефон в поле {f} варианта #{x['id']}")
+    print(f"   снимок приложения: {len(json.dumps(snap, ensure_ascii=False)) // 1024} КБ, вариантов {len(offers)}, "
+          f"этапы {sorted({x['kind'] for x in offers})}")
+    o = _site_offer()
+    expect(o, "есть вариант с сайта")
+    if not o:
+        return
+    oid = o["oid"]
+    expect(miniapp.handle_action(cfg, store, settings, {"a": "think", "oid": oid}), "думаю")
+    expect(miniapp.handle_action(cfg, store, settings, {"a": "check", "oid": oid, "check": {"water": 2, "noise": 1},
+                                                        "text": "трубы старые"}), "чек-лист")
+    expect(miniapp.handle_action(cfg, store, settings, {"a": "work", "lat": 41.31, "lon": 69.28, "label": "офис"}), "работа")
+    expect(not miniapp.handle_action(cfg, store, settings, {"a": "work", "lat": 55.7, "lon": 37.6}), "работа вне Ташкента — нет")
+    expect(not miniapp.handle_action(cfg, store, settings, {"a": "like", "oid": 999999}), "чужой вариант — нет")
+    expect(miniapp.handle_action(cfg, store, settings, {"a": "owner_only", "on": True}), "только собственники")
+    n0 = len(MSGS)
+    expect(miniapp.handle_action(cfg, store, settings, {"a": "ask", "oid": oid}), "уточнить")
+    got = [r for r in MSGS[n0:]]
+    expect(got, "на «Уточнить» клиент получил сообщение (аккаунт Ra'no не подключён — текст отправить самим)")
+    snap2 = miniapp.app_snapshot(cfg, store, settings)
+    x = next((x for x in snap2["offers"] if x["id"] == oid), None)
+    expect(x and x.get("check", {}).get("water") == 2, "чек-лист виден в снимке")
+    expect((snap2.get("work") or {}).get("label") == "офис", "место работы в снимке")
+
+
+@scen("16. покупка: ипотека в карточке, документы один раз")
+def _():
+    a = cg.get_anketa(store)
+    keep = json.loads(json.dumps(a))
+    ans = a.setdefault("ans", {})
+    ans["deal"] = "buy"
+    cg.save_anketa(store, a)
+    try:
+        o = _site_offer()
+        if not o:
+            print("   нет варианта с сайта"); return
+        cg._set_extra(store, o["oid"], docs_sent=None)
+        n0 = len(MSGS)
+        cg.handle_offer_cb(f"o:seen:{o['oid']}:g", cfg, store)
+        cg.handle_offer_cb(f"o:seen:{o['oid']}:g", cfg, store)
+        docs = [r for r in MSGS[n0:] if "нотариус" in (r.get("plain") or r.get("text") or "").lower()]
+        expect(len(docs) == 1, f"чек-лист документов ровно один раз (было {len(docs)})")
+        card = cg.offer_card(store, cfg, cg.get_offer(store, o["oid"]))
+        text = card[0] if isinstance(card, tuple) else str(card)
+        check_html(text, "карточка покупки")
+        print("   ипотека в карточке:", "да" if "Ипотека" in text else "нет (нет данных о рынке/цене)")
+    finally:
+        cg.save_anketa(store, keep)
 
 
 for p in P:

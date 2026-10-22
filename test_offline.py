@@ -1736,6 +1736,12 @@ es.set_kv("anketa", {"ans": {"deal": "buy", "object": "flat", "rooms": [], "budg
                              "districts": [str(rr.DISTRICT_LIST.index("Чиланзар"))]}})
 ss = rr.effective_sale_cfg(base, es)["sale_search"]
 assert ss["districts"] == ["Чиланзар"] and ss["rooms"] == []
+# районы выбраны явно — «ближе к центру» в пожеланиях их не заменяет
+es.set_kv("anketa", {"ans": {"deal": "buy", "object": "flat", "rooms": ["2"], "budget": "50000",
+                             "districts": [str(rr.DISTRICT_LIST.index("Мирабад")), str(rr.DISTRICT_LIST.index("Юнусабад"))],
+                             "note": "ближе к центру, нужна ипотека"}})
+ss = rr.effective_sale_cfg(base, es)["sale_search"]
+assert set(ss["districts"]) == {"Мирабад", "Юнусабад"} and not ss["near"] and ss["mortgage"], ss["districts"]
 es.set_kv("anketa", {"ans": {"deal": "rent", "budget": "900"}})
 assert rr.effective_sale_cfg(base, es)["sale_search"]["enabled"] is False        # ищет аренду — продажу выключаем
 # ранжирование: сначала маклеры нужных районов
