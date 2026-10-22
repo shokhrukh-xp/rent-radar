@@ -837,7 +837,7 @@ def attach_answer(cfg, store, oid, text):
     o = get_offer(store, oid)
     rr.tg_call(cfg, "sendMessage", {
         "chat_id": cfg["telegram_chat_id"], "parse_mode": "HTML",
-        "text": f"💬 <b>Маклер ответил по варианту #{oid}</b> — принесла:\n\n"
+        "text": f"💬 <b>{'Продавец' if is_site_offer(o) else 'Маклер'} ответил по варианту #{oid}</b> — принесла:\n\n"
                 f"{rr.escape_html(__import__('i18n').quote_for_client(cfg, (text or '').strip()[:800]))}\n\n"
                 + (loc + "\n\n" if loc else "") + offer_card(store, cfg, o)[:1500],
         "reply_markup": json.dumps({"inline_keyboard": [[
@@ -2024,6 +2024,64 @@ def details_question(o, cfg=None, deal="rent", self_voice=False, helper=False):
     return "\n".join(q)
 
 
+MANUAL_ASK_DAYS = 7
+BIZ_HINT_EVERY = 3 * 86400
+
+
+def _ask_key(q: str) -> str:
+    """Строка-«отпечаток» вопроса продавцу: «По вашему объявлению об аренде (2-комн, Мирабад, $700):»."""
+    line = next((x for x in (q or "").split("\n") if x.startswith(("По вашему объявлению", "По варианту"))), "")
+    return re.sub(r"\s+", " ", line).strip().lower()
+
+
+def remember_manual_ask(store, oid, q):
+    """Вопрос продавцу отправит сам клиент — запоминаем, чтобы узнать этот чат и ответ (Telegram для бизнеса,
+    пересланный ответ) и приложить его к варианту, а не завести новый."""
+    key = _ask_key(q)
+    if not key:
+        return
+    since = time.time() - MANUAL_ASK_DAYS * 86400
+    lst = [x for x in (store.get_kv("manual_asks") or []) if x.get("at", 0) >= since and x.get("oid") != oid]
+    lst.append({"oid": oid, "key": key, "at": time.time()})
+    store.set_kv("manual_asks", lst[-20:])
+
+
+def match_manual_ask(store, text):
+    """Клиент отправил продавцу наш вопрос (видно по строке «По вашему объявлению …»): номер варианта или None."""
+    t_ = re.sub(r"\s+", " ", text or "").lower()
+    for x in reversed(store.get_kv("manual_asks") or []):
+        if x.get("key") and x["key"] in t_:
+            return x["oid"]
+    return None
+
+
+def link_manual_ask(store, oid, chat_key):
+    """Чат с продавцом узнали — вариант теперь «спросили в этом чате»: его ответ придёт к этой карточке."""
+    store.conn.execute("UPDATE broker_offers SET status='asked', asked_at=? WHERE oid=?",
+                       (datetime.now(timezone.utc).isoformat(), oid))   # broker_chat не трогаем: это всё ещё объявление
+    store.conn.commit()
+    _set_extra(store, oid, chat=str(chat_key))
+    store.set_kv("manual_asks", [x for x in (store.get_kv("manual_asks") or []) if x.get("oid") != oid])
+    if str(chat_key).startswith("biz:"):        # ответ в чате клиента узнаем как «ответ на наши вопросы»
+        ba = store.get_kv("biz_asked") or {}
+        ba[chat_key] = {"oid": oid, "at": time.time()}
+        store.set_kv("biz_asked", ba)
+
+
+def pending_manual_asks(store, hours=72):
+    since = time.time() - hours * 3600
+    return [x for x in (store.get_kv("manual_asks") or []) if x.get("at", 0) >= since]
+
+
+def biz_hint_due(store) -> bool:
+    if broker_mode(store):                    # уже выбрал: подключил или сказал «без подключения»
+        return False
+    if time.time() - float(store.get_kv("biz_hint_at") or 0) < BIZ_HINT_EVERY:
+        return False
+    store.set_kv("biz_hint_at", time.time())
+    return True
+
+
 def request_details(cfg, store, oids=None):
     """Вопросы маклерам по вариантам. Без списка — всем, кого ещё не спрашивали."""
     rr = _rr()
@@ -2060,6 +2118,7 @@ def request_details(cfg, store, oids=None):
     for o in manual:                         # готовый текст — клиент отправит сам, от своего имени
         ex = o.get("extra") or {}
         q = details_question(o, cfg, deal, self_voice=True, helper=biz)
+        remember_manual_ask(store, o["oid"], q)
         phones = [p for p in (ex.get("phones") or []) if p][:2]
         link = ""
         if phones:                           # одна ссылка: чат с продавцом в Telegram, текст уже вписан
@@ -2077,6 +2136,9 @@ def request_details(cfg, store, oids=None):
             head = f"✍️ Вариант #{o['oid']} пришёл не через бота — уточните сами."
         tail = ("\nОтправьте от себя — ответ продавца в этом чате я увижу и сама уточню остальное."
                 if biz else "\nОтправьте от себя (или позвоните) — ответ перешлите мне, допишу в карточку.")
+        if not biz and biz_hint_due(store):     # общение с продавцом может взять Ra'no — раз в 3 дня напоминаем как
+            tail += ("\n\n💡 Подключите меня к своему Telegram — одна настройка на минуту. Тогда вы отправите только "
+                     "первое сообщение, а дальше с продавцом общаюсь я. Напишите «подключить телеграм».")
         rr.tg_call(cfg, "sendMessage", {"chat_id": cfg["telegram_chat_id"], "parse_mode": "HTML",
                                         "disable_web_page_preview": True,
                                         "text": f"{head}{link}{tail}\n\n<code>{rr.escape_html(q)}</code>"})

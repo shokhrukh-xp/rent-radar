@@ -992,3 +992,17 @@ console.log("OK — бета: приглашения, знакомство и я
   assert.equal(r.status, 400);
 }
 console.log("OK — лимит модели: предупреждение владельцу; картинки не тратят ключ бота");
+
+// ── номер продавца, присланный ответом на карточку, — в Python с карточкой
+{
+  const W = await import("../src/index.js");
+  const ck = "cards_recent";
+  await env.DB.prepare("INSERT INTO kv (k, v) VALUES (?, ?) ON CONFLICT(k) DO UPDATE SET v=excluded.v")
+    .bind(ck, JSON.stringify([{ ids: [555], ref: "L:uybor:42", line: "2-комн", at: Date.now() }])).run();
+  qq = await (await svc("/svc/updates?after=0")).json();
+  const base = qq.result.length ? qq.result.at(-1).update_id : 0;
+  assert.equal(await handleUpdate(env, msg("+998 90 123 45 67", OWNER, { reply_to_message: { message_id: 555 } })), "phone");
+  const q9 = await (await svc(`/svc/updates?after=${base}`)).json();
+  assert.ok(q9.result.some(u => u.message?._phone?.ref === "L:uybor:42" && /123 45 67/.test(u.message._phone.number)));
+}
+console.log("OK — номер продавца ответом на карточку — к этому объявлению");

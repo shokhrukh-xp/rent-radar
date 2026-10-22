@@ -3684,3 +3684,54 @@ with mock.patch.object(rr, "tg_call", _ltg), mock.patch.dict(cg._BIZ_STORE, {"st
     assert "не подходит" in cg.loc_from_answer(_lcfg, _ls, cg.get_offer(_ls, _oid), "Сергели, метро Чоштепа")
 _lp.unlink(missing_ok=True)
 print("OK — неточный адрес: вопрос «уточнить у продавца?» вместо карточки, лимит в день, проверка места по ответу")
+
+# ============ общение с продавцом: свой вопрос клиент отправил сам — чат и ответ узнаём; номер со скрытого сайта ============
+_mp = Path("/tmp/test_manual.db"); _mp.unlink(missing_ok=True)
+_ms = rr.Store(_mp)
+_MT = []
+def _mtg(c, m, pl, **k):
+    _MT.append((m, dict(pl)))
+    return {"ok": True, "result": {"message_id": 900 + len(_MT)}}
+_mcfg = dict(cfg, telegram_chat_id="77", card_queue=True, worker_url="")
+_ml = {"key": "uybor:501", "source": "uybor", "site": "Uybor", "title": "2-комн, Мирабад", "text": "2-комн, Мирабад",
+       "district": "Мирабад", "rooms": 2, "price_value": 700, "price_currency": "USD", "price_usd": 700,
+       "phones": ["901112233"], "url": "https://uybor.uz/listings/501", "photo_urls": [], "created_at": ""}
+with mock.patch.object(rr, "tg_call", _mtg), mock.patch.dict(cg._BIZ_STORE, {"store": _ms}), \
+        mock.patch.object(rr, "ai_parse", lambda *a, **k: None):
+    _ms.save(dict(_ml), notified=True)
+    _oid, _ = cg.add_site_offer(_mcfg, _ms, dict(_ml))
+    cg.request_details(_mcfg, _ms, [_oid])                       # без Telegram для бизнеса — текст клиенту
+    _man = [pl["text"] for m, pl in _MT if m == "sendMessage" and "Написать продавцу" in pl.get("text", "")]
+    assert _man and "подключить телеграм" in _man[-1], _man          # подсказка: общение может взять Ra'no
+    assert cg.pending_manual_asks(_ms) and cg.pending_manual_asks(_ms)[0]["oid"] == _oid
+    # подключили Telegram для бизнеса; клиент отправил вопрос продавцу — чат узнали, вариант «спросили там»
+    _ms.set_kv("biz_conn", {"id": "c1", "user_id": 77, "enabled": True, "can_reply": True})
+    _q = cg.details_question(cg.get_offer(_ms, _oid), _mcfg, "rent", self_voice=True)
+    rr.handle_business_update(_mcfg, _ms, {"business_message": {"business_connection_id": "c1", "message_id": 1,
+        "chat": {"id": 5005, "type": "private", "first_name": "Продавец"}, "from": {"id": 77}, "text": _q}})
+    _o = cg.get_offer(_ms, _oid)
+    assert _o["status"] == "asked" and (_o.get("extra") or {}).get("chat") == "biz:5005", _o
+    assert (_ms.get_kv("biz_asked") or {}).get("biz:5005", {}).get("oid") == _oid
+    assert any("Вижу ваш вопрос продавцу" in pl.get("text", "") for m, pl in _MT)
+    # продавец ответил в этом чате — ответ к карточке варианта, а не новым вариантом
+    _MT.clear()
+    rr.handle_business_update(_mcfg, _ms, {"business_message": {"business_connection_id": "c1", "message_id": 2,
+        "chat": {"id": 5005, "type": "private", "first_name": "Продавец"}, "from": {"id": 5005},
+        "text": "Да, актуально. Ул. Шота Руставели 12, 3 этаж из 9, депозит один месяц"}})
+    assert any("ответил по варианту #" + str(_oid) in pl.get("text", "") for m, pl in _MT), [pl.get("text", "")[:80] for m, pl in _MT]
+    # без Telegram для бизнеса: пересланный ответ единственного спрошенного продавца — к его варианту
+    _ms.set_kv("biz_conn", {})
+    _o2, _ = cg.add_site_offer(_mcfg, _ms, dict(_ml, key="uybor:502", url="https://uybor.uz/listings/502"))
+    _MT.clear()
+    cg.request_details(_mcfg, _ms, [_o2])
+    _MT.clear()
+    rr.handle_owner_offer(_mcfg, _ms, {"text": "Квартира свободна, смотреть можно завтра после 18", "forward_sender_name": "Продавец",
+                                       "chat": {"id": 77}, "message_id": 5})
+    assert any("ответил по варианту #" + str(_o2) in pl.get("text", "") for m, pl in _MT)
+    # телефон на сайте скрыт — клиент прислал номер ответом на карточку
+    _ms.save(dict(_ml, key="uybor:503", phones=[], url="https://uybor.uz/listings/503"), notified=True)
+    _MT.clear()
+    rr.handle_seller_phone(_mcfg, _ms, {"_phone": {"number": "90 765 43 21", "ref": "L:uybor:503"}})
+    assert any("t.me/+998907654321" in pl.get("text", "") for m, pl in _MT), [pl.get("text", "")[:120] for m, pl in _MT]
+_mp.unlink(missing_ok=True)
+print("OK — общение с продавцом: свой вопрос клиента узнаём, ответ — к варианту; номер со скрытого сайта — сразу вопрос")

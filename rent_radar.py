@@ -3466,7 +3466,7 @@ def intake_offer(cfg, store, group, chat_key, name, text, photos, media_group=No
     return oid, is_new
 
 
-BIZ_REQUEST_RE = re.compile(r"ИИ-помощник|sun'iy intellekt yordamchisi", re.I)
+BIZ_REQUEST_RE = re.compile(r"ИИ-помощник|sun'iy intellekt yordamchisi|AI-yordamchi|AI assistant", re.I)
 
 
 def handle_business_update(cfg, store, upd) -> bool:
@@ -3537,7 +3537,12 @@ def handle_business_update(cfg, store, upd) -> bool:
         seen = store.get_kv("biz_out_seen") or {}    # для диагностики: исходящие клиента до нас доходят
         store.set_kv("biz_out_seen", {"n": int(seen.get("n", 0)) + 1, "at": time.time()})
         text = m.get("text") or m.get("caption") or ""
-        if k not in chats and BIZ_REQUEST_RE.search(text):
+        oid_ = concierge.match_manual_ask(store, text)   # наш вопрос продавцу с сайта — ответ приложим к варианту
+        if oid_:
+            concierge.link_manual_ask(store, oid_, k)
+            send_telegram(cfg, f"👀 Вижу ваш вопрос продавцу по варианту #{oid_} — как ответит, принесу сюда и "
+                               "сама уточню остальное.")
+        if k not in chats and (BIZ_REQUEST_RE.search(text) or oid_):
             ch = m.get("chat") or {}
             chats[k] = {"since": time.time(), "username": ch.get("username"),
                         "name": " ".join(x for x in [ch.get("first_name"), ch.get("last_name")] if x)}
@@ -3623,6 +3628,10 @@ def handle_broker_message(cfg, store, msg, key=None, quiet=False):
                 asked["answered_at"] = now_
                 all_asked[k] = asked
                 store.set_kv("biz_asked", all_asked)
+            o_ = concierge.get_offer(store, int(asked["oid"])) or {}
+            if text and not photos and concierge.is_site_offer(o_):   # объявление с сайта — ответ сразу клиенту
+                concierge.attach_answer(cfg, store, int(asked["oid"]), text)
+                return
             concierge.merge_into_offer(store, cfg, int(asked["oid"]), text, photos)
             pend = store.get_kv("pending_offers") or {}
             pend[str(asked["oid"])] = {"at": time.time(), "group": f"chat:{k}", "update": True}
@@ -3683,10 +3692,39 @@ def forward_name(msg) -> str:
     return c.get("title") or ""
 
 
+def handle_seller_phone(cfg, store, msg):
+    """Телефон на сайте скрыт (Uybor прячет его за проверкой) — клиент открыл объявление и прислал номер.
+    Номер — к объявлению с карточки, на которую ответили (или открытой сейчас), и сразу вопрос продавцу."""
+    ph = msg.get("_phone") or {}
+    ref = str(ph.get("ref") or (store.get_kv("card_open") or {}).get("ref") or "")
+    digits = re.sub(r"\D", "", str(ph.get("number") or ""))
+    if len(digits) < 9:
+        return
+    if not ref.startswith("L:"):
+        send_telegram(cfg, "📞 Чей это номер? Ответьте им на карточку варианта — и я напишу продавцу.")
+        return
+    l = _listing_any(store, ref[2:])
+    if not l:
+        send_telegram(cfg, "Не нашла это объявление 🙈 Пришлите ссылку на него — разберу заново.")
+        return
+    phone = "+" + (digits if digits.startswith("998") else "998" + digits[-9:])
+    l["phones"] = [phone]
+    oid, _ = concierge.add_site_offer(cfg, store, l)
+    concierge._set_extra(store, oid, phones=[phone])
+    concierge.request_details(cfg, store, [oid])
+
+
 def handle_owner_offer(cfg, store, msg):
     """Владелец переслал или вставил вариант (из WhatsApp, другого чата) — в карточки."""
     text, photos = _offer_parts(msg)
     if not text and not photos:
+        return
+    pend = concierge.pending_manual_asks(store)
+    fwd = bool(msg.get("forward_origin") or msg.get("forward_from") or msg.get("forward_sender_name"))
+    if fwd and text and len(pend) == 1 and concierge.get_offer(store, pend[0]["oid"]):
+        oid_ = pend[0]["oid"]                   # спрашивали одного продавца — пересланный ответ про его вариант
+        concierge.link_manual_ask(store, oid_, f"owner:{forward_name(msg) or 'ответ'}")
+        concierge.attach_answer(cfg, store, oid_, text)
         return
     who = forward_name(msg) or "добавлено вручную"
     oid, is_new = intake_offer(cfg, store, f"owner:{who}", "owner", who, text, photos,
@@ -3944,6 +3982,10 @@ def _process_updates(cfg: dict, store, ups: list, settings: dict) -> dict:
             return
         if msg.get("_owner_offer"):          # воркер: владелец переслал/вставил вариант
             handle_owner_offer(cfg, store, msg)
+            changed = True
+            return
+        if msg.get("_phone"):                # клиент прислал номер продавца (на сайте он скрыт)
+            handle_seller_phone(cfg, store, msg)
             changed = True
             return
         for tag in ("_view", "_note"):       # объявление с сайта (ответ на карточку) — сначала в шортлист
@@ -4885,6 +4927,9 @@ def show_next_card(cfg, store):
             l_ = dict(it["l"])
             still_actual(cfg, l_, older_h=0)
             it["l"] = l_
+        if it.get("kind") != "loc" and not can_ask_seller(it["ref"], it["l"]) and \
+                str(it["l"].get("url") or "").startswith("http"):
+            text += "\n\n<i>Телефон продавца — на сайте. Пришлите его номер ответом на это сообщение — дальше напишу сама.</i>"
         text += (f"\n\n<i>В очереди ещё {left}</i>" if left else "")
         ids = _send_card_now(cfg, it["l"], text, kb=card_kb(it["ref"], left, it["l"], it.get("kind", "")),
                              silent=it.get("silent"), ref=it["ref"])

@@ -1326,6 +1326,7 @@ export async function welcome(env, chat, L = "ru") {
 }
 
 // ── поддержка: /support → следующее сообщение — команде; владелец отвечает /reply <chat> текст
+export const PHONE_ONLY = /^\+?\s*(?:998[\s\-()]*)?\(?\d{2}\)?[\s\-]*\d{3}[\s\-]*\d{2}[\s\-]*\d{2}$/;
 export const SUPPORT_ASK = /^\/(support|help_me|feedback)(@\w+)?$|(напис[а-яёa-z]*|связат[а-яёa-z]*)\s+(в\s+)?(поддержк|команд|разработчик|владельц|админ)[а-яёa-z]*|^поддержк[а-яёa-z]*$|^(support|yordam kerak|adminga yozish)$/i;
 const SUPPORT_HINT = {
   ru: "🆘 Напишите одним сообщением, что случилось или что улучшить, — передам команде Ra'no, ответ придёт сюда. " +
@@ -2450,6 +2451,11 @@ export async function handleUpdate(env, upd) {
     return "queued";
   }
   const card = await cardByMessage(env, msg.reply_to_message?.message_id, chat);
+  if (PHONE_ONLY.test(text)) {                   // номер продавца (на сайте скрыт) — Python допишет и спросит
+    upd.message = { ...msg, _phone: { number: text, ref: card?.ref || "" } };
+    await queueAndWake(env, upd, chat, WAIT[L]);
+    return "phone";
+  }
   await interviewTurn(env, chat, text, card);
   return card ? "card" : "interview";
 }
