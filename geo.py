@@ -463,6 +463,55 @@ def too_far(l: dict, near: dict):
     return "точный адрес не указан — не проверить, что это в нужном месте"
 
 
+# ------------------------------------------------------- области с карты --
+# Клиент обвёл пальцем на карте, где искать (worker /draw): [[ [lat, lon], ... ], ...]. Решает только точка.
+
+def in_poly(lat, lon, poly) -> bool:
+    """Точка внутри многоугольника (луч вправо, чётность пересечений)."""
+    inside, n = False, len(poly)
+    for i in range(n):
+        y1, x1 = poly[i][0], poly[i][1]
+        y2, x2 = poly[(i + 1) % n][0], poly[(i + 1) % n][1]
+        if (y1 > lat) != (y2 > lat) and lon < x1 + (lat - y1) * (x2 - x1) / ((y2 - y1) or 1e-12):
+            inside = not inside
+    return inside
+
+
+def in_areas(lat, lon, areas) -> bool:
+    return any(in_poly(lat, lon, a) for a in areas or [] if len(a) >= 3)
+
+
+def km_to_areas(lat, lon, areas) -> float:
+    """До ближайшей вершины областей, км — для «чуть-чуть мимо»."""
+    return min((km(lat, lon, p[0], p[1]) for a in areas or [] for p in a), default=99.0)
+
+
+def area_reject(l: dict, areas) -> str:
+    """Причина отказа или '': внутри нарисованных областей и с точным местом."""
+    if not areas:
+        return ""
+    g = l.get("geo") or locate(l)
+    if not g or g.get("src") == "район":
+        return "точный адрес не указан — не проверить, что это внутри области"
+    if (g.get("spread") or 0) > 1.0:
+        return f"место примерное (±{g['spread']:.1f} км) — не проверить, что это внутри области"
+    if not in_areas(g["lat"], g["lon"], areas):
+        return f"вне нарисованной области (~{km_to_areas(g['lat'], g['lon'], areas):.1f} км)"
+    return ""
+
+
+def areas_districts(areas, margin_km=2.0) -> list:
+    """Районы, которые спрашивать у сайтов: где есть объявления внутри областей или рядом с ними
+    (сайты путают районы — с запасом). Отсев всё равно по точке."""
+    out = set()
+    for r in GAZ["pts"]:
+        if not r[2]:
+            continue
+        if in_areas(r[0], r[1], areas) or km_to_areas(r[0], r[1], areas) <= margin_km:
+            out.add(r[2])
+    return sorted(out)
+
+
 GENERIC_PLACE = {"mechet", "masjid", "shkala", "shkali", "detsad", "sad", "bazar", "rinak", "rinka", "magazin",
                  "bolnitsa", "palikliniki", "paliklinika", "park", "astanavka", "metra", "makro", "karzinka",
                  "supermarket", "apteka", "bank", "kafe", "restaran", "mektab", "bagcha", "dakan", "hakimiyat",

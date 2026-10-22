@@ -3266,3 +3266,42 @@ assert RS2 and RS2[0].get("districts") == ["Яккасарай"], RS2
 assert rr.Store(sdb3_).get_kv("sale_pick") == []
 rdb_.unlink(missing_ok=True); sdb3_.unlink(missing_ok=True)
 print("OK — сменил покупку на аренду: продажа выключена, её подборка сброшена, первые варианты аренды — сразу")
+
+# ============ «обвести на карте»: ищем только внутри областей, район не важен, без точки — нет ============
+sq_ = [[41.32, 69.26], [41.32, 69.30], [41.30, 69.30], [41.30, 69.26]]
+assert _geo_t.in_poly(41.31, 69.28, sq_) and not _geo_t.in_poly(41.33, 69.28, sq_)
+tri_ = [[41.36, 69.20], [41.36, 69.24], [41.34, 69.22], [41.35, 69.21]]
+assert _geo_t.in_areas(41.355, 69.22, [sq_, tri_]) and not _geo_t.in_areas(41.25, 69.22, [sq_, tri_])
+assert _geo_t.area_reject({"geo": {"lat": 41.31, "lon": 69.28, "src": "сайт"}, "district": "Сергели"}, [sq_]) == ""  # район — не довод
+assert "вне нарисованной области" in _geo_t.area_reject({"geo": {"lat": 41.25, "lon": 69.28, "src": "сайт"}}, [sq_])
+assert "точный адрес не указан" in _geo_t.area_reject({"geo": {"src": "район"}, "district": "Мирабад"}, [sq_])
+assert "примерное" in _geo_t.area_reject({"geo": {"lat": 41.31, "lon": 69.28, "src": "ориентир", "spread": 1.6}}, [sq_])
+# аренда: области из настроек
+assert rr.passes_user_filters({"geo": {"lat": 41.31, "lon": 69.28, "src": "сайт"}, "district": "Чиланзар", "rooms": 2},
+                              {"areas": [sq_], "districts": ["Яккасарай"], "rooms_min": 2, "rooms_max": 3})
+assert not rr.passes_user_filters({"geo": {"lat": 41.25, "lon": 69.28, "src": "сайт"}, "district": "Яккасарай", "rooms": 2},
+                                  {"areas": [sq_], "districts": ["Яккасарай"]})
+# покупка: области вместо ориентира и районов; условия поиска — «внутри областей»
+adb_ = Path("/tmp/test_areas.db"); adb_.unlink(missing_ok=True)
+ast_ = rr.Store(adb_)
+ast_.set_kv("anketa", {"ans": {"deal": "buy", "object": "flat", "rooms": ["2"], "budget": "60000", "near": "центр"}})
+ast_.set_kv("settings", {"areas": [sq_]})
+with mock.patch.object(rr, "near_point", lambda *a, **k: {"lat": 41.31, "lon": 69.28, "src": "центр", "km": 2.6}), \
+        mock.patch.object(_geo_t, "areas_districts", lambda a, margin_km=2.0: ["Мирабад", "Яккасарай"]):
+    ssa_ = rr.effective_sale_cfg(cfg, ast_)["sale_search"]
+assert ssa_["areas"] == [sq_] and ssa_["near"] is None and ssa_["districts"] == ["Мирабад", "Яккасарай"]
+assert "внутри областей, обведённых на карте (1)" in rr.sale_criteria_text(ssa_)
+assert "вне нарисованной области" in SS.recheck({"price_usd": 50000, "geo": {"lat": 41.25, "lon": 69.28, "src": "сайт"}},
+                                                 ssa_, ast_, cfg)
+# сохранение с карты: настройки, пересмотр, подтверждение в чате; пустой список — области убраны
+AM = []
+upd_a = lambda areas: {"result": [{"update_id": 9, "message": {"chat": {"id": 4242}, "text": "", "_areas": areas}}]}
+for areas_, word_ in (([sq_, tri_], "областей — 2"), ([], "Области убрала")):
+    with mock.patch.object(rr, "fetch_updates", lambda c, st, lp=0, a=areas_: (upd_a(a), "wq_offset")), \
+            mock.patch.object(rr, "send_telegram", lambda c, txt, _admin=False: AM.append(txt) or True), \
+            mock.patch.object(rr, "push_snapshot", lambda *a, **k: False), mock.patch.object(rr, "run_search", lambda *a, **k: ""):
+        rr.process_commands(dict(cfg, telegram_chat_id="4242"), ast_)
+    assert (ast_.get_kv("settings") or {}).get("areas") == areas_ and word_ in AM[-1], AM[-1]
+assert ast_.get_kv("sale_force")
+adb_.unlink(missing_ok=True)
+print("OK — «обвести на карте»: только внутри областей и с точным адресом, район не важен; сохранение и сброс из чата")

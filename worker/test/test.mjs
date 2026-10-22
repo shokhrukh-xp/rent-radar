@@ -713,3 +713,40 @@ console.log("OK — сторож сервера: молчит 25+ минут —
   await env.DB.prepare("DELETE FROM users").run(); W.resetUsersCache();
 }
 console.log("OK — много пользователей: Start — клиент до лимита, лист ожидания, маклер по метке, команды владельца");
+
+// ── «Обвести на карте»: подпись Telegram, только клиент, области — в kv и в очередь Python
+{
+  const W = await import("../src/index.js");
+  const enc = new TextEncoder();
+  const hex = b => [...new Uint8Array(b)].map(x => x.toString(16).padStart(2, "0")).join("");
+  async function signed(user, token = "T", age = 0) {
+    const p = new URLSearchParams({ auth_date: String(Math.floor(Date.now() / 1000) - age), query_id: "q1", user: JSON.stringify(user) });
+    const dcs = [...p.entries()].sort(([a], [b]) => a < b ? -1 : 1).map(([k, v]) => `${k}=${v}`).join("\n");
+    const k1 = await crypto.subtle.importKey("raw", enc.encode("WebAppData"), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+    const sec = await crypto.subtle.sign("HMAC", k1, enc.encode(token));
+    const k2 = await crypto.subtle.importKey("raw", sec, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+    p.set("hash", hex(await crypto.subtle.sign("HMAC", k2, enc.encode(dcs))));
+    return p.toString();
+  }
+  assert.equal((await W.checkInitData(env, await signed({ id: +OWNER }))).id, +OWNER);
+  assert.equal(await W.checkInitData(env, await signed({ id: +OWNER }, "other")), null);        // чужая подпись
+  assert.equal(await W.checkInitData(env, await signed({ id: +OWNER }, "T", 2 * 86400)), null); // протухшая
+  const sq = [[41.32, 69.26], [41.32, 69.30], [41.30, 69.30], [41.30, 69.26]];
+  assert.deepEqual(W.cleanAreas([sq, [[1, 2], [3, 4], [5, 6], [7, 8]], "x"]), null);           // мусор — отказ целиком
+  assert.deepEqual(W.cleanAreas([sq, [[1, 2], [3, 4], [5, 6], [7, 8]]]), [sq]);                  // вне Ташкента — отброшено
+  qq = await (await svc("/svc/updates?after=0")).json();
+  const base = qq.result.length ? qq.result.at(-1).update_id : 0;
+  const post = (path, body) => worker.fetch(new Request("https://w.example" + path, { method: "POST", body: JSON.stringify(body),
+    headers: { "content-type": "application/json" } }), env, { waitUntil() {} }).then(r => r.json());
+  assert.deepEqual(await post("/draw/save", { initData: await signed({ id: 999111 }), areas: [sq] }), { ok: false, error: "not_client" });
+  assert.equal((await post("/draw/save", { initData: "hash=00&user=%7B%22id%22%3A1%7D", areas: [sq] })).error, "auth");
+  assert.deepEqual(await post("/draw/save", { initData: await signed({ id: +OWNER }), areas: [sq] }), { ok: true, n: 1 });
+  assert.deepEqual((await post("/draw/load", { initData: await signed({ id: +OWNER }) })).areas, [sq]);
+  const q3 = await (await svc(`/svc/updates?after=${base}`)).json();
+  assert.ok(q3.result.some(u => JSON.stringify(u.message?._areas) === JSON.stringify([sq])));
+  const page = await (await worker.fetch(new Request("https://w.example/draw"), env, { waitUntil() {} })).text();
+  assert.ok(/Обвести/.test(page) && /telegram-web-app\.js/.test(page) && /leaflet@1\.9\.4/.test(page));
+  assert.ok(W.DRAW_ASK.test("хочу нарисовать область на карте") && W.DRAW_ASK.test("/draw") && W.DRAW_ASK.test("можно очертить на карте?"));
+  assert.ok(!W.DRAW_ASK.test("покажи карту цен") && !W.DRAW_ASK.test("2 комнаты рядом с метро"));
+}
+console.log("OK — «обвести на карте»: подпись Telegram, только клиент, области в очередь Python, подсказка словами");

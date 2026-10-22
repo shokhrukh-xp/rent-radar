@@ -1,4 +1,5 @@
 import { MAP_HTML } from "./map.js";
+import { DRAW_HTML } from "./draw.js";
 /* Ra'no — «лицо» бота на Cloudflare Worker.
  *
  * Зачем: Python-бот живёт на GitHub Actions и онлайн лишь ~50 минут из 4–7 часов.
@@ -443,6 +444,7 @@ export async function signup(env, msg) {
   const n = await activeCount(env), lim = await userLimit(env);
   if (n < lim) {
     await setUser(env, chat, "active", from);
+    await setMapMenu(env, chat).catch(() => null);
     await adminSay(env, `🆕 Новый пользователь: ${who(from, chat)} — ${n + 1}/${lim}`);
     return "active";
   }
@@ -478,6 +480,7 @@ export async function adminCommand(env, chat, text) {
   if (!u) return "Не нашла такого пользователя — посмотрите <code>/users</code>.";
   if (cmd === "/approve") {
     await setUser(env, u.chat, "active", {});
+    await setMapMenu(env, u.chat).catch(() => null);
     const L = u.lang === "uz" ? "uz" : u.lang === "ru" || !u.lang ? "ru" : "en";
     await tg(env, "sendMessage", { chat_id: u.chat, text: APPROVED[L], _noTr: true });
     return `✅ Пустила: ${who({ first_name: u.name, username: u.username }, u.chat)}`;
@@ -1091,6 +1094,65 @@ function maybeWatch(env, ctx) {
   lastWatch = Date.now();
   ctx.waitUntil(watchdog(env).catch(e => console.log("watchdog error", e.stack || e)));
 }
+// ───────────────────────────── «Обвести на карте» (Mini App из кнопки «Меню») ─────────────────────────────
+const hexOf = buf => [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, "0")).join("");
+/** Подпись Telegram WebApp (initData): HMAC-SHA256 ключом от токена бота. Возвращает user или null. */
+export async function checkInitData(env, initData, maxAgeSec = 86400) {
+  const p = new URLSearchParams(String(initData || ""));
+  const hash = p.get("hash");
+  if (!hash) return null;
+  p.delete("hash");
+  const dcs = [...p.entries()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([k, v]) => `${k}=${v}`).join("\n");
+  const enc = new TextEncoder();
+  const k1 = await crypto.subtle.importKey("raw", enc.encode("WebAppData"), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const secret = await crypto.subtle.sign("HMAC", k1, enc.encode(await botToken(env)));
+  const k2 = await crypto.subtle.importKey("raw", secret, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  if (hexOf(await crypto.subtle.sign("HMAC", k2, enc.encode(dcs))) !== hash) return null;
+  if (Date.now() / 1000 - (+p.get("auth_date") || 0) > maxAgeSec) return null;
+  try { const u = JSON.parse(p.get("user") || "null"); return u && u.id ? u : null; } catch (e) { return null; }
+}
+/** Области с карты: до 6 многоугольников по 4–300 точек, только Ташкент и окрестности. */
+export function cleanAreas(raw) {
+  if (!Array.isArray(raw)) return null;
+  const out = [];
+  for (const a of raw.slice(0, 6)) {
+    if (!Array.isArray(a)) return null;
+    const pts = a.slice(0, 300).map(q => [Math.round(+q[0] * 1e5) / 1e5, Math.round(+q[1] * 1e5) / 1e5])
+      .filter(([la, lo]) => la > 40.9 && la < 41.7 && lo > 68.9 && lo < 69.8);
+    if (pts.length >= 4) out.push(pts);
+  }
+  return out;
+}
+export const DRAW_ASK = /^\/(draw|area|areas|karta)(@\w+)?$|(нарис|обвест|обвед|очерт|выдел)\w*[^.!?\n]{0,40}(карт|облаc|облас|зон|участ)|(карт\w*)[^.!?\n]{0,20}(нарис|обвест|обвед|очерт)|xaritada\s+(chiz|belgila)|draw\s+(an?\s+)?(area|on the map)/i;
+export const DRAW_HINT = {
+  ru: "🗺 Нажмите «Меню» слева внизу → «Карта». Там нажмите «Обвести» и проведите пальцем по краю нужного места — " +
+    "можно несколько областей. Потом «Сохранить»: буду искать только внутри них и только объявления с точным адресом. " +
+    "Убрать области — там же, 🗑 и «Сохранить».",
+  uz: "🗺 Pastdagi «Menu» → «Karta» ni bosing. «Chizish» ni bosing va kerakli joy chegarasi bo'ylab barmog'ingizni yurgizing — " +
+    "bir nechta hudud mumkin. Keyin «Saqlash»: faqat shu hududlarda, aniq manzilli e'lonlarni qidiraman.",
+  en: "🗺 Tap «Menu» at the bottom left → «Map». Tap «Draw» and trace the edge of the place with your finger — several " +
+    "areas are fine. Then «Save»: I'll search only inside them, and only listings with an exact address.",
+};
+export const MAP_MENU = { type: "web_app", text: "Карта", web_app: { url: "" } };
+export async function setMapMenu(env, chat) {
+  if (!ORIGIN) return null;
+  return tg(env, "setChatMenuButton", { chat_id: +chat, menu_button: { ...MAP_MENU, web_app: { url: ORIGIN + "/draw" } } });
+}
+export async function drawApi(env, path, body) {
+  const user = await checkInitData(env, body?.initData);
+  if (!user) return { ok: false, error: "auth" };
+  const chat = String(user.id);
+  if (!(await isClient(env, chat))) return { ok: false, error: "not_client" };
+  if (path === "/draw/load") return { ok: true, areas: (await kvGet(env, "areas:" + chat, null)) || [] };
+  const areas = cleanAreas(body?.areas);
+  if (!areas) return { ok: false, error: "bad_areas" };
+  await kvSet(env, "areas:" + chat, areas);
+  // Python пересчитает поиск и сам подтвердит в чате (с числом областей и что ищет внутри)
+  await queueAndWake(env, { message: { message_id: 0, chat: { id: +chat, type: "private" }, from: { id: +chat },
+    date: Math.floor(Date.now() / 1000), text: "", _areas: areas } });
+  return { ok: true, n: areas.length };
+}
+
 async function queueAndWake(env, upd, chat, note) {
   await enqueue(env, upd);
   const alive = await wake(env);
@@ -1682,6 +1744,12 @@ export async function handleUpdate(env, upd) {
     return "more";
   }
 
+  // «хочу нарисовать на карте, где искать» — карта в кнопке «Меню»
+  if (DRAW_ASK.test(text)) {
+    await setMapMenu(env, chat).catch(() => null);
+    await say(env, chat, DRAW_HINT[L] || DRAW_HINT.ru);
+    return "draw_hint";
+  }
   // «подключи к моему телеграму» — пошаговая инструкция Telegram для бизнеса (текст и проверка — в Python)
   // короткое «нет / не хочу» сразу после предложения подключить Telegram — тоже отказ от доступа
   const uiB = await kvGet(env, uiKey(env, chat), null);
@@ -1823,6 +1891,13 @@ export default {
       return json({ ok: true, state: await watchdog(env) });
     }
     if (p !== "/svc/updates") maybeWatch(env, ctx);   // Python опрашивает очередь сам — это и есть «жив»
+    if (p === "/draw" || p === "/draw/") {
+      return new Response(DRAW_HTML, { headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-cache" } });
+    }
+    if ((p === "/draw/load" || p === "/draw/save") && req.method === "POST") {
+      const body = await req.json().catch(() => null);
+      return json(await drawApi(env, p, body));
+    }
     if (p === "/map" || p === "/map/") {
       return new Response(MAP_HTML, { headers: { "content-type": "text/html; charset=utf-8", "cache-control": "public, max-age=600" } });
     }
@@ -1926,7 +2001,8 @@ export default {
         const me = await tg(env, "getMe", {});           // включён ли бизнес-режим в BotFather
         // кнопка меню «Параметры» (мини-апп) больше не нужна — возвращаем список команд
         const menu = await tg(env, "setChatMenuButton", { menu_button: { type: "commands" } });
-        const menuOwner = await tg(env, "setChatMenuButton", { chat_id: +env.OWNER_CHAT, menu_button: { type: "commands" } });
+        // клиенту в «Меню» — карта «где искать» (обвести пальцем); маклерам — по-прежнему список команд
+        const menuOwner = await setMapMenu(env, env.OWNER_CHAT);
         const ownerCmds = [
           { command: "new", description: "🔎 Новый поиск" }, { command: "mysearch", description: "✏️ Мой поиск" },
           { command: "shortlist", description: "📋 Шортлист" }, { command: "help", description: "❓ Помощь" }];

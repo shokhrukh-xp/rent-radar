@@ -898,6 +898,8 @@ def recheck(l, ss, store, cfg):
     p = l.get("price_usd") or 0
     if p and ss.get("max_price_usd") and p > ss["max_price_usd"]:
         return f"дороже бюджета с учётом всех платежей (${p:,.0f})".replace(",", " ")
+    if ss.get("areas"):
+        return geo.area_reject(l, ss["areas"])
     near = ss.get("near") or {}
     if near.get("lat") is not None:
         return geo.too_far(l, near)

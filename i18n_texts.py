@@ -11,6 +11,7 @@ HELP = {
           "Каждый вариант приходит альбомом: первым — карта, где квартира, дальше фото, под ними — разбор цены.\n"
           "Могу ещё: разобрать ссылку на объявление, сделать карточку из пересланного сообщения маклера, написать "
           "маклерам, показать цены рынка. Напоминаю сама — о просмотрах и если маклер молчит.\n\n"
+          "🗺 Где искать, можно обвести пальцем на карте: «Меню» → «Карта» — тогда ищу только внутри и только с точным адресом.\n\n"
           "Маклерам: скажите «напиши маклерам» — пришлю 5 маклеров под ваш запрос. Нажмёте на имя — откроется чат с "
           "ним, текст уже вписан, останется «Отправить».\n\n"
           "Хотите, чтобы маклеры отвечали прямо вам в Telegram, а я читала их ответы и сама уточняла детали? Напишите "
@@ -27,6 +28,7 @@ HELP = {
           "tahlili.\n"
           "Yana: e'lon havolasini tahlil qilaman, maklerdan uzatilgan xabardan kartochka yasayman, maklerlarga "
           "yozaman, bozor narxlarini ko'rsataman. Ko'rishlar va makler jim qolsa — o'zim eslataman.\n\n"
+          "🗺 Qayerdan qidirishni xaritada barmoq bilan chizish mumkin: «Menu» → «Karta» — faqat ichidan, aniq manzilli e'lonlarni qidiraman.\n\n"
           "Maklerlar: «maklerlarga yoz» deng — so'rovingizga mos 5 ta makler yuboraman. Ismini bossangiz — u bilan "
           "chat ochiladi, matn tayyor yozilgan, faqat «Yuborish»ni bosasiz.\n\n"
           "Maklerlar to'g'ridan-to'g'ri sizga Telegram'da javob berishini, men esa ularni o'zim o'qib, tafsilotlarni "
@@ -43,6 +45,7 @@ HELP = {
           "underneath.\n"
           "I can also: analyse a listing link, make a card from a forwarded broker message, write to brokers, show "
           "market prices. I remind you myself — about viewings and when a broker goes quiet.\n\n"
+          "🗺 You can draw where to search with your finger: «Menu» → «Map» — then I search only inside, exact addresses only.\n\n"
           "Brokers: say «write to brokers» — I'll send 5 brokers matching your request. Tap a name — a chat with them "
           "opens with the text already typed, just press «Send».\n\n"
           "Want brokers to reply right in your Telegram while I read their answers and clarify details myself? Write "
@@ -519,6 +522,16 @@ MORE = [
     ("≈ {p} всего", "≈ jami {p}", "≈ {p} in total"),
     ("Район по точке на карте — {d} (на сайте указан {s})", "Xaritadagi nuqta bo'yicha tuman — {d} (saytda {s} deyilgan)",
      "District by the map pin — {d} (the site says {s})"),
+    ("внутри областей, обведённых на карте ({n}), только с точным адресом",
+     "xaritada chizilgan hududlar ichida ({n}), faqat aniq manzil bilan", "inside the areas drawn on the map ({n}), exact address only"),
+    ("🗺 <b>Сохранила: областей — {n}.</b> Ищу только внутри них и только объявления с точным адресом — районы и ориентиры "
+     "больше не важны. Поменять или убрать — «Меню» → «Карта».",
+     "🗺 <b>Saqlandi: hududlar — {n}.</b> Faqat ularning ichida va faqat aniq manzilli e'lonlarni qidiraman — tuman va "
+     "mo'ljallar endi muhim emas. O'zgartirish yoki olib tashlash — «Menu» → «Karta».",
+     "🗺 <b>Saved: {n} area(s).</b> I search only inside them and only listings with an exact address — districts and "
+     "landmarks no longer matter. To change or remove — «Menu» → «Map»."),
+    ("🗺 Области убрала — ищу как раньше, по вашим условиям.", "🗺 Hududlar olib tashlandi — avvalgidek, shartlaringiz bo'yicha qidiraman.",
+     "🗺 Areas removed — searching as before, by your criteria."),
     ("строго центр города (до {km} км от середины, только с точным адресом)",
      "faqat shahar markazi (o'rtasidan {km} km gacha, faqat aniq manzil bilan)",
      "strictly the city centre (within {km} km of its middle, exact address only)"),

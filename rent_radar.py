@@ -1832,6 +1832,16 @@ def effective_sale_cfg(cfg, store):
         near_txt = "центр"                    # раньше «ближе к центру» лежало в пожеланиях
     city = ans.get("city_other") if ans.get("city") == "other" and ans.get("city_other") else "Ташкент"
     ss["near"] = near_point(cfg, store, near_txt, ans.get("near_km"), city=city) if near_txt else None
+    areas = (store.get_kv("settings") or {}).get("areas") or []
+    if areas:                                   # обвёл на карте — области вместо районов и ориентира
+        ss["near"], ss["areas"] = None, areas
+        try:
+            sst = open_sale()
+            geo.ensure(sst)
+            sst.conn.close()
+        except Exception:
+            pass
+        ss["districts"] = geo.areas_districts(areas) or list(DISTRICT_LIST)
     if ss["near"]:
         # «в центре», «прямо в центре» — строго: радиус самого центра и только объявления с точным местом.
         # «рядом с центром», «ближе к центру», «около» — мягко: центр и полоса вокруг.
@@ -3632,6 +3642,25 @@ def _process_updates(cfg: dict, store, ups: list, settings: dict) -> dict:
                     send_telegram(cfg, bt_)
             push_snapshot(cfg, store, settings, force=True)
             continue
+        if "_areas" in msg:                  # обвёл на карте (воркер проверил подпись Telegram)
+            areas = [a for a in (msg.get("_areas") or []) if isinstance(a, list) and len(a) >= 4][:6]
+            settings["areas"] = areas
+            store.set_kv("settings", settings)
+            store.set_kv("sale_force", True)          # пересмотреть отсеянное по новым границам
+            changed = True
+            if areas:
+                send_telegram(cfg, t("🗺 <b>Сохранила: областей — {n}.</b> Ищу только внутри них и только объявления "
+                                     "с точным адресом — районы и ориентиры больше не важны. Поменять или убрать — "
+                                     "«Меню» → «Карта».", n=len(areas)))
+                if rent_search_on(store):
+                    try:
+                        run_search(cfg, store, settings, days=14)
+                    except Exception as e:
+                        log.warning("варианты внутри областей не собрала: %s", e)
+            else:
+                send_telegram(cfg, t("🗺 Области убрала — ищу как раньше, по вашим условиям."))
+            push_snapshot(cfg, store, settings, force=True)
+            continue
         if msg.get("_link"):                 # воркер: владелец прислал ссылку на объявление
             handle_link(cfg, store, msg)
             continue
@@ -3753,10 +3782,18 @@ def passes_user_filters(l: dict, settings: dict) -> bool:
     if rmin is not None and rooms is not None:
         if not rmin <= rooms <= (rmax if rmax is not None else rmin):
             return False
+    if settings.get("areas"):                # обвёл на карте — только внутри, район не важен
+        try:
+            if not l.get("geo"):
+                geo.locate(l)
+        except Exception:
+            pass
+        return not geo.area_reject(l, settings["areas"])
     near = settings.get("near") or {}
     if near.get("lat") is not None:          # аренда у ориентира — по радиусу
         try:
-            geo.locate(l)
+            if not l.get("geo"):
+                geo.locate(l)
         except Exception:
             pass
         return not geo.too_far(l, near)
@@ -3859,7 +3896,7 @@ def sale_reject(l: dict, ss: dict, store, cfg) -> tuple:
     if hit:
         return f"продаётся не квартира («{hit}»)", False
     near = ss.get("near") or {}
-    if near.get("lat") is not None:          # клиент ищет у ориентира — радиус вместо района
+    if ss.get("areas") or near.get("lat") is not None:   # области с карты или радиус у ориентира — решает точка
         if not ((l.get("geo") or {}).get("src") not in (None, "район")):
             # точки нет — ищем так же, как для карточки (описание читает модель), иначе в фильтре
             # квартира «где-то в районе», а в карточке потом оказывается за 10 км
@@ -3868,7 +3905,7 @@ def sale_reject(l: dict, ss: dict, store, cfg) -> tuple:
                 ensure_place(cfg, store, l)
             except Exception as e:
                 log.info("[место] %s: %s", l.get("key"), e)
-        far = geo.too_far(l, near)
+        far = geo.area_reject(l, ss["areas"]) if ss.get("areas") else geo.too_far(l, near)
         if far:
             return far, False
     elif ss.get("districts") and l.get("district") not in ss["districts"]:
@@ -4576,7 +4613,9 @@ def sale_criteria_text(ss: dict) -> str:
     rooms = t("{r} комн", r=rooms) if rooms else t("любая комнатность")
     districts = ", ".join(dist(d) for d in ss.get("districts") or []) or t("любые районы")
     nr = ss.get("near") or {}
-    if nr.get("src") == "центр" and nr.get("strict"):
+    if ss.get("areas"):
+        districts = t("внутри областей, обведённых на карте ({n}), только с точным адресом", n=len(ss["areas"]))
+    elif nr.get("src") == "центр" and nr.get("strict"):
         districts = t("строго центр города (до {km} км от середины, только с точным адресом)",
                       km=str(nr.get("km")).replace(".", ","))
     elif nr.get("src") == "центр":
@@ -4597,7 +4636,7 @@ def sale_criteria_text(ss: dict) -> str:
 def sale_fingerprint(ss: dict) -> str:
     """Условия поиска одной строкой: изменились — пересматриваем отсеянное."""
     keys = ("max_price_usd", "min_price_usd", "rooms", "districts", "owner_only",
-            "max_owner_ads", "notify_max_age_days", "near")
+            "max_owner_ads", "notify_max_age_days", "near", "areas")
     return json.dumps({k: ss.get(k) for k in keys}, ensure_ascii=False, sort_keys=True)
 
 
