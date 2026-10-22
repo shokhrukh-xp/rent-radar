@@ -1137,7 +1137,13 @@ def escape_html(s: str) -> str:
 
 
 def fmt_phone(p: str) -> str:
-    return f"+998 {p[:2]} {p[2:5]}-{p[5:7]}-{p[7:9]}"
+    """Номер как его пишут в Узбекистане: +998 90 123-45-67 (на входе 9 цифр, +998…, с пробелами — всё равно)."""
+    d = re.sub(r"\D", "", str(p or ""))
+    if len(d) == 12 and d.startswith("998"):
+        d = d[3:]
+    if len(d) != 9:
+        return str(p or "")
+    return f"+998 {d[:2]} {d[2:5]}-{d[5:7]}-{d[7:9]}"
 
 
 def format_message(l: dict, cfg: dict, likely_makler: bool) -> str:
@@ -3434,6 +3440,9 @@ def handle_callback(data: str, settings: dict, store, cfg: dict, message_id=None
     return "", None
 
 
+BROKER_ACK_SHORT = "Rahmat, получила — передаю клиенту 🙌\nRahmat, qabul qildim — mijozga yetkazaman."   # уже знакомы
+
+
 def broker_ack(cfg) -> str:
     """Двуязычно (ру + уз): часть маклеров пишет только на узбекском. Имя клиента — ссылкой на его Telegram
     (подставляет concierge.broker_send), чтобы было видно, что клиент настоящий. Тот же текст — у воркера."""
@@ -3702,7 +3711,9 @@ def handle_broker_message(cfg, store, msg, key=None, quiet=False):
         return
     log.info("вариант #%s от %s (%s)", oid, name, "новый" if is_new else "дополнение")
     if is_new and not msg.get("_acked"):      # воркер уже ответил маклеру мгновенно
-        concierge.broker_send(cfg, store, chat_id, broker_ack(cfg), translate=False)
+        known = time.time() - max(store.get_kv(f"welcomed:{chat_id}") or 0, store.get_kv(f"acked:{chat_id}") or 0) < 7 * 86400
+        store.set_kv(f"acked:{chat_id}", time.time())
+        concierge.broker_send(cfg, store, chat_id, BROKER_ACK_SHORT if known else broker_ack(cfg), translate=False)
 
 
 def forward_name(msg) -> str:

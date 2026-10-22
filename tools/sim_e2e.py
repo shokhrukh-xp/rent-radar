@@ -196,6 +196,8 @@ def _():
 @scen("3. поиск по всем сайтам (живые источники) → сразу + подборка")
 def _():
     t = time.time()
+    if os.environ.get("SIM_SKIP_LIVE"):
+        print("   живой поиск пропущен (SIM_SKIP_LIVE)"); return
     n = rr.run_sale_search(rr.effective_sale_cfg(cfg, store), sale, settings, force=True)
     st = SS.day_stats(sale)
     stats = sale.get_kv("sale_src_stats")
@@ -234,7 +236,13 @@ def _():
     import followup as FU
     from datetime import datetime, timedelta, timezone
     ss0 = store.get_kv("search_start") or {}
-    store.set_kv("search_start", {**ss0, "at": (datetime.now(timezone.utc) - timedelta(hours=50)).isoformat(), "offered": ""})
+    at50 = (datetime.now(timezone.utc) - timedelta(hours=50)).isoformat()
+    nb = store.conn.execute("SELECT COUNT(*) FROM brokers").fetchone()[0]
+    busy = store.conn.execute("SELECT COUNT(*) FROM brokers WHERE status IN ('contacted', 'offered') AND last_contact>=?",
+                              (at50,)).fetchone()[0]
+    if not nb or busy:
+        print(f"   пропуск: маклеров в базе {nb}, уже пишет {busy} — предлагать нечего/незачем"); return
+    store.set_kv("search_start", {**ss0, "at": at50, "offered": ""})
     noon = datetime.now(cg.TZ).replace(hour=12) + timedelta(days=1)
     q = sale.get_kv("sale_pick"); sale.set_kv("sale_pick", [])
     sale.set_kv("first_pass", {"at": datetime.now(timezone.utc).isoformat(), "fit": 0})
@@ -274,7 +282,7 @@ def _():
     o = store.conn.execute("SELECT oid, price_usd, rooms, area, floor FROM broker_offers WHERE broker_chat=?",
                            (str(BROKER),)).fetchone()
     expect(o and o[1] == 48000 and o[2] == 2 and o[3] == 58 and o[4] == 5, f"вариант распознан: {o}")
-    expect(any("t:s:" in " ".join(r["kb"]) for r in MSGS if r["scen"] == SCEN), "кнопки триажа")
+    expect(any("Как вам?" in (r.get("text") or "") for r in MSGS if r["scen"] == SCEN), "карточка: «Как вам?» — ответ своими словами")
 
 
 @scen("7. триаж → шортлист → карточка → уточнение → ответ маклера")
@@ -391,6 +399,8 @@ def _():
 def _():
     rr.handle_callback("R:last", settings, store, cfg, 1)
     lp = sale.get_kv("last_pick") or []
+    if not lp and not SS.pick_pending(sale):
+        print("   пропуск: подборки не было — нечего показывать снова"); return
     expect(lp, "последняя подборка запомнена")
     if lp:
         rr.handle_callback(f"L:v:{lp[min(1, len(lp) - 1)]['key']}", settings, store, cfg, 1)
@@ -407,7 +417,13 @@ def _site_offer():
         o = cg.get_offer(store, oid)
         if o and cg.is_site_offer(o):
             return o
-    return None
+    # в базе нет объявлений с сайтов — тестовое (выдуманный номер, в базу копии, не в живую)
+    oid, _ = cg.add_site_offer(cfg, store, {
+        "key": "sale:sim:1", "site": "uybor", "url": "https://uybor.uz/listings/sim-1", "title": "2-комн, Мирабад",
+        "text": "Продаётся 2-комнатная квартира, 58 м², 5/9, евроремонт, ипотека", "price_usd": 52000,
+        "rooms": 2, "area": 58, "floor": 5, "floors_total": 9, "district": "Мирабад", "mortgage": True,
+        "phones": ["+998900000000"], "photo_urls": []})
+    return cg.get_offer(store, oid)
 
 
 @scen("15. мини-приложение: снимок и действия")
@@ -420,7 +436,7 @@ def _():
     kinds = {"liked", "think", "view", "answer", "wait", "saved"}
     for x in offers:
         expect(x.get("kind") in kinds, f"этап #{x.get('id')}: {x.get('kind')}")
-        expect(isinstance(x.get("photos"), list), f"фото #{x.get('id')} — список")
+        expect(isinstance(x.get("photos", []), list), f"фото #{x.get('id')} — список")
         for f in ("answer", "check_note"):
             if x.get(f) and re.search(r"(?:\+?998)?[\s-]?\(?\d{2}\)?[\s-]?\d{3}[\s-]?\d{2}[\s-]?\d{2}", str(x[f])):
                 ERRS.append(f"{SCEN}: телефон в поле {f} варианта #{x['id']}")

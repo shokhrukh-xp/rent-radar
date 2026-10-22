@@ -192,6 +192,7 @@ await handleUpdate(env, { update_id: ++uid, message: { message_id: uid, chat: { 
 to4242 = sent.filter(x => x.m === "sendMessage" && String(x.chat_id) === "4242");
 const acks = to4242.filter(x => /получила/.test(x.text));
 assert.equal(to4242.length, 3); assert.equal(acks.length, 1);
+assert.ok(!/ИИ-ассистент/.test(acks[0].text) && /передаю клиенту/.test(acks[0].text));   // уже познакомились — без повтора
 qq = await (await svc(`/svc/updates?after=${lastId}`)).json();
 assert.equal(qq.result.length, 3);
 assert.equal(qq.result[0].message._welcomed, true);              // /start — Python не здоровается второй раз

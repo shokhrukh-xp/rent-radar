@@ -1793,6 +1793,7 @@ export const brokerAckText = who => "Здравствуйте! Я Ra'no, ИИ-а
   "Rahmat, получила! 🙌 Если зацепит — вернусь с вопросами. Есть ещё что-то по параметрам — присылайте.\n\n" +
   "Assalomu alaykum! Men Ra'no, AI-yordamchiman — mijozim" + (who ? ` ${who}` : "") + " uchun uy-joy qidiryapman. " +
   "Rahmat, qabul qilindi! Mos kelsa, aniqlik kiritish uchun yozaman. Parametrlarga mos variantlar bo'lsa, yuboravering.";
+export const BROKER_ACK_SHORT = "Rahmat, получила — передаю клиенту 🙌\nRahmat, qabul qildim — mijozga yetkazaman.";
 /** Маклеру, который пришёл по ссылке / поздоровался / нажал «Что ищет клиент» — знакомство и суть запроса. */
 async function brokerWelcome(env, msg, owner) {
   const text = String(msg.text || msg.caption || "").trim();
@@ -1820,10 +1821,13 @@ async function brokerAck(env, msg, forClient) {
   const looksOffer = !!msg.photo || text.length >= 25 || /\d/.test(text);
   if (text.startsWith("/") || !looksOffer) return false;
   const k = "ack:" + msg.chat.id;
+  const last = Math.max(await kvGet(env, k, 0), await kvGet(env, "welcome:" + msg.chat.id, 0));
   if (Date.now() - (await kvGet(env, k, 0)) < 20 * 60e3) { msg._acked = true; return false; }
   await kvSet(env, k, Date.now());
+  // уже знакомы (неделя) — без повторного представления: это может быть и ответ на наши вопросы
+  const known = Date.now() - last < 7 * 86400e3;
   const r = await tg(env, "sendMessage", { chat_id: msg.chat.id, parse_mode: "HTML", disable_web_page_preview: true,
-    text: brokerAckText(forClient ? await clientMention(env, forClient) : "") });
+    text: known ? BROKER_ACK_SHORT : brokerAckText(forClient ? await clientMention(env, forClient) : "") });
   if (r && r.ok !== false) msg._acked = true;
   return true;
 }

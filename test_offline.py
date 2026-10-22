@@ -3413,6 +3413,10 @@ _o3, _ = rr.intake_offer(cfg, _as, "chat:1", "1", "M", "", ["f2"], media_group="
 assert _o1 == _o2 == _o3 and cg.get_offer(_as, _o1)["photos"] == ["f1", "f2"]
 assert cg.looks_like_new_offer(_as, cfg, _o1, "Ещё вариант: 3-комн Юнусабад 900$, 80 м2")
 assert not cg.looks_like_new_offer(_as, cfg, _o1, "Да, актуален, 5 этаж из 9")
+assert not cg.looks_like_new_offer(_as, cfg, _o1, "Да, актуально. Документы готовы, торг 100$, смотреть в субботу")
+assert not cg.looks_like_new_offer(_as, cfg, _o1, "Комиссия 300$, залог за месяц")
+assert rr.fmt_phone("901234567") == rr.fmt_phone("+998901234567") == rr.fmt_phone("+998 90 123 45 67") == "+998 90 123-45-67"
+assert cg.looks_like_new_offer(_as, cfg, _o1, "Есть 2-комн Чиланзар 1200$, 70 м2")
 _as.set_kv("anketa", {"ans": {"deal": "rent"}})
 assert "аренду" in rr.handle_callback("R:pick", {}, _as, cfg)[0] and "аренду" in rr.handle_callback("R:last", {}, _as, cfg)[0]
 _ap.unlink(missing_ok=True)

@@ -768,9 +768,16 @@ def looks_like_new_offer(store, cfg, oid, text) -> bool:
     p = parse_offer(text, cfg)
     if p.get("rooms") and o.get("rooms") and p["rooms"] != o["rooms"]:
         return True
-    if p.get("price_usd") and o.get("price_usd") and abs(p["price_usd"] - o["price_usd"]) / o["price_usd"] > 0.3:
+    # другая цена — новая квартира, только если это похоже на описание квартиры, а не на торг или комиссию
+    # («Да, актуально, торг 1000$» — ответ, а не вариант за $1000)
+    if (p.get("price_usd") and o.get("price_usd") and abs(p["price_usd"] - o["price_usd"]) / o["price_usd"] > 0.3
+            and (p.get("rooms") or p.get("area")) and not DEAL_TALK_RE.search(text)):
         return True
     return False
+
+
+DEAL_TALK_RE = re.compile(r"торг|скидк|уступ|комисс|задат|залог|депозит|предоплат|аванс|chegirma|kelishamiz|"
+                          r"komissiya|zakalat|oldindan", re.I)
 
 
 def pending_answer(store, chat_id, hours=72):
