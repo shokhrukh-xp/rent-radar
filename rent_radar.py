@@ -4796,12 +4796,12 @@ def can_ask_seller(ref, l) -> bool:
 
 def card_kb(ref, left=0, l=None):
     l = l or {}
-    rows = [[{"text": "💾 Сохранить", "callback_data": f"Q:s|{ref}"[:64]},
-             {"text": "⏭ Пропустить", "callback_data": f"Q:n|{ref}"[:64]}]]
+    rows = [[{"text": t("💾 Сохранить"), "callback_data": f"Q:s|{ref}"[:64]},
+             {"text": t("⏭ Пропустить"), "callback_data": f"Q:n|{ref}"[:64]}]]
     if can_ask_seller(ref, l):
-        rows.append([{"text": "✍️ Уточнить у продавца", "callback_data": f"Q:a|{ref}"[:64]}])
+        rows.append([{"text": t("✍️ Уточнить у продавца"), "callback_data": f"Q:a|{ref}"[:64]}])
     elif str(l.get("url") or "").startswith("http"):
-        rows.append([{"text": "🔗 Открыть объявление — там контакт", "url": l["url"]}])
+        rows.append([{"text": t("🔗 Открыть объявление — там контакт"), "url": l["url"]}])
     return {"inline_keyboard": rows}
 
 
