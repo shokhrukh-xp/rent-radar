@@ -3409,3 +3409,27 @@ _as.set_kv("anketa", {"ans": {"deal": "rent"}})
 assert "аренду" in rr.handle_callback("R:pick", {}, _as, cfg)[0] and "аренду" in rr.handle_callback("R:last", {}, _as, cfg)[0]
 _ap.unlink(missing_ok=True)
 print("OK — маклеры: текст и альбом — один вариант, новая квартира в ответе — отдельно; у аренды нет подборки продажи")
+# поиск по накопленному за 14 дней: объявление недельной давности внутри области — находится (раньше резал
+# предел свежести уведомлений в 3 дня); пусто — один раз и с причинами, без повтора
+_rp = Path("/tmp/test_rs14.db"); _rp.unlink(missing_ok=True)
+_rs = rr.Store(_rp)
+_sq = [[41.32, 69.26], [41.32, 69.30], [41.30, 69.30], [41.30, 69.26]]
+_old = (datetime.now(timezone.utc) - timedelta(days=9)).isoformat()
+_rl = {"key": "uybor:77", "source": "Uybor", "url": "u", "title": "2-комн", "text": "Сдаётся 2-комн, хозяин",
+       "phones": [], "rooms": 2, "price_value": 700, "price_currency": "USD", "created_at": _old,
+       "lat": 41.31, "lon": 69.28, "geo": {"lat": 41.31, "lon": 69.28, "src": "сайт"}, "photo_urls": ["p"]}
+_rs.save(_rl, notified=False)
+_rset = {**rr.default_settings(), "areas": [_sq], "rooms_min": 2, "rooms_max": 3, "max_price_usd": 1000,
+         "owner_only": False}
+_RS = []
+with mock.patch.object(rr, "send_telegram", lambda c, t_, **k: _RS.append(t_) or True), \
+        mock.patch.object(rr, "send_listing", lambda *a, **k: _RS.append("card") or True), \
+        mock.patch.object(rr.time, "sleep", lambda s: None):
+    rr.run_search(dict(cfg, telegram_chat_id="1"), _rs, _rset, days=14)
+    assert "card" in _RS and "Лучшее сейчас" in _RS[0], _RS
+    _RS.clear()
+    rr.run_search(dict(cfg, telegram_chat_id="1"), _rs, dict(_rset, rooms_min=4, rooms_max=4), days=14)
+    rr.run_search(dict(cfg, telegram_chat_id="1"), _rs, dict(_rset, rooms_min=4, rooms_max=4), days=14)
+    assert len(_RS) == 1 and "Внутри области за 14 дн. — 1 объявление" in _RS[0] and "комнаты" in _RS[0], _RS
+_rp.unlink(missing_ok=True)
+print("OK — поиск за 14 дней: свежесть по тому же окну; «ничего нет» — один раз и с причинами")

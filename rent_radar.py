@@ -11,6 +11,7 @@ Telegram-каналы (публичные веб-превью t.me/s/..., без
 Запуск: python3 rent_radar.py
 """
 
+import collections
 import hashlib
 import html as html_lib
 import json
@@ -2983,16 +2984,31 @@ def push_snapshot(cfg, store, settings, force=False) -> bool:
 
 
 def run_search(cfg, store, settings, limit=5, days=7) -> str:
-    """Анализирует всё, что накоплено, и присылает лучшее прямо сейчас."""
+    """Анализирует всё, что накоплено за days дней, и присылает лучшее прямо сейчас.
+    Свежесть — по тому же окну (не notify_max_age_days: тот предел — для новых уведомлений, иначе поиск
+    «за 14 дней» молча отбрасывал всё старше трёх). Ничего не подошло — честно, сколько и почему отсеяно."""
     stats = analyst.market_stats(store)
     pool = store.recent(days=days)
     ok = []
+    eff = effective_cfg(cfg, settings)
+    areas = settings.get("areas") or []
+    why = collections.Counter()
     for l in pool:
         try:
-            if not passes_filters(l, effective_cfg(cfg, settings)):
+            if areas:
+                r_ = geo.area_reject(l, areas)
+                if r_:
+                    why["вне области" if r_.startswith("вне") else "без точного адреса"] += 1
+                    continue
+            if not passes_filters(l, eff, max_age=days):
+                why["цена"] += 1
                 continue
-            if not passes_user_filters(l, settings) or \
-                    relevance_reject(l, cfg, settings, store):
+            if not passes_user_filters(l, settings):
+                why["комнаты" if areas else "комнаты или район"] += 1
+                continue
+            rj = relevance_reject(l, cfg, settings, store)
+            if rj:
+                why["агентство или маклер" if rj.startswith("не хозяин") else "не та квартира"] += 1
                 continue
             ok.append(analyst.score_listing(l, store, cfg, stats, settings))
         except Exception as e:
@@ -3000,9 +3016,28 @@ def run_search(cfg, store, settings, limit=5, days=7) -> str:
     ok.sort(key=lambda x: x.get("score", 0), reverse=True)
 
     if not ok:
-        send_telegram(cfg, f"🔍 За последние {days} дн. подходящих вариантов нет.\n"
-                           f"Просмотрено {len(pool)}. Можно ослабить условия — напишите, например, «бюджет до 800» или «любой район».")
+        fp = json.dumps({k: settings.get(k) for k in ("areas", "districts", "rooms_min", "rooms_max", "max_price_usd",
+                                                      "near", "owner_only")}, sort_keys=True, default=str)
+        last = store.get_kv("empty_search") or {}
+        if last.get("fp") == fp and time.time() - float(last.get("at") or 0) < 1800:
+            return ""                          # то же самое только что говорила — не повторяю
+        store.set_kv("empty_search", {"fp": fp, "at": time.time()})
+        if areas:
+            inside = len(pool) - why["вне области"] - why["без точного адреса"]
+            parts = [f"{n} — {k}" for k, n in why.most_common() if k not in ("вне области", "без точного адреса")]
+            txt = (f"🔍 Внутри области за {days} дн. — {inside} "
+                   f"{concierge.plural(inside, 'объявление', 'объявления', 'объявлений')}, подходящих нет"
+                   + (f" ({', '.join(parts)})" if parts else "") + ".")
+            if why["без точного адреса"]:
+                txt += (f"\nЕщё {why['без точного адреса']} — без точного адреса: проверить, внутри ли они, не могу, "
+                        "поэтому не показываю.")
+            txt += "\nМожно расширить область («Меню» → «Карта») или ослабить условия."
+        else:
+            txt = (f"🔍 За последние {days} дн. подходящих вариантов нет.\n"
+                   f"Просмотрено {len(pool)}. Можно ослабить условия — напишите, например, «бюджет до 800» или «любой район».")
+        send_telegram(cfg, txt)
         return ""
+    store.set_kv("empty_search", {})
 
     head = [f"🔎 <b>Лучшее сейчас</b> — {min(limit, len(ok))} из {len(ok)} подходящих "
             f"(просмотрено {len(pool)} за {days} дн.)"]
@@ -3834,7 +3869,8 @@ def _process_updates(cfg: dict, store, ups: list, settings: dict) -> dict:
     return settings
 
 
-def passes_filters(l: dict, cfg: dict) -> bool:
+def passes_filters(l: dict, cfg: dict, max_age=None) -> bool:
+    """Цена и свежесть. max_age — свой предел (поиск по накопленному за N дней), иначе notify_max_age_days."""
     l["price_usd"] = to_usd(l.get("price_value"), l.get("price_currency"), cfg)
     p = l["price_usd"]
     if p is not None:
@@ -3843,7 +3879,8 @@ def passes_filters(l: dict, cfg: dict) -> bool:
         if cfg["min_price_usd"] and p < cfg["min_price_usd"]:
             return False
     a = age_days(l.get("created_at") or "")
-    if a is not None and cfg["notify_max_age_days"] and a > cfg["notify_max_age_days"]:
+    lim = max_age if max_age is not None else cfg["notify_max_age_days"]
+    if a is not None and lim and a > lim:
         return False
     return True
 
