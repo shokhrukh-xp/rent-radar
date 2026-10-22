@@ -2,6 +2,7 @@
 // Для клиентов, маклеров и для проверки регулятором. Открывается по адресу воркера /about (и /about?lang=uz, /about?lang=en).
 
 const RU = {
+  tag: "Поиск и общение — на мне. Решение — за вами.",
   title: "Ra'no — личный ИИ-помощник для поиска жилья",
   lead: "Ra'no работает только на вас — на того, кто ищет квартиру, чтобы снять или купить. Она не риэлтор и не заменяет риэлтора: это помощник, который делает за вас рутину — ищет, сравнивает, пишет и напоминает. Решения принимаете вы.",
   does: ["Просматривает открытые объявления на сайтах и в Telegram-каналах по вашим условиям — районам, цене, комнатам или области, которую вы обвели на карте.",
@@ -20,6 +21,7 @@ const RU = {
   h: ["Что делает", "Чего не делает", "Кто платит", "Маклеры и риэлторы", "Ваши данные"], open: "Открыть Ra'no в Telegram",
 };
 const UZ = {
+  tag: "Qidiruv va muloqot — menda. Qaror — sizda.",
   title: "Ra'no — uy-joy qidirish uchun shaxsiy sun'iy intellekt yordamchisi",
   lead: "Ra'no faqat siz uchun ishlaydi — kvartira ijaraga olmoqchi yoki sotib olmoqchi bo'lgan odam uchun. U rieltor emas va rieltorning o'rnini bosmaydi: bu sizning o'rningizga qidiradigan, solishtiradigan, yozadigan va eslatadigan yordamchi. Qarorni siz qabul qilasiz.",
   does: ["Saytlar va Telegram kanallaridagi ochiq e'lonlarni sizning shartlaringiz bo'yicha ko'rib chiqadi.",
@@ -38,6 +40,7 @@ const UZ = {
   h: ["Nima qiladi", "Nima qilmaydi", "Kim to'laydi", "Makler va rieltorlar", "Ma'lumotlaringiz"], open: "Ra'noni Telegramda ochish",
 };
 const EN = {
+  tag: "I search and talk. You decide.",
   title: "Ra'no — a personal AI assistant for finding a home",
   lead: "Ra'no works only for you — the person looking for a flat to rent or buy. She is not a realtor and does not replace one: she is an assistant who does the routine for you — searching, comparing, writing and reminding. You make the decisions.",
   does: ["Checks open listings on websites and Telegram channels against your terms — districts, price, rooms or an area you drew on the map.",
@@ -66,11 +69,11 @@ export function aboutHtml(lang = "ru", bot = "rano_smart_bot") {
 body{margin:0;background:var(--bg);color:var(--ink);font:17px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
 main{max-width:720px;margin:0 auto;padding:28px 18px 48px}h1{font-size:26px;line-height:1.25;margin:0 0 12px}
 h2{font-size:18px;margin:28px 0 8px;color:var(--accent)}p,li{color:var(--ink)}ul{padding-left:20px}li{margin:6px 0}
-.lead{font-size:18px}.muted{color:var(--muted);font-size:14px;margin-top:32px;border-top:1px solid var(--line);padding-top:12px}
+.lead{font-size:18px}.tag{font-size:20px;font-weight:600;color:var(--accent);margin:0 0 14px}.muted{color:var(--muted);font-size:14px;margin-top:32px;border-top:1px solid var(--line);padding-top:12px}
 a.btn{display:inline-block;margin-top:18px;background:var(--accent);color:#fff;text-decoration:none;padding:12px 18px;border-radius:12px;font-weight:600}
 .lang{float:right;font-size:14px}.lang a{color:var(--muted)}</style></head><body><main>
 <div class="lang"><a href="?lang=ru">Русский</a> · <a href="?lang=uz">O'zbekcha</a> · <a href="?lang=en">English</a></div>
-<h1>${esc(T.title)}</h1><p class="lead">${esc(T.lead)}</p>
+<h1>${esc(T.title)}</h1><p class="tag">${esc(T.tag)}</p><p class="lead">${esc(T.lead)}</p>
 <h2>${T.h[0]}</h2>${ul(T.does)}<h2>${T.h[1]}</h2>${ul(T.doesnt)}<h2>${T.h[2]}</h2><p>${esc(T.money)}</p>
 <h2>${T.h[3]}</h2><p>${esc(T.law)}</p><h2>${T.h[4]}</h2><p>${esc(T.data)}</p>
 <a class="btn" href="https://t.me/${bot}">${esc(T.open)}</a><p class="muted">${esc(T.who)}</p></main></body></html>`;

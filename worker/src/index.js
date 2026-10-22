@@ -1263,23 +1263,25 @@ async function redeemInvite(env, msg, code) {
 
 // ── знакомство: что умею, три кнопки «что ищем», язык
 export const WELCOME = {
-  ru: "🎉 Доступ открыт! Я Ra'no — ваш личный ИИ-помощник по поиску квартиры в Ташкенте. Работаю только на вас: " +
-    "денег от продавцов и маклеров не беру.\n\n" +
+  ru: "🎉 Доступ открыт! Я Ra'no — ваш личный ИИ-помощник по поиску квартиры в Ташкенте.\n" +
+    "Поиск и общение — на мне. Решение — за вами.\n\n" +
     "🔎 Каждые 10 минут смотрю сайты и Telegram-каналы и присылаю свежие варианты по одному — с ценой против рынка и местом на карте.\n" +
-    "✍️ По вашей просьбе спрошу продавца о том, что важно, — от вашего имени.\n\n" +
+    "✍️ Продавцам и маклерам пишу сама — от вашего имени, когда попросите.\n" +
+    "🤝 Работаю только на вас: денег от продавцов и маклеров не беру.\n\n" +
     "Что ищем? Нажмите кнопку или напишите своими словами — например, «сниму 2-комн в Юнусабаде до $600, с котом».\n\n" +
     "Сейчас бета: всё бесплатно. Вопрос или что-то сломалось — /support.",
-  uz: "🎉 Kirish ochildi! Men Ra'no — Toshkentda kvartira qidirish bo'yicha shaxsiy AI-yordamchingizman. Faqat siz uchun " +
-    "ishlayman: sotuvchi va maklerlardan pul olmayman.\n\n" +
+  uz: "🎉 Kirish ochildi! Men Ra'no — Toshkentda kvartira qidirish bo'yicha shaxsiy AI-yordamchingizman.\n" +
+    "Qidiruv va muloqot — menda. Qaror — sizda.\n\n" +
     "🔎 Har 10 daqiqada saytlar va Telegram-kanallarni ko'rib, yangi variantlarni bittadan yuboraman — bozor narxi bilan " +
-    "solishtirib, xaritadagi joyi bilan.\n✍️ Iltimosingiz bilan sotuvchidan muhim savollarni sizning nomingizdan so'rayman.\n\n" +
+    "solishtirib, xaritadagi joyi bilan.\n✍️ Sotuvchi va maklerlarga o'zim yozaman — siz so'rasangiz, sizning nomingizdan.\n" +
+    "🤝 Faqat siz uchun ishlayman: sotuvchi va maklerlardan pul olmayman.\n\n" +
     "Nima qidiramiz? Tugmani bosing yoki o'zingizcha yozing — masalan, «Yunusobodda 2 xonali, $600 gacha».\n\n" +
     "Hozir beta: hammasi bepul. Savol yoki nimadir ishlamasa — /support.",
-  en: "🎉 You're in! I'm Ra'no, your personal AI assistant for finding a flat in Tashkent. I work only for you: " +
-    "I take no money from sellers or brokers.\n\n" +
+  en: "🎉 You're in! I'm Ra'no, your personal AI assistant for finding a flat in Tashkent.\n" +
+    "I search and talk. You decide.\n\n" +
     "🔎 Every 10 minutes I check listing sites and Telegram channels and send fresh options one by one — with the price " +
-    "against the market and the spot on the map.\n✍️ On request I'll ask the seller what matters to you, on your behalf, " +
-    "in Russian or Uzbek.\n\n" +
+    "against the market and the spot on the map.\n✍️ I write to sellers and brokers myself, in Russian or Uzbek — " +
+    "on your behalf, when you ask.\n🤝 I work only for you: no money from sellers or brokers.\n\n" +
     "What are we looking for? Tap a button or just write, e.g. \"rent a 2-room flat in Yunusabad up to $600, with a cat\".\n\n" +
     "It's a beta: everything is free. Questions or something broke — /support.",
 };
@@ -1659,29 +1661,29 @@ export const AVATAR_URL = "https://raw.githubusercontent.com/shokhrukh-xp/rent-r
 export const PROFILE = {
   name: { "": "Ra'no", uz: "Ra'no", en: "Ra'no" },
   short: {
-    "": "Ra'no 👋 сама ищет квартиры в Ташкенте на сайтах и в Telegram-каналах, а если пусто — подключит маклеров.",
-    uz: "Ra'no 👋 Toshkentda kvartirani saytlar va Telegram-kanallardan o'zi qidiradi, topilmasa — maklerlarni ulaydi.",
-    en: "Ra'no 👋 finds flats in Tashkent herself on sites and Telegram channels, and brings in brokers if it's empty.",
+    "": "Ra'no — ваш ИИ-помощник по поиску жилья в Ташкенте. Поиск и общение — на мне. Решение — за вами.",
+    uz: "Ra'no — Toshkentda uy-joy qidirish bo'yicha AI-yordamchingiz. Qidiruv va muloqot — menda. Qaror — sizda.",
+    en: "Ra'no — your AI assistant for finding a home in Tashkent. I search and talk. You decide.",
   },
   long: {
-    "": "Привет! Я Ra'no 👋 — ИИ-ассистент, которая обожает квартиры в Ташкенте: аренда и покупка.\n\n" +
-      "🔎 Сначала ищу сама — каждый день смотрю Uybor, Realt24, Joymee, Realting, Yangiuylar и Telegram-каналы. " +
-      "Выгодное приношу сразу, остальное — вечером, без повторов.\n" +
-      "📇 На сайтах пусто — подберу маклеров: нажмёте на имя, запрос уже вписан, останется «Отправить».\n" +
-      "📊 К каждому варианту — честный разбор цены: дешевле рынка или кто-то загнул 😉\n\n" +
-      "Маклерам: жмите Start и присылайте варианты — передам клиенту сразу 🙌",
-    uz: "Salom! Men Ra'no 👋 — Toshkentdagi kvartiralarni juda yaxshi ko'radigan AI-yordamchiman: ijara va sotib olish.\n\n" +
-      "🔎 Avval o'zim qidiraman — har kuni Uybor, Realt24, Joymee, Realting, Yangiuylar va Telegram-kanallarni ko'raman. " +
-      "Zo'rini darhol, qolganini to'plamda yuboraman.\n" +
-      "📇 Saytlarda topilmasa — maklerlarni ulayman: so'rovni men tayyorlayman.\n" +
-      "📊 Har bir variantga — halol narx tahlili 😉\n\n" +
-      "Maklerlar uchun: Start ni bosing va variantlarni yuboring — mijozga darhol yetkazaman 🙌",
-    en: "Hi! I'm Ra'no 👋 — an AI assistant who loves flats in Tashkent: renting and buying.\n\n" +
-      "🔎 I search myself first — every day on Uybor, Realt24, Joymee, Realting, Yangiuylar and Telegram channels. " +
-      "Great deals right away, the rest in the evening, no repeats.\n" +
-      "📇 Sites empty? I'll pick brokers: tap a name, the request is already typed, just press «Send».\n" +
-      "📊 Every option comes with an honest price analysis 😉\n\n" +
-      "Brokers: press Start and send your options — I'll pass them to the client right away 🙌",
+    "": "Ra'no — личный ИИ-помощник для тех, кто снимает или покупает квартиру в Ташкенте.\n\n" +
+      "Поиск и общение — на мне. Решение — за вами.\n\n" +
+      "🔎 Слежу за сайтами и Telegram-каналами и присылаю свежие варианты по одному — с ценой против рынка и местом на карте.\n" +
+      "✍️ Продавцам и маклерам пишу сама — от вашего имени, когда попросите.\n" +
+      "🤝 Работаю только на вас: денег от продавцов и маклеров не беру.\n\n" +
+      "Маклерам: жмите Start и присылайте варианты — передам клиенту.",
+    uz: "Ra'no — Toshkentda kvartira ijaraga oluvchi yoki sotib oluvchilar uchun shaxsiy AI-yordamchi.\n\n" +
+      "Qidiruv va muloqot — menda. Qaror — sizda.\n\n" +
+      "🔎 Saytlar va Telegram-kanallarni kuzatib, yangi variantlarni bittadan yuboraman — bozor narxi va xaritadagi joyi bilan.\n" +
+      "✍️ Sotuvchi va maklerlarga o'zim yozaman — siz so'rasangiz, sizning nomingizdan.\n" +
+      "🤝 Faqat siz uchun ishlayman: sotuvchi va maklerlardan pul olmayman.\n\n" +
+      "Maklerlar: Start ni bosing va variantlarni yuboring.",
+    en: "Ra'no is a personal AI assistant for people renting or buying a flat in Tashkent.\n\n" +
+      "I search and talk. You decide.\n\n" +
+      "🔎 I watch listing sites and Telegram channels and send fresh options one by one — with the price against the market and the spot on the map.\n" +
+      "✍️ I write to sellers and brokers myself — on your behalf, when you ask.\n" +
+      "🤝 I work only for you: no money from sellers or brokers.\n\n" +
+      "Brokers: press Start and send your options.",
   },
 };
 const WAIT = {
