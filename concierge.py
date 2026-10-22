@@ -919,6 +919,15 @@ def add_site_offer(cfg, store, l):
             set_offer_status(store, r[0], "shortlist")
             return r[0], True
         return r[0], False
+    rr = _rr()
+    try:                                       # район — как на карточке: по точке, а не по полю сайта
+        if not l.get("geo"):
+            import geo as _geo
+            _geo.locate(l)
+    except Exception:
+        pass
+    if not l.get("price_usd") and l.get("price_value"):
+        l["price_usd"] = rr.to_usd(l.get("price_value"), l.get("price_currency"), cfg)
     extra = {"url": l.get("url"), "phones": (l.get("phones") or [])[:2], "address": l.get("district_raw"),
              "summary": ", ".join(l.get("why") or []) or None, "site_key": key,
              "building": "new" if l.get("new_building") else None, "repair": l.get("repair"),

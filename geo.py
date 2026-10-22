@@ -376,6 +376,10 @@ def locate(l: dict) -> dict:
             # в тексте прямо «Район: Мирзо-Улугбекский», а метка — в Мирабаде: агентства оставляют метку по умолчанию.
             # Такой точке не верим — для поиска по радиусу и области она «примерная»
             g.update(spread=3.0, conflict=next(iter(said)))
+            if d != g["conflict"]:                 # район — как написал продавец
+                l.setdefault("district_site", d)
+                l["district_by"] = "текст"
+                l["district"] = d = g["conflict"]
         elif d and dd and dd != d:
             l.setdefault("district_site", d)
             l["district_by"] = "точка"
