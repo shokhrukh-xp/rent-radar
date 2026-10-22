@@ -2602,7 +2602,8 @@ export default {
           .map(d => ({ inlineData: { mimeType: "image/png", data: String(d) } }));
         const r = await fetch(base + ":generateContent", { method: "POST", headers: hdr, body: JSON.stringify({
           contents: [{ role: "user", parts: [...refs, { text: String(b.prompt) }] }],
-          generationConfig: { responseModalities: ["IMAGE", "TEXT"], imageConfig: { aspectRatio: b.aspect || "1:1" } } }) });
+          generationConfig: { responseModalities: ["IMAGE", "TEXT"],
+            imageConfig: { aspectRatio: b.aspect || "1:1", ...(b.size ? { imageSize: String(b.size) } : {}) } } }) });
         const d = await r.json().catch(() => ({}));
         const parts = d.candidates?.[0]?.content?.parts || [];
         return json({ ok: r.ok, error: d.error?.message, images: parts.map(x => x.inlineData?.data).filter(Boolean),
