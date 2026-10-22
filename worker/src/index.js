@@ -1657,7 +1657,7 @@ async function queueAndWake(env, upd, chat, note) {
 const GREET = Object.fromEntries(Object.entries(WELCOME).map(([l, t]) =>
   [l, t.replace(/^🎉 [^!]+! /, { ru: "Привет! ", uz: "Salom! ", en: "Hi! " }[l])]));
 // Профиль бота: «О боте» (до 120 символов) и экран до Start (до 512) — русский по умолчанию, узбекский отдельно
-export const AVATAR_URL = "https://raw.githubusercontent.com/shokhrukh-xp/rent-radar/main/docs/brand/rano_avatar_navy.jpg";
+export const AVATAR_URL = "https://raw.githubusercontent.com/shokhrukh-xp/rent-radar/main/docs/brand/rano_avatar.jpg";
 export const PROFILE = {
   name: { "": "Ra'no", uz: "Ra'no", en: "Ra'no" },
   short: {
