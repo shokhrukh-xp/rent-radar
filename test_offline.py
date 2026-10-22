@@ -3433,3 +3433,32 @@ with mock.patch.object(rr, "send_telegram", lambda c, t_, **k: _RS.append(t_) or
     assert len(_RS) == 1 and "Внутри области за 14 дн. — 1 объявление" in _RS[0] and "комнаты" in _RS[0], _RS
 _rp.unlink(missing_ok=True)
 print("OK — поиск за 14 дней: свежесть по тому же окну; «ничего нет» — один раз и с причинами")
+# живые тесты в боте: уже присланное не шлём повторно; подпись карточки аренды; «$1 000.0»; «звоните сразу» —
+# только свежим; маклер со 166 объявлениями — не «хозяин»; метка сайта против района из текста
+_rp = Path("/tmp/test_live2.db"); _rp.unlink(missing_ok=True)
+_rs = rr.Store(_rp)
+_rl2 = dict(_rl, key="uybor:78")
+_rs.save(_rl2, notified=True)
+_RS = []
+with mock.patch.object(rr, "send_telegram", lambda c, t_, **k: _RS.append(t_) or True), \
+        mock.patch.object(rr, "send_listing", lambda *a, **k: _RS.append("card") or True):
+    rr.run_search(dict(cfg, telegram_chat_id="1"), _rs, _rset, days=14)
+assert "card" not in _RS and "все уже присылала" in _RS[0], _RS
+assert rr.card_line("🏠 <b>[Uybor]</b> #1 · x\n💰 $700\n🛏 3-комн · 📍 Мирабад\n🕐 09.10") == "3-комн · Мирабад · $700"
+_fm = rr.format_message(dict(_rl2, price_value=1000.0, created_at=_old), cfg, False)
+assert "$1 000" in _fm and "1 000.0" not in _fm and "Звоните сразу" not in _fm
+assert "Звоните сразу" in rr.format_message(dict(_rl2, created_at=datetime.now(timezone.utc).isoformat()), cfg, False)
+_rs.conn.execute("INSERT OR REPLACE INTO seller_counts VALUES('uybor:u9', 166)"); _rs.conn.commit()
+assert "маклер" in rr.owner_only_reject(dict(_rl2, seller_id="uybor:u9", seller_ads=1), _rs, cfg, {})
+_rp.unlink(missing_ok=True)
+with mock.patch.object(_geo_t, "district_at", lambda la, lo, radius=0.8: "Мирабад"), \
+        mock.patch.object(_geo_t, "_near_district", lambda *a, **k: False), \
+        mock.patch.dict(_geo_t.GAZ, {"pts": [(41.3, 69.27, "Мирабад")]}):
+    _gc = _geo_t.locate({"title": "", "text": "Район: Мирзо-Улубекский\nАдрес: Аккурган", "lat": 41.2986, "lon": 69.2675,
+                         "district": "Мирабад"})
+    assert _gc["spread"] == 3.0 and _gc["conflict"] == "Мирзо-Улугбек"
+    assert "примерное" in _geo_t.area_reject({"geo": _gc}, [_sq])
+    _gok = _geo_t.locate({"title": "", "text": "Мирабадский район, ул. Чехова", "lat": 41.2986, "lon": 69.2675,
+                          "district": "Мирабад"})
+    assert not _gok.get("spread")
+print("OK — живые тесты: без повторов карточек, подпись и цена аренды, маклер по числу объявлений, метка против района")

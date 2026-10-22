@@ -1145,7 +1145,8 @@ export async function drawApi(env, path, body) {
   if (!user) return { ok: false, error: "auth" };
   const chat = String(user.id);
   if (!(await isClient(env, chat))) return { ok: false, error: "not_client" };
-  if (path === "/draw/load") return { ok: true, areas: (await kvGet(env, "areas:" + chat, null)) || [] };
+  if (path === "/draw/load") return { ok: true, areas: (await kvGet(env, "areas:" + chat, null)) || [],
+    lang: await ownerLang(env, chat).catch(() => null) };
   const areas = cleanAreas(body?.areas);
   if (!areas) return { ok: false, error: "bad_areas" };
   await kvSet(env, "areas:" + chat, areas);

@@ -59,10 +59,13 @@ const T = {
         small: "Area too small — draw a bigger one" },
 };
 const lang = (new URLSearchParams(location.search).get("lang") || (tg && tg.initDataUnsafe && tg.initDataUnsafe.user && tg.initDataUnsafe.user.language_code) || "ru").slice(0, 2);
-const L_ = T[lang] || T.ru;
-document.querySelector("#hint").innerHTML = "<b>" + L_.title + "</b><span class='m'>" + L_.sub + "</span>";
+let L_ = T[lang] || T.ru;
 const $ = s => document.querySelector(s);
-$("#draw").textContent = L_.draw; $("#save").textContent = L_.save;
+function applyLang(l) {                    // язык клиента в боте (воркер знает) главнее языка Telegram
+  L_ = T[l] || L_;
+  $("#hint").innerHTML = "<b>" + L_.title + "</b><span class='m'>" + L_.sub + "</span>";
+  $("#draw").textContent = drawing ? L_.drawing : L_.draw; $("#save").textContent = L_.save;
+}
 const map = L.map("map", { zoomControl: false, attributionControl: true }).setView([41.3111, 69.2797], 12);
 L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 18, attribution: "© OpenStreetMap" }).addTo(map);
 const style = { color: "#2f6fde", weight: 3, fillColor: "#2f6fde", fillOpacity: 0.18 };
@@ -77,6 +80,7 @@ function redraw() {
 function fit() { if (areas.length) map.fitBounds(L.featureGroup(layers).getBounds(), { padding: [40, 40] }); }
 // рисование пальцем: пока режим включён, карта не двигается, а точки касания собираются в линию
 let drawing = false, pts = [], line = null, lastPx = null;
+applyLang(lang);
 function setDrawing(on) {
   drawing = on; $("#map").classList.toggle("drawing", on);
   $("#draw").classList.toggle("on", on); $("#draw").textContent = on ? L_.drawing : L_.draw;
@@ -126,5 +130,8 @@ $("#save").onclick = async () => {
   toast(areas.length ? L_.saved : L_.cleared);
   setTimeout(() => { try { tg.close(); } catch (e) {} }, 900);
 };
-api("/draw/load", {}).then(r => { if (r.ok && Array.isArray(r.areas)) { areas = r.areas; redraw(); fit(); } else redraw(); });
+api("/draw/load", {}).then(r => {
+  if (r.lang) applyLang(r.lang);
+  if (r.ok && Array.isArray(r.areas)) { areas = r.areas; redraw(); fit(); } else redraw();
+});
 </script></body></html>`;

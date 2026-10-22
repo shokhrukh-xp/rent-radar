@@ -318,6 +318,35 @@ def resolve_phrase(phrase: str, district=None):
     return None
 
 
+# «Район: Мирзо-Улугбекский», «Юнусабадский район», «Olmazor tumani» — район, прямо названный в тексте
+EXPLICIT_DISTRICT_RE = re.compile(
+    r"(?:район|р-н|tuman|туман)\w*\s*[:\-–—]\s*([^\n,.;()]{4,30})"
+    r"|([A-Za-zА-Яа-яЁёЎўҚқҒғҲҳʻ'’\-]{4,25})(?:ский|скому|ском)?\s+(?:район\w*|р-н\b|tumani\b|тумани\b)", re.I)
+_DPREFIX = {"yakas": "Яккасарай", "mirab": "Мирабад", "yunus": "Юнусабад", "chila": "Чиланзар",
+            "mirza": "Мирзо-Улугбек", "ulugb": "Мирзо-Улугбек", "ulube": "Мирзо-Улугбек", "shayh": "Шайхантахур",
+            "almaz": "Алмазар", "uchte": "Учтепа", "yashn": "Яшнабад", "serge": "Сергели", "bekte": "Бектемир",
+            "yangi": "Янгихаёт"}
+
+
+def text_districts(text: str) -> set:
+    """Районы, прямо названные в тексте объявления (не «рядом с Мирабадским рынком»)."""
+    out = set()
+    for m in EXPLICIT_DISTRICT_RE.finditer(text or ""):
+        toks = skel(m.group(1) or m.group(2) or "").split()
+        for t in toks[:2]:
+            d = _DPREFIX.get(t[:5])
+            if d:
+                out.add(d)
+                break
+    return out
+
+
+def _near_district(lat, lon, district, km_=1.2) -> bool:
+    """Точка у границы названного района (в справочнике его объявления ближе km_) — это не противоречие."""
+    return any(d == district and abs(la - lat) < 0.02 and km(lat, lon, la, lo) <= km_
+               for la, lo, d, *_ in GAZ["pts"])
+
+
 def locate(l: dict) -> dict:
     """Где объявление. Ставит l['geo'] = {lat, lon, src, label, district?}; возвращает его или {}.
     Порядок: координаты сайта (если не в чужом районе) → ориентир из текста → метро из текста."""
@@ -341,11 +370,16 @@ def locate(l: dict) -> dict:
         # координаты сайта точнее поля «район»: у Uybor район выведен по id и бывает чужим
         # (Куйлюк с пометкой «Мирабад»). Точка в другом районе — исправляем район, а не выбрасываем точку.
         dd = district_at(la, lo) if GAZ["pts"] else None
-        if d and dd and dd != d:
+        said = text_districts(text)
+        g = {"lat": la, "lon": lo, "src": "сайт", "label": label}
+        if dd and len(said) == 1 and dd not in said and not _near_district(la, lo, next(iter(said))):
+            # в тексте прямо «Район: Мирзо-Улугбекский», а метка — в Мирабаде: агентства оставляют метку по умолчанию.
+            # Такой точке не верим — для поиска по радиусу и области она «примерная»
+            g.update(spread=3.0, conflict=next(iter(said)))
+        elif d and dd and dd != d:
             l.setdefault("district_site", d)
             l["district_by"] = "точка"
             l["district"] = d = dd
-        g = {"lat": la, "lon": lo, "src": "сайт", "label": label}
     else:
         g = None
         for ph in phrases:

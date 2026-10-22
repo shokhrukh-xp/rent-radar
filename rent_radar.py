@@ -222,7 +222,7 @@ DISTRICTS = {
     "Мирабад": ["мирабад", "миробод", "mirobod", "mirabad"],
     "Юнусабад": ["юнусабад", "юнусобод", "yunusobod", "yunusabad"],
     "Чиланзар": ["чиланзар", "чилонзор", "chilonzor", "chilanzar"],
-    "Мирзо-Улугбек": ["мирзо улугбек", "мирзо-улугбек", "мирзо улуғбек", "mirzo ulug", "mirzo-ulug", "улугбек",
+    "Мирзо-Улугбек": ["мирзо улугбек", "мирзо-улугбек", "мирзо улуғбек", "mirzo ulug", "mirzo-ulug", "улугбек", "улубек",
                       "улуғбек"],
     "Шайхантахур": ["шайхантахур", "шайхонтоҳур", "шайхонтохур", "shayxontohur", "shayxontoxur", "shaykhantakhur",
                     "шайхантаур"],
@@ -816,7 +816,11 @@ def owner_only_reject(l: dict, store, cfg, settings) -> str:
     ads = l.get("seller_ads")
     if ads is None:
         ads = count_seller_ads(l, store, cfg)
-        l["seller_ads"] = ads
+    if l.get("seller_id"):                     # с первого раза продавец мог выложить ещё десятки — считаем сейчас
+        row = store.conn.execute("SELECT cnt FROM seller_counts WHERE seller_id=?", (l["seller_id"],)).fetchone()
+        if row and row[0] and row[0] > ads:
+            ads = row[0]
+    l["seller_ads"] = ads
     limit = cfg.get("max_owner_ads", 2)
     if ads > limit:
         return f"у продавца {ads} объявлений — это маклер"
@@ -1121,7 +1125,7 @@ def format_message(l: dict, cfg: dict, likely_makler: bool) -> str:
     lines = [f'🏠 <b>[{escape_html(l["source"])}]</b> {escape_html(l["title"])}']
     val, cur = l.get("price_value"), l.get("price_currency")
     if val:
-        num = f"{val:,}".replace(",", " ")
+        num = f"{int(round(float(val))):,}".replace(",", " ")
         if cur == "USD":
             lines.append(f"💰 ${num}")
         elif cur == "UZS":
@@ -1173,7 +1177,9 @@ def format_message(l: dict, cfg: dict, likely_makler: bool) -> str:
         if q:
             lines.append("❓ Спросить: " + escape_html("; ".join(q)))
 
-    lines.append(f'\n<a href="{l["url"]}">Открыть объявление</a>  ⚡ Звоните сразу!')
+    a_ = age_days(l.get("created_at") or "")
+    hurry = "  ⚡ Звоните сразу!" if a_ is not None and a_ <= 2 else ""   # свежее — разбирают за день-два
+    lines.append(f'\n<a href="{l["url"]}">Открыть объявление</a>{hurry}')
     return "\n".join(lines)
 
 
@@ -2788,6 +2794,24 @@ def chat_context(cfg, store) -> dict:
         ctx["site_search"] = sale_criteria_text(ss).split("\n")[0] if ss.get("enabled") else "выключен"
     except Exception:
         pass
+    try:
+        if rent_search_on(store):              # что ищем в аренде — модель отвечает на «что ты ищешь?» по этому
+            st_ = {**default_settings(), **(store.get_kv("settings") or {})}
+            rm = (st_.get("rooms_min"), st_.get("rooms_max"))
+            bits = [f"{rm[0]}–{rm[1]} комн" if rm[0] and rm[1] and rm[0] != rm[1] else f"{rm[0]} комн" if rm[0] else "",
+                    f"до ${st_['max_price_usd']}" if st_.get("max_price_usd") else "",
+                    (f"только внутри областей, обведённых на карте ({len(st_['areas'])}), и только с точным адресом — "
+                     "районы не важны") if st_.get("areas") else
+                    ("районы: " + ", ".join(st_["districts"])) if st_.get("districts") else "весь Ташкент",
+                    "только от хозяев" if st_.get("owner_only", True) else "хозяева и маклеры"]
+            ctx["rent_search"] = "аренда: " + ", ".join(b for b in bits if b)
+            since = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+            ctx["rent_today"] = {"new": store.conn.execute("SELECT COUNT(*) FROM listings WHERE first_seen>?",
+                                                           (since,)).fetchone()[0],
+                                 "sent": store.conn.execute("SELECT COUNT(*) FROM listings WHERE first_seen>? AND "
+                                                            "notified=1", (since,)).fetchone()[0]}
+    except Exception:
+        pass
     if sale_path().exists() and sale_on(cfg, store):        # аренда — подборок продажи нет
         sst = open_sale()
         try:
@@ -2809,7 +2833,7 @@ def chat_context(cfg, store) -> dict:
     return ctx
 
 
-SRC_LABEL = {"realt24": "Realt24", "joymee": "Joymee", "realting": "Realting",
+SRC_LABEL = {"realt24": "Realt24", "joymee": "Joymee", "realting": "Realting", "uybor": "Uybor",
              "yangiuylar": "Yangiuylar", "telegram": "Telegram-каналы"}
 
 
@@ -2823,10 +2847,17 @@ def rano_screen(cfg, store) -> dict:
     eff = effective_sale_cfg(cfg, store)
     ss = eff.get("sale_search") or {}
     if not ss.get("enabled"):
-        srcs = ", ".join(n for n, x in (cfg.get("sources") or {}).items() if x.get("enabled")) or "—"
+        srcs = ", ".join(SRC_LABEL.get(n, n.capitalize()) for n, x in (cfg.get("sources") or {}).items()
+                         if x.get("enabled")) or "—"
+        rc = chat_context(cfg, store)
+        what = (rc.get("rent_search") or "").replace("аренда: ", "")
+        td = rc.get("rent_today") or {}
         return {"text": "🔎 <b>Ищет Ra'no</b> — сама смотрю объявления, без маклеров\n\n"
-                        f"Сейчас слежу за арендой: {escape_html(srcs)}. Подходящие присылаю сразу.\n"
-                        "Поиск покупки по всем сайтам включается, когда в чате вы ищете купить квартиру.",
+                        + (f"Ищу аренду: {escape_html(what)}.\n" if what else "")
+                        + f"Слежу за: {escape_html(srcs)}. Подходящие присылаю сразу.\n"
+                        + (f"За сутки новых объявлений {td.get('new', 0)}, подошло и прислала {td.get('sent', 0)}.\n"
+                           if td else "")
+                        + "Поиск покупки по всем сайтам включается, когда в чате вы ищете купить квартиру.",
                 "kb": {"inline_keyboard": [[{"text": "✏️ Изменить, что ищем", "callback_data": "cmd:/mysearch"}]]}}
     st, pend, sent_total, stats = {}, 0, 0, {}
     if sale_path().exists():
@@ -2993,6 +3024,8 @@ def run_search(cfg, store, settings, limit=5, days=7) -> str:
     eff = effective_cfg(cfg, settings)
     areas = settings.get("areas") or []
     why = collections.Counter()
+    shown = {r[0] for r in store.conn.execute("SELECT key FROM listings WHERE notified=1")}
+    already = 0
     for l in pool:
         try:
             if areas:
@@ -3010,11 +3043,23 @@ def run_search(cfg, store, settings, limit=5, days=7) -> str:
             if rj:
                 why["агентство или маклер" if rj.startswith("не хозяин") else "не та квартира"] += 1
                 continue
+            if l.get("key") in shown:          # уже присылала — второй раз ту же карточку не шлём
+                already += 1
+                continue
             ok.append(analyst.score_listing(l, store, cfg, stats, settings))
         except Exception as e:
             log.warning("оценка %s не удалась: %s", l.get("key"), e)
     ok.sort(key=lambda x: x.get("score", 0), reverse=True)
 
+    if not ok and already:
+        fp = f"already:{already}:" + json.dumps(settings.get("max_price_usd"))
+        last = store.get_kv("empty_search") or {}
+        if last.get("fp") != fp or time.time() - float(last.get("at") or 0) >= 1800:
+            store.set_kv("empty_search", {"fp": fp, "at": time.time()})
+            send_telegram(cfg, f"🔎 Под эти условия за {days} дн. подходит {already} "
+                               f"{concierge.plural(already, 'вариант', 'варианта', 'вариантов')} — все уже присылала "
+                               "(выше в чате). Новые пришлю сразу, как появятся.")
+        return ""
     if not ok:
         fp = json.dumps({k: settings.get(k) for k in ("areas", "districts", "rooms_min", "rooms_max", "max_price_usd",
                                                       "near", "owner_only")}, sort_keys=True, default=str)
@@ -3039,8 +3084,8 @@ def run_search(cfg, store, settings, limit=5, days=7) -> str:
         return ""
     store.set_kv("empty_search", {})
 
-    head = [f"🔎 <b>Лучшее сейчас</b> — {min(limit, len(ok))} из {len(ok)} подходящих "
-            f"(просмотрено {len(pool)} за {days} дн.)"]
+    head = [f"🔎 <b>Лучшее сейчас</b> — {min(limit, len(ok))} из {len(ok)} новых подходящих "
+            f"(просмотрено {len(pool)} за {days} дн." + (f"; ещё {already} уже присылала" if already else "") + ")"]
     med = stats["rooms"]
     if med:
         head.append("📊 Медианы: " + ", ".join(
@@ -4608,16 +4653,23 @@ def _fit_caption(text: str) -> str:
     return "\n".join(lines)
 
 
+_PLACES = ("Чиланзар", "Мирабад", "Юнусабад", "Яккасарай", "Яшнабад", "Сергели", "Алмазар", "Мирзо", "Шайхантахур",
+           "Янгихаёт", "Бектемир", "Учтепа")
+
+
 def card_line(text: str) -> str:
-    """Короткая подпись варианта для воркера: «2-комн · 46 м² · Чиланзар · $66 000»."""
+    """Короткая подпись варианта для воркера: «2-комн · 46 м² · Чиланзар · $66 000».
+    Карточки продажи и аренды пишут по-разному («$700» / «💰 $700», «🛏 3-комн · 📍 Мирабад») — берём кусочки."""
     plain = html_lib.unescape(re.sub(r"<[^>]+>", "", text or ""))
     rows = [r.strip() for r in plain.split("\n") if r.strip()]
-    spec = next((r for r in rows if "комн" in r or "м²" in r), "")
-    price = next((r for r in rows if r.startswith("$") or "сум" in r[:20]), "")
-    place = next((r for r in rows if r.startswith(("Чиланзар", "Мирабад", "Юнусабад", "Яккасарай", "Яшнабад",
-                                                    "Сергели", "Алмазар", "Мирзо", "Шайхантахур", "Янгихаёт",
-                                                    "Бектемир", "Учтепа"))), "")
-    return " · ".join(x.split(" · ")[0] for x in (spec, place, price) if x)[:120] or (rows[0][:120] if rows else "")
+    parts = [re.sub(r"^[^\w$]+", "", p).strip() for r in rows[1:] for p in r.split(" · ")]
+    pick = lambda f: next((p for p in parts if p and f(p)), "")
+    spec = pick(lambda p: re.match(r"\d\s*-?\s*комн", p))
+    area = pick(lambda p: "м²" in p and not p.startswith("$") and "/м²" not in p and len(p) < 12)
+    place = pick(lambda p: p.startswith(_PLACES))
+    price = pick(lambda p: re.match(r"\$\s?\d", p) and "/м" not in p) or pick(lambda p: "сум" in p[:20])
+    out = " · ".join(x for x in (spec, area, place.split(",")[0], price) if x)[:120]
+    return out or (re.sub(r"^[^\w$]+", "", rows[0])[:120] if rows else "")
 
 
 CARD_LOG = []          # последние отправленные карточки (ref, текст) — для отладки и тестов
