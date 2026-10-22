@@ -2,6 +2,7 @@ import { MAP_HTML } from "./map.js";
 import { APP_HTML } from "./app.js";
 import { DRAW_HTML } from "./draw.js";
 import { aboutHtml } from "./about.js";
+import { FAVICON_SVG, FAVICON_ICO_B64 } from "./brand.js";
 /* Ra'no — «лицо» бота на Cloudflare Worker.
  *
  * Зачем: Python-бот живёт на GitHub Actions и онлайн лишь ~50 минут из 4–7 часов.
@@ -2607,6 +2608,9 @@ export default {
     }
     if (p !== "/svc/updates") maybeWatch(env, ctx);
     if (isMulti(env)) maybeSweep(env, ctx);          // отзыв на 5-й день и вечерняя сводка — не чаще раза в полчаса   // Python опрашивает очередь сам — это и есть «жив»
+    if (p === "/favicon.svg") return new Response(FAVICON_SVG, { headers: { "content-type": "image/svg+xml", "cache-control": "public, max-age=86400" } });
+    if (p === "/favicon.ico") return new Response(Uint8Array.from(atob(FAVICON_ICO_B64), c => c.charCodeAt(0)),
+      { headers: { "content-type": "image/x-icon", "cache-control": "public, max-age=86400" } });
     if (p === "/about" || p === "/about/") {
       return new Response(aboutHtml(url.searchParams.get("lang") || "uz"),
         { headers: { "content-type": "text/html; charset=utf-8", "cache-control": "public, max-age=300" } });

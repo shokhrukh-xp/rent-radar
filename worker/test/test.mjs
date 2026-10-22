@@ -825,6 +825,11 @@ console.log("OK — карточки по одной: кнопки «Сохра�
   assert.ok(/rieltor emas/.test(await (await worker.fetch(new Request("https://w.example/about"), env, { waitUntil() {} })).text()));   // по умолчанию — узбекский
   const page = await (await worker.fetch(new Request("https://w.example/about?lang=ru"), env, { waitUntil() {} })).text();
   assert.ok(/Не оказывает риэлторских услуг/.test(page) && /только вы/.test(page) && /Xplorence/.test(page));
+  assert.ok(/class="logo"/.test(page) && /rel="icon" href="\/favicon\.svg"/.test(page));       // знак и значок сайта
+  const fav = await worker.fetch(new Request("https://w.example/favicon.svg"), env, { waitUntil() {} });
+  assert.ok(fav.headers.get("content-type") === "image/svg+xml" && /<svg/.test(await fav.text()));
+  const ico = new Uint8Array(await (await worker.fetch(new Request("https://w.example/favicon.ico"), env, { waitUntil() {} })).arrayBuffer());
+  assert.deepEqual([...ico.slice(0, 4)], [0, 0, 1, 0]);                                              // настоящий .ico
   const pageUz = await (await worker.fetch(new Request("https://w.example/about?lang=uz"), env, { waitUntil() {} })).text();
   assert.ok(/rieltor emas/.test(pageUz));
   assert.equal(await handleUpdate(env, msg("/about")), "about");
