@@ -635,6 +635,27 @@ const CITY_SYSTEM = `Ты помогаешь сервису поиска ква�
  "out": ["5–10 известных районов и массивов города, которые точно НЕ центр"]}
 Названия — как их пишут на картах и в объявлениях, по-русски. Ничего не выдумывай: если не нашла — пустой список.`;
 
+// Где квартира по тексту объявления (посты Telegram-каналов часто без точки на карте): улица и дом, ориентир, махалля,
+// квартал. Только то, что написано, — не угадывать.
+const PLACE_SYSTEM = `Ты читаешь объявление о квартире в Ташкенте (по-русски или по-узбекски) и выписываешь, ГДЕ она — только то,
+что прямо написано в тексте, ничего не придумывай. street — улица (как в тексте, без слова «улица»), house — номер дома;
+landmark — конкретный ориентир с названием (ЖК, магазин, школа №, больница, ТЦ, рынок, ресторан), не «рядом школа»;
+mahalla — махалля; kvartal — квартал/массив с номером («Юнусабад-4», «Ц-1», «Чиланзар 9 квартал»); metro — станция,
+если указана; district — район. Нет — пустая строка.`;
+const PLACE_SCHEMA = { type: "object", properties: {
+  street: { type: "string" }, house: { type: "string" }, landmark: { type: "string" }, mahalla: { type: "string" },
+  kvartal: { type: "string" }, metro: { type: "string" }, district: { type: "string" } } };
+export async function placeFromText(env, text) {
+  if (!text.trim()) return {};
+  const o = await gemini(env, PLACE_SYSTEM, text, { schema: PLACE_SCHEMA, temperature: 0.1 });
+  const out = {};
+  for (const k of Object.keys(PLACE_SCHEMA.properties)) {
+    const v = String(o?.[k] || "").trim().slice(0, 80);
+    if (v && !/^(нет|не указан[оа]?|—|-|null|none)$/i.test(v)) out[k] = v;
+  }
+  return out;
+}
+
 export async function cityCenterFacts(env, city) {
   if (!env.GEMINI_KEY) throw new Error("GEMINI_KEY не задан");
   const first = env.AI_MODEL || "gemini-3.8-flash";
@@ -2038,6 +2059,11 @@ export default {
       if (p === "/svc/city" && req.method === "POST") {    // Python: что считается центром города (поиск в интернете)
         const body = await req.json().catch(() => ({}));
         try { return json({ ok: true, ...(await cityCenterFacts(env, String(body.city || "Ташкент").slice(0, 40))) }); }
+        catch (e) { return json({ ok: false, error: String(e.message || e) }, 502); }
+      }
+      if (p === "/svc/place" && req.method === "POST") {   // Python: где квартира — по тексту поста (адрес, ориентир)
+        const body = await req.json().catch(() => ({}));
+        try { return json({ ok: true, ...(await placeFromText(env, String(body.text || "").slice(0, 2000))) }); }
         catch (e) { return json({ ok: false, error: String(e.message || e) }, 502); }
       }
       if (p === "/svc/repair" && req.method === "POST") {  // Python: ремонт по фото объявления

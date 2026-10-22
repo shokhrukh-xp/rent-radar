@@ -294,10 +294,18 @@ def ask_seller(listing):
 
 # ------------------------------------------------------- геокодирование ----
 
+_NOMINATIM = {"at": 0.0}
+
+
 def geocode(query: str, requests_mod, headers=None):
     """Адрес → (lat, lon, подпись). Бесплатный OpenStreetMap Nominatim."""
     if not query or len(query.strip()) < 3:
         return None
+    import time as _t
+    wait = 1.1 - (_t.time() - _NOMINATIM["at"])     # правила Nominatim: не чаще запроса в секунду
+    if wait > 0:
+        _t.sleep(wait)
+    _NOMINATIM["at"] = _t.time()
     try:
         r = requests_mod.get(
             "https://nominatim.openstreetmap.org/search",

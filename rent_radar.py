@@ -1122,24 +1122,40 @@ def fmt_phone(p: str) -> str:
 
 
 def format_message(l: dict, cfg: dict, likely_makler: bool) -> str:
-    lines = [f'🏠 <b>[{escape_html(l["source"])}]</b> {escape_html(l["title"])}']
+    """Карточка аренды: сначала главное (что за квартира, цена, где), потом продавец и факты. Без «оценок из 10»
+    и советов — факты: дешевле/дороже похожих, сколько объявлений у продавца, далеко ли метро."""
+    spec = []
+    if l.get("rooms"):
+        spec.append(f'{l["rooms"]}-комн')
+    if l.get("area"):
+        spec.append(f'{float(l["area"]):g} м²')
+    if l.get("floor"):
+        spec.append(f'этаж {l["floor"]}' + (f'/{l["floors_total"]}' if l.get("floors_total") else ""))
+    lines = [f'🏠 <b>{" · ".join(spec) or "Квартира"}</b> · {escape_html(l.get("source") or "")}']
+    title = re.sub(r"^#\d+\s*·\s*", "", str(l.get("title") or "")).strip()
+    num = re.match(r"^(#\d+)\s*·", str(l.get("title") or ""))
+    if num:
+        lines[0] = f"{num.group(1)} · " + lines[0]
+    if len(title) >= 12 and not re.match(r"^\W*(?:ID|\[ID)\b", title, re.I):
+        lines.append(f"<i>«{escape_html(title[:80])}»</i>")
     val, cur = l.get("price_value"), l.get("price_currency")
     if val:
-        num = f"{int(round(float(val))):,}".replace(",", " ")
+        num_ = f"{int(round(float(val))):,}".replace(",", " ")
         if cur == "USD":
-            lines.append(f"💰 ${num}")
+            per = f' · ${float(val) / float(l["area"]):.1f}/м²' if l.get("area") else ""
+            lines.append(f"💰 ${num_}/мес{per}")
         elif cur == "UZS":
             usd = l.get("price_usd") or to_usd(val, "UZS", cfg)
-            lines.append(f"💰 {num} сум" + (f" (~${usd:.0f})" if usd else ""))
+            lines.append(f"💰 {num_} сум/мес" + (f" (~${usd:.0f})" if usd else ""))
         else:
-            lines.append(f"💰 {num} (валюта не указана)")
-    details = []
-    if l.get("rooms"):
-        details.append(f'🛏 {l["rooms"]}-комн')
+            lines.append(f"💰 {num_} (валюта не указана)")
     place = l.get("district") or l.get("district_raw")
-    details.append(f'📍 {escape_html(str(place))}' if place else "📍 район не указан")
-    if details:
-        lines.append(" · ".join(details))
+    if place:
+        extra = l.get("district_raw") if l.get("district_raw") and l.get("district_raw") != place and \
+            len(str(l.get("district_raw"))) <= 60 else ""
+        lines.append(f'📍 {escape_html(str(place))}' + (f", {escape_html(str(extra))}" if extra else ""))
+    else:
+        lines.append("📍 район не указан")
     if l.get("seller") or l.get("is_business") is not None:
         seller_type = ("Бизнес-аккаунт" if l.get("is_business")
                        else "Частное лицо" if l.get("is_business") is False else "")
@@ -1155,7 +1171,9 @@ def format_message(l: dict, cfg: dict, likely_makler: bool) -> str:
         lines.append("⚠️ У продавца много объявлений — возможно, маклер")
     dt = parse_iso(l.get("created_at") or "")
     if dt:
-        lines.append(f'🕐 {dt.astimezone(TASHKENT_TZ).strftime("%d.%m %H:%M")}')
+        a_ = age_days(l.get("created_at") or "")
+        ago = "" if a_ is None else (" · сегодня" if a_ < 1 else f" · {int(a_)} дн. назад")
+        lines.append(f'🕐 Выложено {dt.astimezone(TASHKENT_TZ).strftime("%d.%m %H:%M")}{ago}')
 
     ev = []
     if l.get("price_note"):
@@ -1167,12 +1185,12 @@ def format_message(l: dict, cfg: dict, likely_makler: bool) -> str:
     if ev:
         lines.append("🔑 " + " · ".join(ev))
 
-    if l.get("score") is not None:              # разбор от аналитика
-        lines.append(f'\n<b>Оценка {l["score"]}/10</b>')
-        for x in (l.get("pros") or [])[:5]:
-            lines.append(escape_html(x))
-        for x in (l.get("cons") or [])[:3]:
-            lines.append("⚠️ " + escape_html(x))
+    if l.get("score") is not None:              # факты от аналитика: цена к похожим, метро, продавец
+        facts = [escape_html(x) for x in (l.get("pros") or [])[:5]] + \
+                ["⚠️ " + escape_html(x) for x in (l.get("cons") or [])[:3]]
+        if facts:
+            lines.append("\n<b>Что видно</b>")
+            lines += facts
         q = analyst.ask_seller(l)
         if q:
             lines.append("❓ Спросить: " + escape_html("; ".join(q)))
@@ -5525,6 +5543,69 @@ def sale_status_text(cfg: dict) -> str:
     return "\n".join(lines)
 
 
+AI_PLACE_PER_DAY = 150
+PLACE_KEYS = ("street", "house", "landmark", "mahalla", "kvartal", "metro", "district")
+
+
+def ai_locate(cfg, store, l, budget=AI_PLACE_PER_DAY):
+    """Точки нет (пост из канала, «Мирабад, рядом с …»): модель выписывает из текста улицу и дом, ориентир, махаллю,
+    квартал, метро — и ищем их в справочнике, у метро или на карте OSM. Только когда ищем по области или радиусу,
+    не больше budget объявлений в сутки. Результат по объявлению запоминаем."""
+    g = l.get("geo") or geo.locate(l) or {}
+    if g.get("lat") and g.get("src") != "район" and float(g.get("spread") or 0) <= 1.0:
+        return g
+    if not cfg.get("worker_url") or not l.get("key"):
+        return g
+    cache = store.get_kv("ai_place") or {}
+    f = cache.get(l["key"])
+    if f is None:
+        day = datetime.now(TASHKENT_TZ).strftime("%Y-%m-%d")
+        b = store.get_kv("ai_place_day") or {}
+        if b.get("d") != day:
+            b = {"d": day, "n": 0}
+        if b["n"] >= budget:
+            return g
+        b["n"] += 1
+        store.set_kv("ai_place_day", b)
+        r = worker_post(cfg, "/svc/place", {"text": f"{l.get('title') or ''}\n{l.get('text') or ''}"[:2000]}, timeout=30)
+        if not (r or {}).get("ok"):
+            return g
+        f = {k: r[k] for k in PLACE_KEYS if r.get(k)}
+        cache[l["key"]] = f
+        if len(cache) > 3000:
+            cache = dict(list(cache.items())[-2000:])
+        store.set_kv("ai_place", cache)
+    if not f:
+        return g
+    dist = l.get("district") or ""
+    tries = []
+    if f.get("landmark"):
+        tries.append((f["landmark"], 0.5))
+    if f.get("street") and f.get("house"):
+        tries.append((f"{f['street']} {f['house']}", 0.4))
+    if f.get("kvartal"):
+        tries.append((f["kvartal"], 0.9))
+    if f.get("mahalla"):
+        tries.append((f"махалля {f['mahalla']}", 0.9))
+    if f.get("metro"):
+        tries.append((f"метро {f['metro']}", 0.6))
+    for q, sp in tries:
+        try:
+            p = geo.point_for(q, store, requests)
+        except Exception as e:
+            log.info("[место] %s: %s", q, e)
+            p = None
+        if not p:
+            continue
+        dd = geo.district_at(p["lat"], p["lon"]) if geo.GAZ["pts"] else None
+        if dist and dd and dd != dist:              # нашлось в другом районе — однофамилец, не верим
+            continue
+        l["geo"] = {"lat": p["lat"], "lon": p["lon"], "src": "ориентир", "label": geo.short_label(q),
+                    "spread": sp, "by": "текст"}
+        return l["geo"]
+    return g
+
+
 def _rent_listings(cfg, store, settings, name, listings, first_run, market, harvest=True):
     """Новые объявления аренды одного источника — одному пользователю: запомнить, отсеять, прислать."""
     eff = effective_cfg(cfg, settings)
@@ -5559,6 +5640,12 @@ def _rent_listings(cfg, store, settings, name, listings, first_run, market, harv
             store.save(l, notified=False)
             continue
 
+        if (settings.get("areas") or (settings.get("near") or {}).get("lat") is not None) and passes_filters(l, eff) \
+                and passes_user_filters(l, {k: settings.get(k) for k in ("rooms_min", "rooms_max")}):
+            try:                                # ищем по месту, а точки нет — адрес и ориентир из текста
+                ai_locate(cfg, store, l)
+            except Exception as e:
+                log.info("[место] не определила по тексту: %s", e)
         if not passes_filters(l, eff) or not passes_user_filters(l, settings):
             store.save(l, notified=False)
             continue

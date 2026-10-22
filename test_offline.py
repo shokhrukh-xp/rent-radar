@@ -520,7 +520,7 @@ assert any("первый этаж" in x for x in weak["cons"])
 
 # оценка попадает в сообщение
 msg = rr.format_message(scored, cfg, False)
-assert "Оценка" in msg and "🚇" in msg and "Спросить" in msg
+assert "Что видно" in msg and "Оценка" not in msg and "🚇" in msg and "Спросить" in msg
 assert analyst.ask_seller(scored)
 
 # packing/recent в базе
@@ -3583,3 +3583,26 @@ assert any("сняли" in x for x in _SL) and any("Подешевело" in x a
 assert cg.get_offer(_ss2, _o_gone)["status"] == "rejected" and cg.get_offer(_ss2, _o_chg)["price_usd"] == 750
 _sp.unlink(missing_ok=True)
 print("OK — шортлист раз в сутки: снятые убираются с сообщением, изменения цены — с сообщением")
+# пост без точки: адрес и ориентир из текста (модель) → справочник/метро/карта; бюджет в сутки; кэш
+_ap2 = Path("/tmp/test_aiplace.db"); _ap2.unlink(missing_ok=True)
+_as2 = rr.Store(_ap2)
+_calls = []
+def _wp_(c, path, body, timeout=0):
+    _calls.append(path)
+    return {"ok": True, "landmark": "Ресторан Анор", "street": "Шота Руставели", "house": "49"}
+_lp = {"key": "tg:500", "title": "", "text": "Сдаётся 3к, Яккасарай, рядом ресторан Анор", "district": "Яккасарай"}
+with mock.patch.object(rr, "worker_post", _wp_), \
+        mock.patch.object(_geo_t, "point_for", lambda q, st=None, rq=None: {"lat": 41.29, "lon": 69.26, "src": "ориентир"}
+                          if "Анор" in q else None), \
+        mock.patch.object(_geo_t, "locate", lambda l: {}), mock.patch.dict(_geo_t.GAZ, {"pts": []}):
+    _g = rr.ai_locate(dict(cfg, worker_url="https://w"), _as2, _lp)
+    assert _g["lat"] == 41.29 and _g["spread"] == 0.5 and _g["by"] == "текст"
+    _lp2 = dict(_lp); _lp2.pop("geo", None)
+    rr.ai_locate(dict(cfg, worker_url="https://w"), _as2, _lp2)
+    assert _calls == ["/svc/place"]                                   # второй раз — из кэша
+    for i in range(3):
+        rr.ai_locate(dict(cfg, worker_url="https://w"), _as2, {k: v for k, v in _lp.items() if k != "geo"} | {"key": f"tg:6{i}"},
+                     budget=2)
+    assert len(_calls) == 2, _calls                                   # бюджет в сутки
+_ap2.unlink(missing_ok=True)
+print("OK — посты без точки: адрес и ориентир из текста, кэш и дневной бюджет")

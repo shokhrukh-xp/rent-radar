@@ -831,3 +831,12 @@ console.log("OK — карточки по одной: кнопки «Сохра�
   assert.ok(sent.some(x => String(x.chat_id) === OWNER && /Просьба удалить данные/.test(x.text || "")));
 }
 console.log("OK — «кому служит Ra'no»: страница и команда; просьба удалить данные — владельцу сервиса");
+
+// ── где квартира по тексту поста: только написанное, пустое — не возвращаем
+{
+  geminiQueue.push({ street: "Шота Руставели", house: "49/1", landmark: "", mahalla: "нет", kvartal: "", metro: "Ойбек", district: "Яккасарай" });
+  const r = await (await worker.fetch(new Request("https://w.example/svc/place", { method: "POST", headers: { "x-svc": "svc" },
+    body: JSON.stringify({ text: "Сдаётся 3к, Яккасарай, Шота Руставели 49/1, метро Ойбек" }) }), env, { waitUntil() {} })).json();
+  assert.ok(r.ok && r.street === "Шота Руставели" && r.house === "49/1" && r.metro === "Ойбек" && !("mahalla" in r) && !("landmark" in r), JSON.stringify(r));
+}
+console.log("OK — место по тексту поста: улица, дом, ориентир, метро — только написанное");
