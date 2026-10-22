@@ -2554,7 +2554,33 @@ export default {
         for (const u of users) u.paid_until = paidUntil[u.chat] || 0;
         return json({ multi: isMulti(env), limit: await userLimit(env), payments: payOn(env), users });
       }
-      if (p === "/svc/stats") return json({ ok: true, text: await statsText(env) });   // Python: в дневной отчёт
+      if (p === "/svc/stats") return json({ ok: true, text: await statsText(env) });
+      if (p === "/svc/models") {                         // какие модели доступны ключу (без самого ключа)
+        const r = await fetch("https://generativelanguage.googleapis.com/v1beta/models?pageSize=200",
+          { headers: { "x-goog-api-key": env.GEMINI_KEY } });
+        const d = await r.json().catch(() => ({}));
+        return json({ ok: r.ok, models: (d.models || []).map(m => ({ name: m.name, methods: m.supportedGenerationMethods })) });
+      }
+      if (p === "/svc/image" && req.method === "POST") {   // картинка по описанию (бренд: аватар, логотип) — PNG в base64
+        const b = await req.json().catch(() => ({}));
+        if (!b.prompt || !b.model) return json({ ok: false, error: "prompt и model" }, 400);
+        const m = String(b.model).replace(/^models\//, "");
+        const base = `https://generativelanguage.googleapis.com/v1beta/models/${m}`;
+        const hdr = { "content-type": "application/json", "x-goog-api-key": env.GEMINI_KEY };
+        if (/^imagen/.test(m)) {
+          const r = await fetch(base + ":predict", { method: "POST", headers: hdr, body: JSON.stringify({
+            instances: [{ prompt: String(b.prompt) }], parameters: { sampleCount: Math.min(+b.n || 1, 4), aspectRatio: b.aspect || "1:1" } }) });
+          const d = await r.json().catch(() => ({}));
+          return json({ ok: r.ok, error: d.error?.message, images: (d.predictions || []).map(x => x.bytesBase64Encoded).filter(Boolean) });
+        }
+        const r = await fetch(base + ":generateContent", { method: "POST", headers: hdr, body: JSON.stringify({
+          contents: [{ role: "user", parts: [{ text: String(b.prompt) }] }],
+          generationConfig: { responseModalities: ["IMAGE", "TEXT"], imageConfig: { aspectRatio: b.aspect || "1:1" } } }) });
+        const d = await r.json().catch(() => ({}));
+        const parts = d.candidates?.[0]?.content?.parts || [];
+        return json({ ok: r.ok, error: d.error?.message, images: parts.map(x => x.inlineData?.data).filter(Boolean),
+                      text: parts.map(x => x.text || "").join("").slice(0, 500) });
+      }   // Python: в дневной отчёт
       if (p === "/svc/event" && req.method === "POST") {   // Python: событие воронки (например, лимит бесплатных)
         const b = await req.json().catch(() => null);
         if (!b || !b.ev) return json({ ok: false }, 400);
