@@ -1022,7 +1022,8 @@ def send_pick(cfg, store, limit=5, reason="Подборка дня"):
         return 0
     top, rest = q[:limit], q[limit:]
     # без сводного списка: каждый вариант — своей карточкой с фото и разбором
-    if not rr.send_site_cards(cfg, store, [x["key"] for x in top], title=reason, more=len(rest), limit=limit):
+    if not rr.send_site_cards(cfg, store, [x["key"] for x in top], title=reason, more=len(rest), limit=limit,
+                              queue=True):
         return 0
     for x in top:
         store.conn.execute("UPDATE listings SET notified=1 WHERE key=?", (x["key"],))
@@ -1121,7 +1122,7 @@ def attach_dup(cfg, store, l, dup, ss=None):
     head = (t("💸 <b>Та же квартира — дешевле на ${d}</b>", d=f"{op - lp:,.0f}".replace(",", " ")) + "\n"
             + t("Раньше присылала её за ${p} ({site}{kind})", p=f"{op:,.0f}".replace(",", " "),
                 site=rr.escape_html(o.get("site") or "Uybor"), kind=kind_))
-    ok = rr.send_card(cfg, l, rr.format_sale_card(store, l, cfg, head=head), ref="L:" + l["key"]) or None
+    ok = rr.send_card(cfg, l, rr.format_sale_card(store, l, cfg, head=head), ref="L:" + l["key"], queue=True) or None
     store.save(l, notified=ok is not None, dup_of=dup)
     if ok is not None:
         remember_shown(store, l, why)

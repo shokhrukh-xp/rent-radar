@@ -1219,6 +1219,9 @@ def _owner_no_buttons(cfg, payload):
     except ValueError:
         return payload
     if isinstance(kb, dict) and kb.get("inline_keyboard"):
+        btns = [b for row in kb["inline_keyboard"] for b in row]
+        if btns and all(str(b.get("callback_data", "")).startswith("Q:") for b in btns):
+            return payload                       # кнопки карточки из очереди — их клиент просил
         payload = dict(payload)
         payload.pop("reply_markup", None)
     return payload
@@ -1328,6 +1331,11 @@ def send_listing(cfg, settings: dict, l: dict, likely_makler: bool, text: str = 
     text = text or format_message(l, cfg, likely_makler)
     photos = (l.get("photo_urls") or []) if settings.get("photos", True) else []
     quiet = {"disable_notification": True} if silent else {}
+    if cfg.get("card_queue") and _queue_store() is not None:   # по одной с кнопками — с фото или без
+        ids = send_card(cfg, l if photos else dict(l, photo_urls=[]), text, silent=silent,
+                        ref="L:" + (l.get("key") or ""), queue=True)
+        if ids:
+            return ids
     if photos:                                   # альбом: карта с отметкой + фото, подпись под ним
         ids = send_card(cfg, l, text, silent=silent, ref="L:" + (l.get("key") or ""))
         if ids:
@@ -3131,6 +3139,8 @@ def run_search(cfg, store, settings, limit=5, days=7) -> str:
     head = [f"🔎 <b>Лучшее сейчас</b> — {len(fresh_ok)} из {len(ok) - gone} новых подходящих "
             f"(просмотрено {len(pool)} за {days} дн." + (f"; ещё {already} уже присылала" if already else "")
             + (f"; {gone} уже сняли или подняли цену" if gone else "") + ")"]
+    if cfg.get("card_queue") and _queue_store() is not None and len(fresh_ok) > 1:
+        head.append("Показываю по одной: сохраните, пропустите или попросите уточнить — следующая придёт сразу.")
     med = stats["rooms"]
     if med:
         head.append("📊 Медианы: " + ", ".join(
@@ -3176,6 +3186,8 @@ def _listing_any(store, key):
 def handle_callback(data: str, settings: dict, store, cfg: dict, message_id=None):
     """Возвращает (всплывающая_подсказка, view_для_перерисовки)."""
     d = data or ""
+    if d.startswith("Q:"):                     # кнопки карточки из очереди
+        return card_action(cfg, store, settings, d, message_id), None
     if d.startswith("a:"):
         toast, _ = concierge.handle_anketa_cb(d, cfg, store, message_id)
         return toast, None
@@ -3372,11 +3384,11 @@ def handle_callback(data: str, settings: dict, store, cfg: dict, message_id=None
 
 
 def broker_ack(cfg) -> str:
-    """Имя клиента маклерам не раскрываем — и незачем, и склонения ломаются.
-
-    Двуязычно (ру + уз): часть маклеров пишет только на узбекском. Тот же текст — у воркера."""
+    """Двуязычно (ру + уз): часть маклеров пишет только на узбекском. Имя клиента — ссылкой на его Telegram
+    (подставляет concierge.broker_send), чтобы было видно, что клиент настоящий. Тот же текст — у воркера."""
     a = cfg.get("assistant_name", "Ra'no")
-    return (f"Здравствуйте! Я {a}, ИИ-ассистент — ищу жильё для клиента и передаю ему варианты.\n"
+    return (f"Здравствуйте! Я {a}, ИИ-ассистент — ищу квартиру для своего клиента: {concierge.CLIENT}. "
+            f"Варианты передаю ему.\n"
             f"Rahmat, получила! 🙌 Если зацепит — вернусь с вопросами. "
             f"Есть ещё что-то по параметрам — присылайте.\n\n"
             f"Assalomu alaykum! Men {a}, AI-yordamchiman — mijoz uchun uy-joy qidiryapman. "
@@ -3617,8 +3629,7 @@ def handle_broker_message(cfg, store, msg, key=None, quiet=False):
     if not photos and (text.startswith("/") or (len(text) < 25 and not re.search(r"\d", text))):
         last = store.get_kv(f"welcomed:{chat_id}") or 0
         if text.startswith("/") or time.time() - last > 6 * 3600:
-            tg_call(cfg, "sendMessage", {"chat_id": chat_id,
-                                         "text": concierge.broker_welcome(cfg, store)})
+            concierge.broker_send(cfg, store, chat_id, concierge.broker_welcome(cfg, store), translate=False)
             store.set_kv(f"welcomed:{chat_id}", time.time())
         return
 
@@ -3630,7 +3641,7 @@ def handle_broker_message(cfg, store, msg, key=None, quiet=False):
         return
     log.info("вариант #%s от %s (%s)", oid, name, "новый" if is_new else "дополнение")
     if is_new and not msg.get("_acked"):      # воркер уже ответил маклеру мгновенно
-        tg_call(cfg, "sendMessage", {"chat_id": chat_id, "text": broker_ack(cfg)})
+        concierge.broker_send(cfg, store, chat_id, broker_ack(cfg), translate=False)
 
 
 def forward_name(msg) -> str:
@@ -3820,6 +3831,10 @@ def _process_updates(cfg: dict, store, ups: list, settings: dict) -> dict:
     sync_lang(store)                                # язык клиента — для карточек и подсказок
     def _one(upd):
         nonlocal changed, snap
+        frm = ((upd.get("message") or upd.get("edited_message") or upd.get("callback_query") or {}).get("from")
+               or {})
+        if str(frm.get("id") or "") == str(cfg["telegram_chat_id"]):
+            concierge.remember_client(store, frm)      # имя и ник — для представления маклерам
         if any(upd.get(x) for x in ("business_connection", "business_message", "edited_business_message",
                                      "deleted_business_messages")):
             try:
@@ -3839,6 +3854,10 @@ def _process_updates(cfg: dict, store, ups: list, settings: dict) -> dict:
                 return
             toast, view = handle_callback(cb.get("data") or "", settings, store, cfg,
                                           msg.get("message_id"))
+            try:                                # решили словами про открытую карточку — показать следующую
+                card_followup(cfg, store, cb.get("data") or "")
+            except Exception as e:
+                log.info("очередь карточек: %s", e)
             snap = snap or (cb.get("data") or "")[:2] in ("o:", "s:", "t:")
             # подсказка-«всплывашка»; для старых нажатий Telegram её отклоняет — это нормально
             tg_call(cfg, "answerCallbackQuery",
@@ -4730,11 +4749,135 @@ def remember_card(cfg, ids, ref, text):
                                     "chat": str(cfg.get("telegram_chat_id") or "")}, timeout=10)
 
 
-def send_card(cfg, l: dict, text: str, kb: dict = None, silent: bool = False, ref: str = None):
-    """Вариант — обычным альбомом Telegram: первым — карта с отметкой, где квартира, дальше фото;
-    подпись — под альбомом. Кнопок нет: управляют словами (ответом на карточку).
+# ------------------------------------------------------- карточки по одной --
+# Найденное не сыпется пачкой: карточки встают в очередь, клиент видит одну — с кнопками «Сохранить»,
+# «Пропустить», «Уточнить у продавца»; следующая приходит после нажатия (или ответа словами на карточку).
+CARD_QUEUE_MAX = 60
+CARD_KEEP = ("key", "url", "photo_urls", "geo", "lat", "lon", "title", "district", "text_place", "site", "source")
+
+
+def _queue_store():
+    return concierge._BIZ_STORE.get("store")
+
+
+def card_kb(ref, left=0):
+    rows = [[{"text": "💾 Сохранить", "callback_data": f"Q:s|{ref}"[:64]},
+             {"text": "⏭ Пропустить", "callback_data": f"Q:n|{ref}"[:64]}],
+            [{"text": "✍️ Уточнить у продавца", "callback_data": f"Q:a|{ref}"[:64]}]]
+    return {"inline_keyboard": rows}
+
+
+def enqueue_card(cfg, store, l, text, silent=False, ref=None):
+    """В очередь. Ничего не открыто — сразу показываем первую. Возвращает ["q"] (принято) или id показанной."""
+    q = store.get_kv("card_queue") or []
+    op = store.get_kv("card_open") or {}
+    if op.get("ref") == ref or any(x.get("ref") == ref for x in q):
+        return ["q"]
+    q.append({"ref": ref, "l": {k: l.get(k) for k in CARD_KEEP if l.get(k) is not None},
+              "text": text, "silent": bool(silent), "at": time.time()})
+    store.set_kv("card_queue", q[-CARD_QUEUE_MAX:])
+    if not op.get("ref"):
+        return show_next_card(cfg, store) or ["q"]
+    return ["q"]
+
+
+def show_next_card(cfg, store):
+    """Следующая карточка из очереди: фото (с картой) альбомом, под ними текст с кнопками."""
+    q = store.get_kv("card_queue") or []
+    while q:
+        it = q.pop(0)
+        store.set_kv("card_queue", q)
+        left = len(q)
+        text = it["text"] + (f"\n\n<i>В очереди ещё {left}</i>" if left else "")
+        ids = _send_card_now(cfg, it["l"], text, kb=card_kb(it["ref"], left), silent=it.get("silent"),
+                             ref=it["ref"])
+        if ids:
+            store.set_kv("card_open", {"ref": it["ref"], "mid": (ids[-1] if isinstance(ids, list) else None),
+                                       "ids": ids if isinstance(ids, list) else [], "text": text,
+                                       "at": time.time()})
+            return ids
+    store.set_kv("card_open", {})
+    return None
+
+
+def card_done(cfg, store, ref, status=""):
+    """С открытой карточкой решили (кнопкой или словами) — отметить и показать следующую."""
+    op = store.get_kv("card_open") or {}
+    if not op.get("ref") or op["ref"] != ref:
+        return None
+    if op.get("mid") and status:
+        tg_call(cfg, "editMessageText", {"chat_id": cfg["telegram_chat_id"], "message_id": op["mid"],
+                                         "text": (op.get("text") or "")[:3900] + "\n\n<b>" + status + "</b>",
+                                         "parse_mode": "HTML", "disable_web_page_preview": True,
+                                         "reply_markup": json.dumps({"inline_keyboard": []})}, quiet=True)
+    store.set_kv("card_open", {})
+    return show_next_card(cfg, store)
+
+
+def card_followup(cfg, store, data):
+    """Ответ словами («нравится», «мимо», «уточни») на открытую карточку — та же реакция, что у кнопки."""
+    m = re.match(r"L:([sna]):(.+)$", data) or re.match(r"o:(like|skip|ask):(\d+)", data)
+    if not m:
+        return None
+    ref = ("L:" + m.group(2).split("|")[0]) if data.startswith("L:") else "O:" + m.group(2)
+    st = {"s": "💾 Сохранила в шортлист", "like": "💾 Сохранила в шортлист", "n": "⏭ Пропущено",
+          "skip": "⏭ Пропущено", "a": "✍️ Уточняю у продавца", "ask": "✍️ Уточняю у продавца"}[m.group(1)]
+    return card_done(cfg, store, ref, st)
+
+
+def card_action(cfg, store, settings, d, message_id=None):
+    """Кнопка карточки: Q:s|ref — сохранить, Q:n|ref — пропустить, Q:a|ref — уточнить у продавца."""
+    act, _, ref = d[2:].partition("|")
+    kind, _, key = ref.partition(":")
+    if kind == "L":
+        sub = {"s": f"L:s:{key}", "n": f"L:n:{key}", "a": f"L:a:{key}"}.get(act)
+    elif kind == "O":
+        sub = {"s": f"o:like:{key}", "n": f"o:skip:{key}:x", "a": f"o:ask:{key}"}.get(act)
+    else:
+        sub = None
+    toast = ""
+    if sub:
+        toast, _ = handle_callback(sub, settings, store, cfg, None)
+    status = {"s": "💾 Сохранила в шортлист", "n": "⏭ Пропущено",
+              "a": "✍️ Уточняю у продавца — подробности ниже"}.get(act, "")
+    op = store.get_kv("card_open") or {}
+    if op.get("ref") == ref:
+        if act == "n" and op.get("ids"):     # пропущенную убираем из чата целиком, остаётся строка «пропущено»
+            tg_call(cfg, "deleteMessages", {"chat_id": cfg["telegram_chat_id"],
+                                            "message_ids": json.dumps([i for i in op["ids"] if i != op.get("mid")])},
+                    quiet=True)
+            tg_call(cfg, "editMessageText", {"chat_id": cfg["telegram_chat_id"], "message_id": op["mid"],
+                                             "text": "⏭ Пропущено: " + escape_html(card_line(op.get("text") or "")),
+                                             "reply_markup": json.dumps({"inline_keyboard": []})}, quiet=True)
+            store.set_kv("card_open", {})
+            show_next_card(cfg, store)
+        else:
+            card_done(cfg, store, ref, status)
+    elif message_id:                          # нажали на старой карточке — просто убрать кнопки
+        tg_call(cfg, "editMessageReplyMarkup", {"chat_id": cfg["telegram_chat_id"], "message_id": message_id,
+                                                "reply_markup": json.dumps({"inline_keyboard": []})}, quiet=True)
+    return toast or status
+
+
+def send_card(cfg, l: dict, text: str, kb: dict = None, silent: bool = False, ref: str = None, queue=False):
+    """Карточка. queue=True — найденное само (не по просьбе клиента): в очередь «по одной с кнопками»,
+    если она включена (cfg card_queue). Иначе — сразу."""
+    st = _queue_store() if queue and ref and cfg.get("card_queue") else None
+    if st is not None:
+        try:
+            return enqueue_card(cfg, st, l, text, silent=silent, ref=ref)
+        except Exception as e:
+            log.warning("очередь карточек: %s — шлю сразу", e)
+    return _send_card_now(cfg, l, text, kb=kb, silent=silent, ref=ref)
+
+
+def _send_card_now(cfg, l: dict, text: str, kb: dict = None, silent: bool = False, ref: str = None):
+    """Вариант — обычным альбомом Telegram: первым — карта с отметкой, где квартира, дальше фото.
+    Без кнопок — подпись под альбомом; с кнопками (kb) — альбом без подписи, а текст с кнопками — следом
+    (у альбома в Telegram кнопок не бывает).
     ref — какой это вариант («L:<ключ>» объявление, «O:<номер>» вариант маклера) — для ответов в чате.
     Возвращает id сообщений списком; False — не ушло."""
+    full = text
     text = _fit_caption(text)
     photos = list(l.get("photo_urls") or [])[:6]
     media, files = [], {}
@@ -4768,6 +4911,29 @@ def send_card(cfg, l: dict, text: str, kb: dict = None, silent: bool = False, re
             media.append({"type": "photo", "media": ref_})
     quiet = {"disable_notification": True} if silent else {}
     ids = None
+    if media and kb:
+        data = {"chat_id": cfg["telegram_chat_id"], **quiet}
+        if len(media) == 1:
+            m = media[0]
+            r = (tg_call_files(cfg, "sendPhoto", data, {"photo": files[m["media"][9:]]})
+                 if m["media"].startswith("attach://") else tg_call(cfg, "sendPhoto", {**data, "photo": m["media"]},
+                                                                     quiet=True))
+        else:
+            data["media"] = json.dumps(media, ensure_ascii=False)
+            r = tg_call_files(cfg, "sendMediaGroup", data, files) if files else tg_call(cfg, "sendMediaGroup", data)
+        album = (_msg_ids(r) or []) if r is not None else []
+        r = tg_call(cfg, "sendMessage", {"chat_id": cfg["telegram_chat_id"], "text": full[:4096], "parse_mode": "HTML",
+                                         "disable_web_page_preview": True, **quiet,
+                                         "reply_markup": json.dumps(kb, ensure_ascii=False)})
+        if r is None:
+            return False
+        ids = list(album) + (_msg_ids(r) or [])
+        media = []                                   # уже отправили
+        try:
+            remember_card(cfg, ids, ref, full)
+        except Exception as e:
+            log.info("карточка не запомнена: %s", e)
+        return ids or True
     if media:
         media[0]["caption"] = text
         media[0]["parse_mode"] = "HTML"
@@ -4784,8 +4950,9 @@ def send_card(cfg, l: dict, text: str, kb: dict = None, silent: bool = False, re
         if r is not None:
             ids = _msg_ids(r) or True
     if not ids:                                      # запасной путь — текстом
-        r = tg_call(cfg, "sendMessage", {"chat_id": cfg["telegram_chat_id"], "text": text[:4096], "parse_mode": "HTML",
-                                         "disable_web_page_preview": True, **quiet})
+        r = tg_call(cfg, "sendMessage", {"chat_id": cfg["telegram_chat_id"], "text": full[:4096], "parse_mode": "HTML",
+                                         "disable_web_page_preview": True, **quiet,
+                                         **({"reply_markup": json.dumps(kb, ensure_ascii=False)} if kb else {})})
         ids = False if r is None else (_msg_ids(r) or True)
     if ids:
         try:
@@ -4795,7 +4962,7 @@ def send_card(cfg, l: dict, text: str, kb: dict = None, silent: bool = False, re
     return ids
 
 
-def send_site_cards(cfg, sst, items, title="", more=0, more_cb="R:pick", limit=5) -> int:
+def send_site_cards(cfg, sst, items, title="", more=0, more_cb="R:pick", limit=5, queue=False) -> int:
     """Варианты — каждый отдельной карточкой со своими фото и разбором (без сводных списков).
     items — ключи или объявления; title — подпись сверху «Подборка дня · 2 из 5».
     Без фото вариант не показываем. more — сколько ещё ждёт: на последней карточке «Ещё варианты»."""
@@ -4831,7 +4998,7 @@ def send_site_cards(cfg, sst, items, title="", more=0, more_cb="R:pick", limit=5
         if more and i == len(ready):                 # кнопок нет — подсказка словами
             head += "\n" + t("Есть ещё {n} — скажите, если хотите посмотреть", n=more)
         g0 = l.get("geo")
-        if send_card(cfg, l, format_sale_card(sst, l, cfg, head=head), ref="L:" + l["key"]):
+        if send_card(cfg, l, format_sale_card(sst, l, cfg, head=head), ref="L:" + l["key"], queue=queue):
             sent += 1
         if l.get("geo") and l.get("geo") != g0 and sst.known(l["key"]):   # нашли место — запомнить, не искать снова
             sst.conn.execute("UPDATE listings SET data=? WHERE key=?", (sst.pack(l), l["key"]))
@@ -5056,7 +5223,8 @@ def run_sale_search(cfg: dict, store, settings: dict, force: bool = False) -> in
             head = (f"🔥 <b>Только что от собственника</b> · выложено {ago_text(mins)}\n"
                     "Позвоните первым — маклеры перехватывают такие за пару часов") if mins is not None else ""
             ids = send_card(cfg, l if settings.get("photos", True) else dict(l, photo_urls=[]),
-                            format_sale_card(store, l, cfg, head=head), silent=silent, ref="L:" + l["key"])
+                            format_sale_card(store, l, cfg, head=head), silent=silent, ref="L:" + l["key"],
+                            queue=True)
             if not ids:
                 log.info("[продажа] не отправилось, повторю позже: %s", l["title"][:45])
                 break     # не сохраняем — объявление придёт в следующий проход

@@ -774,7 +774,10 @@ async function botToken(env) {
 export async function tg(env, method, body) {
   const client = body?.chat_id != null && env.OWNER_CHAT && await isClient(env, body.chat_id).catch(() => false);
   // клиенту кнопок не шлём: управление — словами (ссылки в тексте остаются)
-  if (body && method !== "editMessageReplyMarkup" && client && body.reply_markup?.inline_keyboard?.length) {
+  // (кроме кнопок карточки из очереди «Сохранить / Пропустить / Уточнить» — Q:…)
+  const ik = body?.reply_markup?.inline_keyboard;
+  if (body && method !== "editMessageReplyMarkup" && client && ik?.length
+      && !ik.flat().every(b => String(b.callback_data || "").startsWith("Q:"))) {
     body = { ...body }; delete body.reply_markup;
   }
   // клиент на узбекском/английском: готовые русские тексты — в перевод
@@ -1223,10 +1226,25 @@ const ivKey = chat => "iv:" + chat;
 
 // Маклеру — ответ сразу (раньше ждал, пока проснётся Python). Не на /start и не на «здравствуйте»:
 // там Python присылает знакомство с запросом клиента. Не чаще раза в 20 минут на маклера.
-export const BROKER_ACK = "Здравствуйте! Я Ra'no, ИИ-ассистент — веду поиск жилья для клиента и передаю ему варианты.\n" +
+// Маклерам Ra'no представляется ассистентом конкретного клиента: имя — ссылкой на его Telegram (видно, что
+// человек настоящий). Имя и ник берём из сообщений самого клиента.
+async function rememberWho(env, chat, from) {
+  if (!from?.first_name) return;
+  const who = { id: from.id, name: String(from.first_name).trim().slice(0, 40), username: from.username || "" };
+  const k = "who:" + chat;
+  if (JSON.stringify(await kvGet(env, k, null)) !== JSON.stringify(who)) await kvSet(env, k, who);
+}
+export async function clientMention(env, chat) {
+  const w = await kvGet(env, "who:" + chat, null);
+  if (!w?.name) return "";
+  const url = w.username ? `https://t.me/${w.username}` : w.id ? `tg://user?id=${w.id}` : "";
+  return url ? `<a href="${url}">${esc(w.name)}</a>` : esc(w.name);
+}
+export const brokerAckText = who => "Здравствуйте! Я Ra'no, ИИ-ассистент — ищу квартиру для своего клиента" +
+  (who ? `: ${who}` : "") + ". Варианты передаю ему.\n" +
   "Rahmat, получила! 🙌 Если зацепит — вернусь с вопросами. Есть ещё что-то по параметрам — присылайте.\n\n" +
-  "Assalomu alaykum! Men Ra'no, AI-yordamchiman — mijoz uchun uy-joy qidiryapman. Rahmat, qabul qilindi! " +
-  "Mos kelsa, aniqlik kiritish uchun yozaman. Parametrlarga mos variantlar bo'lsa, yuboravering.";
+  "Assalomu alaykum! Men Ra'no, AI-yordamchiman — mijozim" + (who ? ` ${who}` : "") + " uchun uy-joy qidiryapman. " +
+  "Rahmat, qabul qilindi! Mos kelsa, aniqlik kiritish uchun yozaman. Parametrlarga mos variantlar bo'lsa, yuboravering.";
 /** Маклеру, который пришёл по ссылке / поздоровался / нажал «Что ищет клиент» — знакомство и суть запроса. */
 async function brokerWelcome(env, msg, owner) {
   const text = String(msg.text || msg.caption || "").trim();
@@ -1238,23 +1256,26 @@ async function brokerWelcome(env, msg, owner) {
   await kvSet(env, k, Date.now());
   const iv = await kvGet(env, ivKey(owner), null);
   const want = iv && essentialsOk(iv.ans || {}) ? summary(iv.ans) + (iv.ans.note ? `; ${iv.ans.note}` : "") : "";
-  await tg(env, "sendMessage", { chat_id: msg.chat.id, reply_markup: BROKER_KB, text:
-    "Assalomu alaykum! Я Ra'no 👋, ИИ-ассистент — ищу жильё для клиента.\n" +
-    (want ? `\nКлиент ищет: ${want}.\n` : "") +
+  const who = await clientMention(env, owner);
+  await tg(env, "sendMessage", { chat_id: msg.chat.id, reply_markup: BROKER_KB, parse_mode: "HTML",
+    disable_web_page_preview: true, text:
+    "Assalomu alaykum! Я Ra'no 👋, ИИ-ассистент — ищу квартиру для своего клиента" + (who ? `: ${who}` : "") + ".\n" +
+    (want ? `\nКлиент ищет: ${esc(want)}.\n` : "") +
     "\nПришлите подходящие варианты: фото, точный адрес, этаж, площадь, цену и комиссию — " +
     "одним сообщением или по частям, я не тороплю. Передам клиенту сразу же.\n\n" +
     "Assalomu alaykum! Men Ra'no, AI-yordamchiman. Mos variantlarni yuboring: foto, manzil, qavat, maydon, narx va vositachilik haqi." });
   return true;
 }
 
-async function brokerAck(env, msg) {
+async function brokerAck(env, msg, forClient) {
   const text = String(msg.text || msg.caption || "").trim();
   const looksOffer = !!msg.photo || text.length >= 25 || /\d/.test(text);
   if (text.startsWith("/") || !looksOffer) return false;
   const k = "ack:" + msg.chat.id;
   if (Date.now() - (await kvGet(env, k, 0)) < 20 * 60e3) { msg._acked = true; return false; }
   await kvSet(env, k, Date.now());
-  const r = await tg(env, "sendMessage", { chat_id: msg.chat.id, text: BROKER_ACK });
+  const r = await tg(env, "sendMessage", { chat_id: msg.chat.id, parse_mode: "HTML", disable_web_page_preview: true,
+    text: brokerAckText(forClient ? await clientMention(env, forClient) : "") });
   if (r && r.ok !== false) msg._acked = true;
   return true;
 }
@@ -1542,6 +1563,14 @@ export async function handleUpdate(env, upd) {
       await queueAndWake(env, upd);
       return "outreach";
     }
+    if (/^Q:[sna]\|/.test(data)) {             // карточка из очереди: ответ сразу, дальше — Python (и следующая)
+      await tg(env, "answerCallbackQuery", { callback_query_id: cb.id,
+        text: { s: "💾 Сохранила", n: "⏭ Дальше", a: "✍️ Готовлю вопросы продавцу" }[data[2]] });
+      await tg(env, "editMessageReplyMarkup", { chat_id: chat, message_id: cb.message.message_id, reply_markup: { inline_keyboard: [] } });
+      upd.callback_query = { ...cb, _toast_done: true };
+      await queueAndWake(env, upd);
+      return "card";
+    }
     if (/^s:(o|t):\d+$/.test(data)) {           // номер в шортлисте — карточка с фото собирает Python
       await tg(env, "answerCallbackQuery", { callback_query_id: cb.id, text: "📂 Открываю…" });
       upd.callback_query = { ...cb, _toast_done: true };
@@ -1702,6 +1731,7 @@ export async function handleUpdate(env, upd) {
   if (!msg) { await enqueue(env, upd); return "queued"; }
   const chat = String(msg.chat?.id ?? "");
   let client = chat === owner || await isClient(env, chat);
+  if (client) await rememberWho(env, chat, msg.from).catch(() => null);
   if (!client && isMulti(env)) {
     // много пользователей: Start без метки маклера — новый клиент (или лист ожидания); с меткой m<id> — маклер
     // клиента <id> (ссылка из его запроса). Убранных и ждущих не обслуживаем.
@@ -1738,7 +1768,7 @@ export async function handleUpdate(env, upd) {
       if (String(msg.text || "").trim() === BTN.what) return "broker_info";   // кнопка — Python не нужен
       msg._welcomed = true;
     } else {
-      await brokerAck(env, msg);                // ответ на вариант — сразу, даже если Python спит
+      await brokerAck(env, msg, forClient);     // ответ на вариант — сразу, даже если Python спит
     }
     await queueAndWake(env, upd);
     return "queued";

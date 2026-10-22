@@ -825,10 +825,61 @@ def request_summary(store) -> str:
     return "\n".join(x for x in keep if x.strip())
 
 
+# ------------------------------------------------------------ от чьего имени --
+# Маклерам и продавцам Ra'no представляется ассистентом конкретного человека: «ищу квартиру для своего клиента:
+# Шохрух» — имя ссылкой на его Telegram, чтобы было видно, что клиент настоящий. Из аккаунта клиента
+# (Telegram для бизнеса, готовый текст) — от первого лица, одной строкой про ИИ-помощника.
+CLIENT = "⟦client⟧"
+
+
+def client_who(store) -> dict:
+    try:
+        return (store.get_kv("client_who") or {}) if store is not None else {}
+    except Exception:
+        return {}
+
+
+def remember_client(store, frm: dict):
+    """Имя и ник клиента — из его же сообщений в боте (Telegram отдаёт их с каждым апдейтом)."""
+    if not frm or not frm.get("first_name"):
+        return
+    who = {"id": frm.get("id"), "name": str(frm.get("first_name") or "").strip()[:40],
+           "username": frm.get("username") or ""}
+    if who != client_who(store):
+        store.set_kv("client_who", who)
+
+
+def client_mention(store, html=True) -> str:
+    w = client_who(store)
+    name = w.get("name") or ""
+    if not name or not html:
+        return name
+    _rr_ = _rr()
+    url = f"https://t.me/{w['username']}" if w.get("username") else (f"tg://user?id={w['id']}" if w.get("id") else "")
+    return f'<a href="{url}">{_rr_.escape_html(name)}</a>' if url else _rr_.escape_html(name)
+
+
+def fill_client(text: str, store, html=False) -> str:
+    """Подставить имя клиента вместо ⟦client⟧ (имени нет — убрать хвост «: ⟦client⟧»)."""
+    if CLIENT not in (text or ""):
+        return text
+    who = client_mention(store, html=html)
+    if who:
+        return text.replace(CLIENT, who)
+    return re.sub(r"\s*[:—-]?\s*" + re.escape(CLIENT), "", text)
+
+
+def intro_line(cfg, uz=False) -> str:
+    a = cfg.get("assistant_name", "Ra'no")
+    if uz:
+        return f"Assalomu alaykum! Men {a} — sun'iy intellekt yordamchisiman, mijozim uchun kvartira qidiryapman: {CLIENT}."
+    return f"Здравствуйте! Я {a}, ИИ-ассистент — ищу квартиру для своего клиента: {CLIENT}."
+
+
 def broker_welcome(cfg, store) -> str:
     a = cfg.get("assistant_name", "Ra'no")
     want = request_summary(store)
-    return (f"Assalomu alaykum! Я {a} 👋, ИИ-ассистент — ищу жильё для клиента.\n"
+    return (f"Assalomu alaykum! Я {a} 👋, ИИ-ассистент — ищу квартиру для своего клиента: {CLIENT}.\n"
             + (f"\nКлиент ищет:\n{want}\n" if want else "")
             + "\nПришлите подходящие варианты: фото, точный адрес, этаж, площадь, цену и "
               "комиссию — одним сообщением или альбомом, я не тороплю. Передам клиенту сразу же.\n"
@@ -1087,7 +1138,7 @@ def notify_offer(cfg, store, oid, pos=None, total=None):
     if not o["photos"]:
         text += "\n📷 Маклер не прислал фото — без них не сравнить, попрошу при уточнении"
     text += "\n<i>Как вам? Ответьте на сообщение своими словами</i>"
-    rr.send_card(cfg, offer_media(cfg, o), text, ref=f"O:{oid}")
+    rr.send_card(cfg, offer_media(cfg, o), text, ref=f"O:{oid}", queue=True)
 
 
 def show_offers(cfg, store, batch=None):
@@ -1224,29 +1275,31 @@ def _biz_voice(text: str, cfg) -> str:
     """Из аккаунта клиента пишем от первого лица, без подписи: про ИИ-помощника сказано в первом сообщении.
     Только формы без рода («спасибо», «посмотрю», «уточните»): клиент может быть и мужчиной, и женщиной."""
     a = (cfg or {}).get("assistant_name", "Ra'no")
-    t = re.sub(rf"^Здравствуйте! Это {re.escape(a)} 👋, ИИ-ассистент по поиску жилья\.\n", "", text)
+    t = re.sub(rf"^Здравствуйте! (?:Это|Я) {re.escape(a)}[^\n]*\n", "Здравствуйте! ", text)
     t = t.replace(f"Здравствуйте! Это снова {a} 🙂 ", "Здравствуйте! ")
     t = t.replace("Клиенту, увы, не подошёл", "Увы, не подошёл").replace("клиенту", "мне")
     return re.sub(rf"\s*\({re.escape(a)}\)\s*$", "", t)
 
 
-def broker_send(cfg, store, broker_chat, text):
-    """Сообщение маклеру: в бота — от бота; в чат клиента — через Telegram для бизнеса.
-    На языке маклера: пишет по-узбекски — и ему по-узбекски (что не переведено вручную — переводит модель)."""
+def broker_send(cfg, store, broker_chat, text, translate=True):
+    """Сообщение маклеру: в бота — от бота (имя клиента — ссылкой на его Telegram); в чат клиента — через
+    Telegram для бизнеса, от первого лица. На языке маклера: пишет по-узбекски — и ему по-узбекски."""
     rr = _rr()
     c = str(broker_chat or "")
     import i18n
     if c.startswith("biz:"):
         text = _biz_voice(text, cfg)               # сначала — от первого лица (правила по-русски), потом перевод
-    if i18n.broker_lang(store, c) == "uz" and i18n.has_russian(text):
-        text = i18n.ai(cfg, text, "uz")
+    if translate and i18n.broker_lang(store, c) == "uz" and i18n.has_russian(text):
+        text = i18n.ai(cfg, text.replace(CLIENT, "{CLIENT}"), "uz").replace("{CLIENT}", CLIENT)
     if c.startswith("biz:"):
         conn = biz_conn(store)
         if not (conn.get("id") and conn.get("enabled")):
             return None
         return rr.tg_call(cfg, "sendMessage", {"business_connection_id": conn["id"], "chat_id": int(c[4:]),
-                                               "text": text}, quiet=True)
-    return rr.tg_call(cfg, "sendMessage", {"chat_id": broker_chat, "text": text})
+                                               "text": fill_client(text, store)}, quiet=True)
+    return rr.tg_call(cfg, "sendMessage", {"chat_id": broker_chat, "parse_mode": "HTML",
+                                           "disable_web_page_preview": True,
+                                           "text": fill_client(rr.escape_html(text), store, html=True)})
 
 
 def handle_triage_cb(data, cfg, store):
@@ -1623,8 +1676,7 @@ def arrange_viewing(cfg, store, oid) -> str:
         text = (f"Здравствуйте! По варианту{f' ({tag})' if tag else ''} — можно посмотреть квартиру {when}? "
                 "Если неудобно — подскажите, когда можно.")
     else:
-        a = cfg.get("assistant_name", "Ra'no")
-        text = (f"Здравствуйте! Это {a}, ИИ-ассистент клиента. По варианту"
+        text = (f"{intro_line(cfg)}\nПо варианту"
                 f"{f' ({tag})' if tag else ''}: клиент хотел бы посмотреть квартиру {when}. "
                 "Удобно? Если нет — подскажите своё время, я передам.")
     if can_message_broker(o) and broker_send(cfg, store, o["broker_chat"], text) is not None:
@@ -1893,10 +1945,13 @@ def biz_auto_ask(cfg, store, oid) -> bool:
     return True
 
 
-def details_question(o, cfg=None, deal="rent"):
+def details_question(o, cfg=None, deal="rent", self_voice=False, helper=False):
+    """Вопросы продавцу. От Ra'no (бот, маклеру) — с представлением и именем клиента; self_voice — текст,
+    который клиент отправит сам из своего Telegram: от первого лица; helper — строка про ИИ-помощника
+    (по ней Ra'no узнаёт этот чат и сама читает ответы, если подключён Telegram для бизнеса)."""
     cfg = cfg or {}
     a = cfg.get("assistant_name", "Ra'no")
-    q = [f"Здравствуйте! Это {a} 👋, ИИ-ассистент по поиску жилья.",
+    q = ["Здравствуйте!" if self_voice else intro_line(cfg),
          ("По вашему объявлению о продаже" if ((o.get("extra") or {}).get("deal") or deal) in ("buy", "sale")
           else "По вашему объявлению об аренде") if is_site_offer(o) else "По варианту, который вы присылали"]
     tag = []
@@ -1926,6 +1981,8 @@ def details_question(o, cfg=None, deal="rent"):
             items.append("Какая цена за сутки?" if deal == "daily" else "Какая цена в месяц?")
         items += ["Размер депозита и комиссии?", "Когда можно посмотреть?"]
     q += [f"{i}. {t}" for i, t in enumerate(items, 1)]
+    if self_voice and helper:
+        q.append(f"\nМне помогает {a} — ИИ-помощник: если не успею ответить, она уточнит детали прямо в этом чате.")
     return "\n".join(q)
 
 
@@ -1961,16 +2018,28 @@ def request_details(cfg, store, oids=None):
         rr.send_telegram(cfg, f"📨 Спросила маклеров по {sent} {plural(sent, 'варианту', 'вариантам', 'вариантам')}.\n"
                               "Как ответят — прикреплю к карточкам. "
                               "А если кто-то промолчит сутки — подскажу, напомнить ли.")
-    for o in manual:                         # готовый текст, чтобы отправить самому
+    biz = biz_ready(store)
+    for o in manual:                         # готовый текст — клиент отправит сам, от своего имени
         ex = o.get("extra") or {}
+        q = details_question(o, cfg, deal, self_voice=True, helper=biz)
+        phones = [p for p in (ex.get("phones") or []) if p][:2]
+        link = ""
+        if phones:                           # одна ссылка: чат с продавцом в Telegram, текст уже вписан
+            from urllib.parse import quote
+            digits = re.sub(r"\D", "", str(phones[0]))
+            digits = digits if digits.startswith("998") else "998" + digits[-9:]
+            link = f'\n👉 <a href="https://t.me/+{digits}?text={quote(q)}">Написать продавцу в Telegram</a> — текст уже вписан'
         if is_site_offer(o):
-            who = ", ".join(rr.fmt_phone(p) for p in (ex.get("phones") or [])[:2])
+            who = ", ".join(rr.fmt_phone(p) for p in phones)
             head = (f"✍️ Вариант #{o['oid']} — объявление с {rr.escape_html(o['broker_name'] or 'сайта')}. "
-                    + (f"Продавец: 📞 {who}. " if who else "Контакт — в объявлении. ")
-                    + "Позвоните или напишите сами, текст готов:")
+                    + (f"Продавец: 📞 {who}." if who else
+                       f'Контакт — <a href="{rr.escape_html(ex.get("url") or "")}">в объявлении</a>.' if ex.get("url")
+                       else "Контакт — в объявлении."))
         else:
-            head = f"✍️ Вариант #{o['oid']} пришёл не через бота — уточните сами, текст готов:"
-        rr.send_telegram(cfg, f"{head}\n\n<code>{rr.escape_html(details_question(o, cfg, deal))}</code>")
+            head = f"✍️ Вариант #{o['oid']} пришёл не через бота — уточните сами."
+        tail = ("\nОтправьте от себя — ответ продавца в этом чате я увижу и сама уточню остальное."
+                if biz else "\nОтправьте от себя (или позвоните) — ответ перешлите мне, допишу в карточку.")
+        rr.send_telegram(cfg, f"{head}{link}{tail}\n\n<code>{rr.escape_html(q)}</code>")
     return f"Отправлено: {sent}" + (f", вручную: {len(manual)}" if manual else "")
 
 

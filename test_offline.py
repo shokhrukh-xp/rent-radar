@@ -1191,7 +1191,7 @@ assert "Я Ra'no" not in req_a          # владелец не должен г�
 # уточнения маклеру — от лица Ra'no, нумерация не сбита
 q = cg.details_question({"rooms": 3, "district": "Мирабад", "price_usd": 1200.0,
                          "floor": 7, "area": 105}, cfg_a)
-assert q.startswith("Здравствуйте! Это Ra'no 👋, ИИ-ассистент по поиску жилья.")
+assert q.startswith("Здравствуйте! Я Ra'no, ИИ-ассистент — ищу квартиру для своего клиента: " + cg.CLIENT)
 nums = [int(x) for x in re.findall(r"^(\d+)\.", q, re.M)]
 assert nums == list(range(1, len(nums) + 1))
 
@@ -2052,8 +2052,10 @@ assert "Открыть объявление" in card and "📞" in card and "о�
 XT.clear()
 with mock.patch.object(rr, "tg_call", xtg):
     cg.request_details(cfg, ys, [so["oid"]])
-man = [pl["text"] for m, pl in XT if "Позвоните или напишите" in pl.get("text", "")]
+man = [pl["text"] for m, pl in XT if "Отправьте от себя" in pl.get("text", "")]
 assert man and "По вашему объявлению о продаже" in man[0] and "Продавец: 📞" in man[0]
+assert man[0].count("https://t.me/+998") == 1 and "Написать продавцу в Telegram" in man[0]   # одна ссылка, текст вписан
+assert "Я Ra'no" not in man[0]                    # клиент отправляет сам — от первого лица
 # подборка дня — только в 19:30–23:00 и раз в день
 xs.save(dict(lr, key="sale:realting:999"), notified=False)
 SS.queue_pick(xs, dict(lr, key="sale:realting:999"), 50, [])
@@ -3478,3 +3480,54 @@ assert "card" not in _RS and "сняли или подняли цену" in _RS[
 assert _rs.conn.execute("SELECT COUNT(*) FROM listings WHERE notified=2").fetchone()[0] == 2
 _rp.unlink(missing_ok=True)
 print("OK — из накопленного: снятые и подорожавшие выше бюджета объявления не присылаются")
+# ============ карточки по одной с кнопками; маклерам — от имени клиента со ссылкой ============
+_qp = Path("/tmp/test_queue.db"); _qp.unlink(missing_ok=True)
+_qs = rr.Store(_qp)
+_QT = []
+def _qtg(c, m, pl, **k):
+    _QT.append((m, dict(pl)))
+    return {"ok": True, "result": {"message_id": 100 + len(_QT)}}
+_qcfg = dict(cfg, telegram_chat_id="77", card_queue=True)
+with mock.patch.object(rr, "tg_call", _qtg), mock.patch.dict(cg._BIZ_STORE, {"store": _qs}), \
+        mock.patch.object(rr, "remember_card", lambda *a, **k: None):
+    for i in (1, 2, 3):
+        rr.send_card(_qcfg, {"key": f"uybor:{i}", "photo_urls": []}, f"карточка {i}", ref=f"L:uybor:{i}", queue=True)
+    sent_ = [pl for m, pl in _QT if m == "sendMessage"]
+    assert len(sent_) == 1 and sent_[0]["text"].startswith("карточка 1")
+    kb_ = json.loads(sent_[0]["reply_markup"])["inline_keyboard"]
+    assert [b["callback_data"] for r in kb_ for b in r] == ["Q:s|L:uybor:1", "Q:n|L:uybor:1", "Q:a|L:uybor:1"]
+    rr.send_card(_qcfg, {"key": "uybor:2", "photo_urls": []}, "карточка 2", ref="L:uybor:2", queue=True)  # повтор — не дублируем
+    assert len(_qs.get_kv("card_queue")) == 2
+    _QT.clear()
+    with mock.patch.object(rr, "_listing_any", lambda st, k: None):
+        rr.card_action(_qcfg, _qs, rr.default_settings(), "Q:n|L:uybor:1", 101)        # пропустить → следующая
+    ms_ = [m for m, pl in _QT]
+    assert "editMessageText" in ms_ and any(pl.get("text", "").startswith("карточка 2") for m, pl in _QT)
+    assert (_qs.get_kv("card_open") or {}).get("ref") == "L:uybor:2"
+    _QT.clear()
+    rr.card_followup(_qcfg, _qs, "L:s:uybor:2")                                       # «нравится» словами
+    assert (_qs.get_kv("card_open") or {}).get("ref") == "L:uybor:3"
+    assert any("Сохранила" in pl.get("text", "") for m, pl in _QT if m == "editMessageText")
+# без очереди (по просьбе клиента) — сразу и без кнопок
+_QT.clear()
+with mock.patch.object(rr, "tg_call", _qtg), mock.patch.dict(cg._BIZ_STORE, {"store": _qs}), \
+        mock.patch.object(rr, "remember_card", lambda *a, **k: None):
+    rr.send_card(_qcfg, {"key": "uybor:9", "photo_urls": []}, "по просьбе", ref="L:uybor:9")
+assert _QT[0][1]["text"] == "по просьбе" and "reply_markup" not in _QT[0][1]
+# маклеру в бота — имя клиента ссылкой; из Telegram клиента — от первого лица, без представления
+cg.remember_client(_qs, {"id": 77, "first_name": "Шохрух", "username": "shokh"})
+_QT.clear()
+with mock.patch.object(rr, "tg_call", _qtg):
+    cg.broker_send(_qcfg, _qs, "5005", cg.details_question({"rooms": 2, "district": "Мирабад", "price_usd": 700,
+                                                             "floor": 3, "area": 60}, _qcfg))
+pl_ = _QT[0][1]
+assert pl_["parse_mode"] == "HTML" and '<a href="https://t.me/shokh">Шохрух</a>' in pl_["text"]
+assert "ищу квартиру для своего клиента" in pl_["text"] and cg.CLIENT not in pl_["text"]
+_bv = cg._biz_voice(cg.details_question({"rooms": 2, "district": "Мирабад", "price_usd": 700, "floor": 3, "area": 60},
+                                        _qcfg), _qcfg)
+assert _bv.startswith("Здравствуйте! По варианту") and "Ra'no" not in _bv.split("\n")[0]
+assert "Шохрух" in cg.fill_client(cg.broker_welcome(_qcfg, _qs), _qs) and cg.CLIENT not in cg.fill_client(
+    cg.intro_line(_qcfg), rr.Store(Path("/tmp/test_noname.db")))
+Path("/tmp/test_noname.db").unlink(missing_ok=True)
+_qp.unlink(missing_ok=True)
+print("OK — карточки по одной с кнопками «Сохранить / Пропустить / Уточнить»; маклерам — от имени клиента со ссылкой")

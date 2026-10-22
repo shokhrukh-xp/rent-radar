@@ -791,3 +791,30 @@ console.log("OK — «обвести на карте»: подпись Telegram,
   assert.ok(q5.result.some(u => u.message?.web_app_data), JSON.stringify(q5.result.map(u => Object.keys(u.message || {}))));
 }
 console.log("OK — проверка кода: маклер остаётся маклером, апдейты не по порядку, вебхук закрыт без секрета, готовый поиск не теряется");
+
+// ── карточки по одной: кнопки Q: клиенту можно; нажатие — ответ сразу и в Python; маклеру — имя клиента ссылкой
+{
+  const W = await import("../src/index.js");
+  W.resetUsersCache();
+  await W.tg(env, "sendMessage", { chat_id: +OWNER, text: "card",
+    reply_markup: { inline_keyboard: [[{ text: "💾", callback_data: "Q:s|L:uybor:1" }, { text: "⏭", callback_data: "Q:n|L:uybor:1" }]] } });
+  assert.ok(sent.at(-1).reply_markup, "кнопки карточки остаются");
+  qq = await (await svc("/svc/updates?after=0")).json();
+  const base = qq.result.length ? qq.result.at(-1).update_id : 0;
+  const r = await handleUpdate(env, { update_id: ++uid, callback_query: { id: "cq", data: "Q:n|L:uybor:1", from: { id: +OWNER },
+    message: { message_id: 55, chat: { id: +OWNER } } } });
+  assert.equal(r, "card");
+  assert.ok(sent.some(x => x.m === "answerCallbackQuery" && /Дальше/.test(x.text || "")));
+  const q6 = await (await svc(`/svc/updates?after=${base}`)).json();
+  assert.ok(q6.result.some(u => u.callback_query?.data === "Q:n|L:uybor:1" && u.callback_query._toast_done));
+  // клиент написал — имя запомнено; маклер прислал вариант — в ответе ссылка на клиента
+  geminiQueue.push({ reply: "Ок", ready: false, set: [] });
+  await handleUpdate(env, { update_id: ++uid, message: { message_id: 1, chat: { id: +OWNER }, text: "привет",
+    from: { id: +OWNER, first_name: "Шохрух", username: "shokh", language_code: "ru" } } });
+  assert.equal(await W.clientMention(env, OWNER), '<a href="https://t.me/shokh">Шохрух</a>');
+  await env.DB.prepare("DELETE FROM kv WHERE k LIKE 'ack:%'").run();
+  await handleUpdate(env, msg("Есть 2 комн Мирабад 700$, 60 м2", "9901"));
+  const ack = sent.filter(x => String(x.chat_id) === "9901").at(-1);
+  assert.ok(ack.parse_mode === "HTML" && /для своего клиента: <a href="https:\/\/t\.me\/shokh">Шохрух<\/a>/.test(ack.text), ack.text);
+}
+console.log("OK — карточки по одной: кнопки «Сохранить / Пропустить / Уточнить»; маклерам — имя клиента ссылкой");
