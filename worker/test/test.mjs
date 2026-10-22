@@ -840,3 +840,33 @@ console.log("OK — «кому служит Ra'no»: страница и ком�
   assert.ok(r.ok && r.street === "Шота Руставели" && r.house === "49/1" && r.metro === "Ойбек" && !("mahalla" in r) && !("landmark" in r), JSON.stringify(r));
 }
 console.log("OK — место по тексту поста: улица, дом, ориентир, метро — только написанное");
+
+// ── по приглашению: каждый новый — в заявки, владельцу «Пустить: /approve»; /about — любому
+{
+  const W = await import("../src/index.js");
+  W.resetUsersCache();
+  const envI = { ...env, MULTI_USER: "on", USER_LIMIT: "20", INVITE_ONLY: "on", WAKE_GH: "off" };
+  assert.equal(await handleUpdate(envI, msg("/start", "7201")), "waitlist");
+  assert.ok(!(await W.isClient(envI, "7201")));
+  assert.ok(/по приглашению/.test(sent.filter(x => String(x.chat_id) === "7201").at(-1).text));
+  assert.ok(sent.some(x => String(x.chat_id) === OWNER && /Просится в Ra'no/.test(x.text || "") && /approve 7201/.test(x.text || "")));
+  assert.equal(await handleUpdate(envI, msg("/about", "7201")), "about");
+  await handleUpdate(envI, msg("/approve 7201"));
+  assert.ok(await W.isClient(envI, "7201"));
+  await env.DB.prepare("DELETE FROM users").run(); W.resetUsersCache();
+}
+console.log("OK — по приглашению: новые — в заявки владельцу, /approve открывает доступ, /about — любому");
+{
+  // по приглашению: ждущий заявки прислал вариант — это маклер, вариант идёт клиенту
+  const W = await import("../src/index.js");
+  W.resetUsersCache();
+  const envI = { ...env, MULTI_USER: "on", USER_LIMIT: "20", INVITE_ONLY: "on", WAKE_GH: "off" };
+  await handleUpdate(envI, msg("/start", "7301"));
+  qq = await (await svc("/svc/updates?after=0")).json();
+  const base = qq.result.length ? qq.result.at(-1).update_id : 0;
+  await handleUpdate(envI, msg("Есть 2 комн Мирабад 700$, 60 м2, хозяин", "7301"));
+  const q7 = await (await svc(`/svc/updates?after=${base}`)).json();
+  assert.ok(q7.result.some(u => String(u.message?.chat?.id) === "7301" && u.message._client === OWNER));
+  await env.DB.prepare("DELETE FROM users").run(); W.resetUsersCache();
+}
+console.log("OK — по приглашению: ждущий, который присылает вариант, — маклер");

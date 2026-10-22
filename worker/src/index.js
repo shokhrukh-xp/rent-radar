@@ -434,6 +434,15 @@ export const WAITLIST = {
   en: "Hi! I'm Ra'no 👋 — an AI assistant for finding flats in Tashkent.\n\nRight now I work with a small group and " +
     "all spots are taken. I've put you on the waitlist — I'll message you here as soon as a spot opens 🙌",
 };
+export const INVITE = {
+  ru: "Привет! Я Ra'no 👋 — личный ИИ-помощник для поиска квартир в Ташкенте.\n\nСейчас я работаю по приглашению. " +
+    "Я передала вашу заявку — как только доступ откроют, напишу сюда сама 🙌\n\nВы маклер или хозяин? Просто " +
+    "пришлите вариант сюда: фото, адрес, цену — передам клиенту.\nКто я и кому служу — /about",
+  uz: "Salom! Men Ra'no 👋 — Toshkentda kvartira qidirish uchun shaxsiy AI-yordamchiman.\n\nHozir taklif bo'yicha " +
+    "ishlayapman. Arizangizni yubordim — kirish ochilishi bilan shu yerga o'zim yozaman 🙌",
+  en: "Hi! I'm Ra'no 👋 — a personal AI assistant for finding flats in Tashkent.\n\nRight now access is by invitation. " +
+    "I've passed on your request — I'll message you here as soon as access is open 🙌",
+};
 export const APPROVED = {
   ru: "🎉 Место освободилось — начинаем! Напишите своими словами, что ищете: например, «купить двушку в центре до $60 000».",
   uz: "🎉 Joy bo'shadi — boshlaymiz! Nima qidirayotganingizni yozing: masalan, «markazda 2 xonali, $60 000 gacha».",
@@ -447,7 +456,8 @@ export async function signup(env, msg) {
   if (st === "active" || st === "owner") return "active";
   if (st === "removed") return "removed";
   const n = await activeCount(env), lim = await userLimit(env);
-  if (n < lim) {
+  const invite = String(env.INVITE_ONLY || "").toLowerCase() === "on";   // по приглашению: каждого пускает владелец
+  if (n < lim && !invite) {
     await setUser(env, chat, "active", from);
     await setMapMenu(env, chat).catch(() => null);
     await adminSay(env, `🆕 Новый пользователь: ${who(from, chat)} — ${n + 1}/${lim}`);
@@ -455,9 +465,10 @@ export async function signup(env, msg) {
   }
   if (st !== "waitlist") {
     await setUser(env, chat, "waitlist", from);
-    await adminSay(env, `⏳ В лист ожидания: ${who(from, chat)} (мест ${lim}/${lim}). Пустить: <code>/approve ${chat}</code>`);
+    await adminSay(env, invite ? `🙋 Просится в Ra'no: ${who(from, chat)}. Пустить: <code>/approve ${chat}</code>`
+      : `⏳ В лист ожидания: ${who(from, chat)} (мест ${lim}/${lim}). Пустить: <code>/approve ${chat}</code>`);
   }
-  return "waitlist";
+  return invite ? "invite" : "waitlist";
 }
 /** Команды владельца: /users, /approve <chat|@username>, /remove <chat>, /limit <N>. */
 export async function adminCommand(env, chat, text) {
@@ -1766,6 +1777,11 @@ export async function handleUpdate(env, upd) {
   const chat = String(msg.chat?.id ?? "");
   let client = chat === owner || await isClient(env, chat);
   if (client) await rememberWho(env, chat, msg.from).catch(() => null);
+  if (!client && /^\/(about|privacy)(@\w+)?$/i.test(String(msg.text || "").trim())) {   // кто такая Ra'no — любому
+    const L0 = langOf(msg.from) === "uz" ? "uz" : "ru";
+    await say(env, chat, ABOUT[L0] + `\n\n${ORIGIN || ""}/about${L0 === "uz" ? "?lang=uz" : ""}`);
+    return "about";
+  }
   if (!client && isMulti(env)) {
     // много пользователей: Start без метки маклера — новый клиент (или лист ожидания); с меткой m<id> — маклер
     // клиента <id> (ссылка из его запроса). Убранных и ждущих не обслуживаем.
@@ -1776,11 +1792,16 @@ export async function handleUpdate(env, upd) {
       const cid = String(parseInt(payload.slice(1), 36));
       if (cid && (cid === owner || (await userStatus(env, cid)) === "active")) await kvSet(env, "broker_of:" + chat, cid);
     } else if ((payload !== null && !(payload === "" && await kvGet(env, "broker_of:" + chat, null)))
-               || st0 === "waitlist") {             // маклер нажал «Start» ещё раз — он маклер, не клиент
+               || (st0 === "waitlist" && String(env.INVITE_ONLY || "").toLowerCase() !== "on")) {
+      // маклер нажал «Start» ещё раз — он маклер, не клиент; по приглашению ждущий, который присылает вариант, — маклер
       const st = st0 === "waitlist" && payload === null ? "waitlist" : await signup(env, msg);
-      if (st === "waitlist") {
+      if (st === "waitlist" || st === "invite") {
         const k = "wl_note:" + chat;                   // не чаще раза в сутки
-        if (Date.now() - (await kvGet(env, k, 0)) > 864e5) { await kvSet(env, k, Date.now()); await say(env, chat, WAITLIST[langOf(msg.from)]); }
+        const invite = String(env.INVITE_ONLY || "").toLowerCase() === "on";
+        if (Date.now() - (await kvGet(env, k, 0)) > 864e5) {
+          await kvSet(env, k, Date.now());
+          await say(env, chat, (invite ? INVITE : WAITLIST)[langOf(msg.from)] || (invite ? INVITE : WAITLIST).ru);
+        }
         return "waitlist";
       }
       if (st === "removed") return "removed";

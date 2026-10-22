@@ -12,7 +12,9 @@ AI_MODEL = "gemini-3.8-flash"
 WAKE_GH = "off"
 # Этап 2 — много пользователей: "on" — новые люди по /start становятся клиентами (до USER_LIMIT, дальше лист
 # ожидания; владелец управляет командами /users, /approve, /remove, /limit). Выключено — один клиент, как раньше.
-MULTI_USER = "off"
+MULTI_USER = "on"
+# по приглашению: каждый новый человек — заявка владельцу («Пустить: /approve …»), сам по /start не входит
+INVITE_ONLY = "on"
 USER_LIMIT = "20"            # Python работает на сервере sonar (deploy/server); GitHub Actions — только вручную
 
 [[d1_databases]]
