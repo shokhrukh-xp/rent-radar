@@ -1250,11 +1250,19 @@ def decline_text(cfg, reason=""):
             f"{r[3]}, с радостью посмотрю. ({a})")
 
 
+def contact_chat(o) -> str:
+    """Куда писать по варианту: маклер в боте, чат клиента (Telegram для бизнеса, biz:<чат>), чат продавца с
+    аккаунтом Ra'no (ra:<id>) или продавец, пришедший в бота по SMS. Пересланным — некуда («»)."""
+    for c in (str(o.get("broker_chat") or ""), str((o.get("extra") or {}).get("chat") or "")):
+        if c.lstrip("-").isdigit() or c.startswith("ra:") or (c.startswith("biz:") and biz_ready_store(None)):
+            return c
+    return ""
+
+
 def can_message_broker(o) -> bool:
-    """Писать можно маклерам, которые сами писали в бота, и маклерам в чатах клиента,
-    куда Ra'no подключена через Telegram для бизнеса (biz:<чат>). Пересланным — нельзя."""
-    c = str(o.get("broker_chat") or "")
-    return c.lstrip("-").isdigit() or (c.startswith("biz:") and biz_ready_store(None))
+    """Писать можно маклерам, которые сами писали в бота, маклерам в чатах клиента, куда Ra'no подключена
+    через Telegram для бизнеса, и продавцам, которым Ra'no написала со своего аккаунта. Пересланным — нельзя."""
+    return bool(contact_chat(o))
 
 
 # ============================================== TELEGRAM ДЛЯ БИЗНЕСА ======
@@ -1329,6 +1337,9 @@ def broker_send(cfg, store, broker_chat, text, translate=True):
         text = _biz_voice(text, cfg)               # сначала — от первого лица (правила по-русски), потом перевод
     if translate and i18n.broker_lang(store, c) == "uz" and i18n.has_russian(text):
         text = i18n.ai(cfg, text.replace(CLIENT, "{CLIENT}"), "uz").replace("{CLIENT}", CLIENT)
+    if c.startswith("ra:"):                        # чат продавца с аккаунтом Ra'no
+        import outreach
+        return outreach.send_now(cfg, store, c, fill_client(rr.escape_html(text), store, html=True))
     if c.startswith("biz:"):
         conn = biz_conn(store)
         if not (conn.get("id") and conn.get("enabled")):
@@ -1372,7 +1383,7 @@ def handle_triage_cb(data, cfg, store):
                            (f"\n👎 {next((t for c, t, *_ in DECLINE_REASONS if c == reason), '')}", oid))
         store.conn.commit()
     if can_message_broker(o):
-        broker_send(cfg, store, o["broker_chat"], decline_text(cfg, reason))
+        broker_send(cfg, store, contact_chat(o), decline_text(cfg, reason))
         return "Маклеру ответила вежливо 🙏", True
     return "👎 Поняла, мимо", True
 
@@ -1698,7 +1709,7 @@ def arrange_viewing(cfg, store, oid) -> str:
     tag = _offer_tag(o)
     biz = str(o.get("broker_chat") or "").startswith("biz:")
     import i18n
-    uzb = (i18n.broker_lang(store, o["broker_chat"]) if can_message_broker(o) else
+    uzb = (i18n.broker_lang(store, contact_chat(o)) if can_message_broker(o) else
            i18n.detect_lang(o.get("text") or "")) == "uz"
     if uzb:                                    # маклер пишет по-узбекски — и просим по-узбекски
         d_ = _when(v.get("at"))                # дата по-узбекски, не русская подпись «сб, 25 октября»
@@ -1710,6 +1721,11 @@ def arrange_viewing(cfg, store, oid) -> str:
         text = (f"Assalomu alaykum! Variant bo'yicha{f' ({tag_uz})' if tag_uz else ''} — kvartirani {when_uz} "
                 + ("ko'rsak bo'ladimi? Qaysi vaqtda qulay?" if v.get("notime") else
                    "ko'rsak bo'ladimi? Noqulay bo'lsa — qachon mumkinligini ayting."))
+    elif contact_chat(o).startswith("ra:"):        # Ra'no уже писала продавцу со своего аккаунта
+        a_ = cfg.get("assistant_name", "Ra'no")
+        text = (f"Здравствуйте! Это снова {a_} 🙂 По вашему объявлению"
+                f"{f' ({tag})' if tag else ''}: клиент хотел бы посмотреть квартиру {when}. "
+                "Удобно? Если нет — подскажите своё время, я передам.")
     elif biz or is_site_offer(o) or not can_message_broker(o):
         text = (f"Здравствуйте! По варианту{f' ({tag})' if tag else ''} — можно посмотреть квартиру {when}? "
                 "Если неудобно — подскажите, когда можно.")
@@ -1717,9 +1733,9 @@ def arrange_viewing(cfg, store, oid) -> str:
         text = (f"{intro_line(cfg)}\nПо варианту"
                 f"{f' ({tag})' if tag else ''}: клиент хотел бы посмотреть квартиру {when}. "
                 "Удобно? Если нет — подскажите своё время, я передам.")
-    if can_message_broker(o) and broker_send(cfg, store, o["broker_chat"], text) is not None:
+    if can_message_broker(o) and broker_send(cfg, store, contact_chat(o), text) is not None:
         wait = store.get_kv("viewing_wait") or {}
-        wait[str(o["broker_chat"])] = {"oid": oid, "at": time.time()}
+        wait[contact_chat(o)] = {"oid": oid, "at": time.time()}
         store.set_kv("viewing_wait", wait)
         _set_extra(store, oid, viewing={**v, "asked_broker": datetime.now(TZ).isoformat(), "confirmed": False})
         return "asked"
@@ -1810,7 +1826,7 @@ def remind_broker(cfg, store, oid):
         rr.send_telegram(cfg, f"✍️ Маклер по варианту #{oid} не в боте — напомните сами, текст готов:\n\n"
                               f"<code>{rr.escape_html(remind_text(o, cfg))}</code>")
         return "Текст напоминания — в чате"
-    ok = broker_send(cfg, store, o["broker_chat"], remind_text(o, cfg))
+    ok = broker_send(cfg, store, contact_chat(o), remind_text(o, cfg))
     if ok is None:
         return "Не получилось отправить"
     now = datetime.now(timezone.utc).isoformat()
@@ -1858,7 +1874,7 @@ def handle_offer_cb(data, cfg, store, message_id=None):
         if arg == "n":
             set_offer_status(store, oid, "rejected")
             if can_message_broker(o):
-                broker_send(cfg, store, o["broker_chat"], decline_text(cfg))
+                broker_send(cfg, store, contact_chat(o), decline_text(cfg))
             done = {"chat_id": cfg["telegram_chat_id"], "parse_mode": "HTML",
                     "text": f"👎 Вариант #{oid} убран из шортлиста"
                             + (" — маклеру ушёл вежливый отказ." if can_message_broker(o) else "."),
@@ -2024,6 +2040,14 @@ def details_question(o, cfg=None, deal="rent", self_voice=False, helper=False):
     return "\n".join(q)
 
 
+def seller_question(o, cfg, deal="rent"):
+    """Первое сообщение продавцу с аккаунта Ra'no: от неё (ИИ-помощник клиента), по-русски и строкой по-узбекски."""
+    a = (cfg or {}).get("assistant_name", "Ra'no")
+    q = details_question(o, cfg, deal)
+    return (q + f"\n\nAssalomu alaykum! Men {a} — AI-yordamchiman, mijozim uchun so'rayapman. "
+                "O'zbekcha javob bersangiz ham bo'ladi 🙂")
+
+
 MANUAL_ASK_DAYS = 7
 BIZ_HINT_EVERY = 3 * 86400
 
@@ -2062,7 +2086,7 @@ def link_manual_ask(store, oid, chat_key):
     store.conn.commit()
     _set_extra(store, oid, chat=str(chat_key))
     store.set_kv("manual_asks", [x for x in (store.get_kv("manual_asks") or []) if x.get("oid") != oid])
-    if str(chat_key).startswith("biz:"):        # ответ в чате клиента узнаем как «ответ на наши вопросы»
+    if str(chat_key).startswith(("biz:", "ra:")) or str(chat_key).isdigit():   # ответ узнаем как «ответ на вопросы»
         ba = store.get_kv("biz_asked") or {}
         ba[chat_key] = {"oid": oid, "at": time.time()}
         store.set_kv("biz_asked", ba)
@@ -2080,6 +2104,38 @@ def biz_hint_due(store) -> bool:
         return False
     store.set_kv("biz_hint_at", time.time())
     return True
+
+
+def manual_ask(cfg, store, o, deal="rent"):
+    """Готовый текст продавцу — клиент отправит сам, от своего имени (ссылка на чат с вписанным текстом)."""
+    rr = _rr()
+    biz = biz_ready(store)
+    ex = o.get("extra") or {}
+    q = details_question(o, cfg, deal, self_voice=True, helper=biz)
+    remember_manual_ask(store, o["oid"], q)
+    phones = [p for p in (ex.get("phones") or []) if p][:2]
+    link = ""
+    if phones:                           # одна ссылка: чат с продавцом в Telegram, текст уже вписан
+        from urllib.parse import quote
+        digits = re.sub(r"\D", "", str(phones[0]))
+        digits = digits if digits.startswith("998") else "998" + digits[-9:]
+        link = f'\n👉 <a href="https://t.me/+{digits}?text={quote(q)}">Написать продавцу в Telegram</a> — текст уже вписан'
+    if is_site_offer(o):
+        who = ", ".join(rr.fmt_phone(p) for p in phones)
+        head = (f"✍️ Вариант #{o['oid']} — объявление с {rr.escape_html(o['broker_name'] or 'сайта')}. "
+                + (f"Продавец: 📞 {who}." if who else
+                   f'Контакт — <a href="{rr.escape_html(ex.get("url") or "")}">в объявлении</a>.' if ex.get("url")
+                   else "Контакт — в объявлении."))
+    else:
+        head = f"✍️ Вариант #{o['oid']} пришёл не через бота — уточните сами."
+    tail = ("\nОтправьте от себя — ответ продавца в этом чате я увижу и сама уточню остальное."
+            if biz else "\nОтправьте от себя (или позвоните) — ответ перешлите мне, допишу в карточку.")
+    if not biz and biz_hint_due(store):     # общение с продавцом может взять Ra'no — раз в 3 дня напоминаем как
+        tail += ("\n\n💡 Подключите меня к своему Telegram — одна настройка на минуту. Тогда вы отправите только "
+                 "первое сообщение, а дальше с продавцом общаюсь я. Напишите «подключить телеграм».")
+    rr.tg_call(cfg, "sendMessage", {"chat_id": cfg["telegram_chat_id"], "parse_mode": "HTML",
+                                    "disable_web_page_preview": True,
+                                    "text": f"{head}{link}{tail}\n\n<code>{rr.escape_html(q)}</code>"})
 
 
 def request_details(cfg, store, oids=None):
@@ -2101,7 +2157,7 @@ def request_details(cfg, store, oids=None):
             store.conn.execute("UPDATE broker_offers SET asked_at=? WHERE oid=?",
                                (datetime.now(timezone.utc).isoformat(), oid))
             continue
-        ok = broker_send(cfg, store, o["broker_chat"], details_question(o, cfg, deal))
+        ok = broker_send(cfg, store, contact_chat(o), details_question(o, cfg, deal))
         if ok is not None:
             store.conn.execute(
                 "UPDATE broker_offers SET status='asked', asked_at=? WHERE oid=?",
@@ -2114,34 +2170,17 @@ def request_details(cfg, store, oids=None):
         rr.send_telegram(cfg, f"📨 Спросила маклеров по {sent} {plural(sent, 'варианту', 'вариантам', 'вариантам')}.\n"
                               "Как ответят — прикреплю к карточкам. "
                               "А если кто-то промолчит сутки — подскажу, напомнить ли.")
-    biz = biz_ready(store)
-    for o in manual:                         # готовый текст — клиент отправит сам, от своего имени
-        ex = o.get("extra") or {}
-        q = details_question(o, cfg, deal, self_voice=True, helper=biz)
-        remember_manual_ask(store, o["oid"], q)
-        phones = [p for p in (ex.get("phones") or []) if p][:2]
-        link = ""
-        if phones:                           # одна ссылка: чат с продавцом в Telegram, текст уже вписан
-            from urllib.parse import quote
-            digits = re.sub(r"\D", "", str(phones[0]))
-            digits = digits if digits.startswith("998") else "998" + digits[-9:]
-            link = f'\n👉 <a href="https://t.me/+{digits}?text={quote(q)}">Написать продавцу в Telegram</a> — текст уже вписан'
-        if is_site_offer(o):
-            who = ", ".join(rr.fmt_phone(p) for p in phones)
-            head = (f"✍️ Вариант #{o['oid']} — объявление с {rr.escape_html(o['broker_name'] or 'сайта')}. "
-                    + (f"Продавец: 📞 {who}." if who else
-                       f'Контакт — <a href="{rr.escape_html(ex.get("url") or "")}">в объявлении</a>.' if ex.get("url")
-                       else "Контакт — в объявлении."))
-        else:
-            head = f"✍️ Вариант #{o['oid']} пришёл не через бота — уточните сами."
-        tail = ("\nОтправьте от себя — ответ продавца в этом чате я увижу и сама уточню остальное."
-                if biz else "\nОтправьте от себя (или позвоните) — ответ перешлите мне, допишу в карточку.")
-        if not biz and biz_hint_due(store):     # общение с продавцом может взять Ra'no — раз в 3 дня напоминаем как
-            tail += ("\n\n💡 Подключите меня к своему Telegram — одна настройка на минуту. Тогда вы отправите только "
-                     "первое сообщение, а дальше с продавцом общаюсь я. Напишите «подключить телеграм».")
-        rr.tg_call(cfg, "sendMessage", {"chat_id": cfg["telegram_chat_id"], "parse_mode": "HTML",
-                                        "disable_web_page_preview": True,
-                                        "text": f"{head}{link}{tail}\n\n<code>{rr.escape_html(q)}</code>"})
+    import outreach
+    taken = 0
+    for o in manual:
+        if is_site_offer(o) and outreach.can_take(o):   # Ra'no напишет продавцу сама — со своего аккаунта / SMS
+            outreach.enqueue(cfg, store, o, fill_client(rr.escape_html(seller_question(o, cfg, deal)), store,
+                                                         html=True))
+            taken += 1
+            continue
+        manual_ask(cfg, store, o, deal)
+    if taken and not sent and taken == len(manual):
+        return "📨 Пишу продавцу"
     return f"Отправлено: {sent}" + (f", вручную: {len(manual)}" if manual else "")
 
 
