@@ -3819,22 +3819,39 @@ with mock.patch.object(rr, "tg_call", _otg), mock.patch.dict(cg._BIZ_STORE, {"st
     cg.request_details(_ocfg, _os, [_o3])
     _otick()
     assert any("Написать продавцу в Telegram" in pl.get("text", "") for m, pl in _OT)
-    # лимит новых чатов в день: остальное ждёт завтра
-    _os.set_kv("ra_day", {"d": _out._now_local().strftime("%Y-%m-%d"), "n": _out.NEW_PER_DAY, "per": {}})
+    # лимит новых чатов на сегодня занят — клиенту сразу готовый текст, без ожидания до завтра
+    _today = _out._now_local().strftime("%Y-%m-%d")
+    _os.set_kv("ra_cap", {"cap": 15, "checked": _today})
+    _os.set_kv("ra_day", {"d": _today, "n": 15, "per": {}})
     _ftg.known["998900000004"] = ("4343", "h4")
     _o4, _ = cg.add_site_offer(_ocfg, _os, dict(_ol, key="uybor:604", phones=["90 000 00 04"]))
     _OT.clear()
     cg.request_details(_ocfg, _os, [_o4])
-    assert any("завтра утром" in pl.get("text", "") for m, pl in _OT)
-    _ss = len(_ftg.sent)
-    _otick()
-    assert len(_ftg.sent) == _ss and len(_os.get_kv("ra_queue")) == 1
-    # Telegram ограничил аккаунт — пауза, владельцу сигнал, клиенту прежний путь
+    assert not _os.get_kv("ra_queue") and any("Написать продавцу в Telegram" in pl.get("text", "") for m, pl in _OT)
+    assert any("отправить самим" in pl.get("text", "") for m, pl in _OT)
+    # растущий лимит: вчера работали без ограничений и использовали больше половины — сегодня +5
+    _os.set_kv("ra_cap", {"cap": 15, "checked": "2000-01-01"})
+    _os.set_kv("ra_day", {"d": "2000-01-01", "n": 9, "per": {}})
+    _out._day(_os)
+    assert _out.cap(_os) == 20 and _out.per_client(_out.cap(_os)) == 5
+    _out._day(_os)
+    assert _out.cap(_os) == 20                                     # один раз в день
+    _os.set_kv("ra_cap", {"cap": 20, "checked": "2000-01-01"})
+    _os.set_kv("ra_day", {"d": "2000-01-01", "n": 3, "per": {}})   # почти не писали — не растём
+    _out._day(_os)
+    assert _out.cap(_os) == 20
+    _os.set_kv("ra_cap", {"cap": 60, "checked": "2000-01-01"}); _os.set_kv("ra_day", {"d": "2000-01-01", "n": 60, "per": {}})
+    _out._day(_os)
+    assert _out.cap(_os) == 60 and _out.per_client(60) == 10        # потолок
+    # Telegram ограничил аккаунт — лимит вдвое ниже, пауза, владельцу сигнал, клиенту прежний путь
     _os.set_kv("ra_day", {})
+    _o6, _ = cg.add_site_offer(_ocfg, _os, dict(_ol, key="uybor:606", phones=["90 000 00 04"]))
+    cg.request_details(_ocfg, _os, [_o6])
+    assert len(_os.get_kv("ra_queue")) == 1
     _ftg.flood = True
     _OT.clear()
     _otick()
-    assert _out.paused(_os) > 3600 and not _os.get_kv("ra_queue")
+    assert _out.paused(_os) > 3600 and not _os.get_kv("ra_queue") and _out.cap(_os) == 30
     assert any("ограничил аккаунт" in pl.get("text", "") for m, pl in _OT)
     assert any("Написать продавцу в Telegram" in pl.get("text", "") for m, pl in _OT)
     _ftg.flood = False

@@ -2209,10 +2209,12 @@ def request_details(cfg, store, oids=None):
                 taken += 1
                 continue
         if is_site_offer(o) and outreach.can_take(o):   # Ra'no напишет продавцу сама — со своего аккаунта
-            outreach.enqueue(cfg, store, o, fill_client(rr.escape_html(seller_question(o, cfg, deal)), store,
-                                                         html=True))
-            taken += 1
-            continue
+            if outreach.enqueue(cfg, store, o, fill_client(rr.escape_html(seller_question(o, cfg, deal)), store,
+                                                            html=True)) is not None:
+                taken += 1
+                continue
+            rr.send_telegram(cfg, "Сегодня я уже написала многим продавцам — этому быстрее отправить самим, "
+                                  "одним нажатием. Ответ перешлите мне — приложу к карточке.")
         manual_ask(cfg, store, o, deal)
     if taken and not sent and taken == len(manual):
         return "📨 Пишу продавцу"

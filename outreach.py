@@ -10,8 +10,10 @@ Ra'no находит продавца по номеру из объявлени�
 следующие клиенты ждут вместе с первым. Имя клиента, которому отвечал продавец, из текста убираем.
 
 Бережно, чтобы аккаунт не сочли спамом: только по нажатию клиента, одно сообщение на объявление,
-не больше NEW_PER_DAY новых чатов в день на всех, пауза GAP между ними, только с 9 до 21 по Ташкенту.
-Telegram ограничил аккаунт (PeerFlood) — пауза на сутки, владельцу сообщение, клиентам — прежний путь «отправьте сами».
+новых чатов в день — растущий лимит: с CAP_START, за каждый чистый день (использовано не меньше половины, без
+ограничений) +CAP_STEP, до CAP_MAX; пауза GAP между первыми сообщениями, только с 9 до 21 по Ташкенту.
+Лимит на сегодня занят — клиенту сразу прежний путь: готовый текст, отправит сам одним нажатием (без ожидания).
+Telegram ограничил аккаунт (PeerFlood) — лимит вдвое ниже, пауза на сутки, владельцу сообщение, клиентам — прежний путь.
 
 Ключи (сессия аккаунта) — только в STATE_DIR/agent/*.json (права 600, в бэкап не попадают).
 Записывает их владелец сам: tools/agent_setup.py. Без них модуль молчит и всё работает как раньше.
@@ -28,8 +30,7 @@ from datetime import datetime, timedelta, timezone
 log = logging.getLogger("rent-radar")
 
 TZ = timezone(timedelta(hours=5))
-NEW_PER_DAY = 15            # новых чатов в день с аккаунта Ra'no — на всех клиентов
-PER_CLIENT_DAY = 5          # и на одного клиента
+CAP_START, CAP_STEP, CAP_MAX, CAP_MIN = 15, 5, 60, 10   # новых чатов в день с аккаунта Ra'no — на всех клиентов
 GAP = 90                    # секунд между первыми сообщениями незнакомым
 HOURS = (9, 21)             # пишем незнакомым только днём
 POLL_EVERY = 20             # как часто смотреть новые ответы
@@ -89,12 +90,47 @@ def daytime(now=None) -> bool:
     return HOURS[0] <= _now_local(now).hour < HOURS[1]
 
 
+def cap(sh) -> int:
+    return int((sh.get_kv("ra_cap") or {}).get("cap") or CAP_START)
+
+
+def per_client(c: int) -> int:
+    """На одного клиента в день: 5, с ростом общего лимита — до 10."""
+    return min(10, max(5, c // 6))
+
+
 def _day(sh, now=None):
     d = _now_local(now).strftime("%Y-%m-%d")
     b = sh.get_kv("ra_day") or {}
+    c = sh.get_kv("ra_cap") or {"cap": CAP_START}
+    if c.get("checked") != d:                  # новый день: вчера было чисто и аккаунт работал — лимит выше
+        if b.get("d") and b.get("d") != d and not b.get("flood") and b.get("n", 0) * 2 >= int(c.get("cap") or CAP_START):
+            c["cap"] = min(CAP_MAX, int(c.get("cap") or CAP_START) + CAP_STEP)
+            log.info("[ra] лимит новых чатов: %s в день", c["cap"])
+        c["checked"] = d
+        sh.set_kv("ra_cap", c)
     if b.get("d") != d:
         b = {"d": d, "n": 0, "per": {}}
     return b
+
+
+def _cut(sh, b):
+    """Telegram ограничил аккаунт — лимит вдвое ниже, разгон заново."""
+    c = sh.get_kv("ra_cap") or {}
+    c["cap"] = max(CAP_MIN, cap(sh) // 2)
+    sh.set_kv("ra_cap", c)
+    b["flood"] = True
+
+
+def has_room(sh, chat, q=None, now=None) -> bool:
+    """Есть ли место в сегодняшнем лимите (с учётом уже стоящих в очереди)."""
+    if paused(sh, now):
+        return False
+    b = _day(sh, now)
+    q = sh.get_kv("ra_queue") or [] if q is None else q
+    c = cap(sh)
+    mine = b["per"].get(str(chat), 0) + sum(1 for j in q if j.get("chat") == str(chat))
+    return b["n"] + len(q) < c and mine < per_client(c)
 
 
 def paused(sh, now=None) -> float:
@@ -119,24 +155,22 @@ def can_take(o) -> bool:
 
 # ----------------------------------------------------------------- очередь --
 
-def enqueue(cfg, store, o, text) -> str:
-    """Клиент попросил уточнить объявление — ставим «написать продавцу» в очередь. Ответ — для клиента."""
+def enqueue(cfg, store, o, text):
+    """Клиент попросил уточнить объявление — ставим «написать продавцу» в очередь. Ответ — для клиента.
+    None — места в сегодняшнем лимите нет: клиент отправит сам (готовый текст — request_details)."""
     sh = _shared(store)
     chat = str(cfg["telegram_chat_id"])
     q = sh.get_kv("ra_queue") or []
     if any(x.get("chat") == chat and x.get("oid") == o["oid"] for x in q):
         return "Уже пишу этому продавцу — жду очереди 🙂"
+    if not has_room(sh, chat, q):
+        return None
     q.append({"chat": chat, "oid": o["oid"], "phones": phones_of(o), "text": text, "at": time.time(),
               "tries": 0})
     sh.set_kv("ra_queue", q)
     note_ask(store, o, chat)
     rr = _rr()
-    when = ""
-    b = _day(sh)
-    if not daytime():
-        when = " Сейчас поздно — напишу утром, после 9:00."
-    elif paused(sh) or b["n"] >= NEW_PER_DAY or b["per"].get(chat, 0) >= PER_CLIENT_DAY:
-        when = " Сегодня уже много написала — продавцу напишу завтра утром."
+    when = "" if daytime() else " Сейчас поздно — напишу утром, после 9:00."
     rr.send_telegram(cfg, f"📨 Напишу продавцу варианта #{o['oid']} сама — представлюсь вашим AI-помощником."
                           f"{when} Как ответит — принесу ответ сюда, к карточке.")
     return "📨 Пишу продавцу"
@@ -333,9 +367,10 @@ def _send_next(cfg, sh, now):
     if now - float(sh.get_kv("ra_last_new") or 0) < GAP:
         return
     b = _day(sh, now)
-    if b["n"] >= NEW_PER_DAY:
+    c = cap(sh)
+    if b["n"] >= c:
         return
-    job = next((j for j in q if b["per"].get(j["chat"], 0) < PER_CLIENT_DAY), None)
+    job = next((j for j in q if b["per"].get(j["chat"], 0) < per_client(c)), None)
     if job is None:
         return
     q = [j for j in q if j is not job]
@@ -385,6 +420,7 @@ def _deliver(cfg, store, sh, job, b, now):
                 log.warning("[ra] продавцу #%s не ушло: %s %s", o["oid"], type(e).__name__, str(e)[:120])
                 if kind == "flood":
                     sh.set_kv("ra_pause_until", now + 24 * 3600)
+                    _cut(sh, b)
                     _alert(cfg, sh, "flood", "⚠️ Telegram ограничил аккаунт Ra'no на новые чаты (жалобы на спам?). "
                                              "Пауза на сутки; клиенты пока отправляют вопросы сами.")
                     return "pause"
@@ -533,7 +569,7 @@ def send_now(cfg, store, key, text):
 def status(store) -> str:
     sh = _shared(store)
     b = _day(sh)
-    parts = [f"аккаунт: {'есть' if tg_ready() else 'нет'}", f"сегодня новых чатов {b['n']}/{NEW_PER_DAY}",
+    parts = [f"аккаунт: {'есть' if tg_ready() else 'нет'}", f"сегодня новых чатов {b['n']}/{cap(sh)}",
              f"в очереди {len(sh.get_kv('ra_queue') or [])}"]
     if paused(sh):
         parts.append(f"пауза ещё {int(paused(sh) // 60)} мин")
