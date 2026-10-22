@@ -110,11 +110,11 @@ def add(ru, uz, en):
 
 
 # вердикт цены
-add("Дорого", "Qimmat", "Expensive")
-add("Хорошая цена", "Yaxshi narx", "Good price")
-add("Цена в рынке", "Bozor narxida", "Market price")
+add("Выше рынка", "Bozordan qimmat", "Above market")
+add("Ниже рынка", "Bozordan arzon", "Below market")
+add("В рынке", "Bozor narxida", "At market")
 add("Сравнить не с чем", "Solishtirishga yo'q", "Nothing to compare with")
-add("Подозрительно дёшево", "Shubhali arzon", "Suspiciously cheap")
+add("Намного ниже рынка", "Bozordan ancha arzon", "Far below market")
 add("на {pct} дороже похожих{near}{with_reno}", "o'xshashlaridan {pct} qimmatroq{near}{with_reno}",
     "{pct} more than similar{near}{with_reno}")
 add("на {pct} дешевле похожих{near}{with_reno}", "o'xshashlaridan {pct} arzonroq{near}{with_reno}",
@@ -132,9 +132,9 @@ add("рядом продают в основном с ремонтом ({med}), 
     "nearby are mostly renovated ({med}), {what} are rare — judge on site")
 add("коробок", "karobkalar", "shell flats")
 add("таких", "bunday", "such flats")
-add("на {pct} дешевле похожих{same} ({med}) — проверьте адрес, документы и состояние",
-    "o'xshashlaridan {pct} arzon{same} ({med}) — manzil, hujjatlar va holatini tekshiring",
-    "{pct} cheaper than similar{same} ({med}) — check the address, documents and condition")
+add("на {pct} дешевле похожих{same} ({med}) — так бывает при ошибке в цене, проблемах с документами или объявлении-приманке",
+    "o'xshashlaridan {pct} arzon{same} ({med}) — narxda xato, hujjat muammosi yoki aldov e'lon bo'lishi mumkin",
+    "{pct} cheaper than similar{same} ({med}) — this happens with a price typo, document problems or a bait listing")
 add(" с таким же ремонтом", " (xuddi shunday ta'mirli)", " with the same renovation")
 add("{base}, но бывшее общежитие", "{base}, lekin sobiq yotoqxona", "{base}, but a former dormitory")
 add("{why}; проверьте кадастр и приватизацию", "{why}; kadastr va xususiylashtirishni tekshiring",
@@ -185,17 +185,17 @@ add(" · взнос ${down}, ≈ {mln} млн сум/мес на {years} лет"
     " · boshlang'ich ${down}, ≈ oyiga {mln} mln so'm, {years} yilga",
     " · down payment ${down}, ≈ {mln} mln UZS/month for {years} years")
 add("Торг", "Savdo", "Bargain")
-add("просите ~${v}, цена уже ниже рынка", "~${v} so'rang, narx bozordan past",
-    "ask ~${v}, already below market")
-add("начните с ~${a}, потолок ~${b}", "~${a} dan boshlang, chegara ~${b}", "start at ~${a}, ceiling ~${b}")
+add("цена уже ниже рынка", "narx allaqachon bozordan past",
+    "already below market")
+add("по похожим разумная цена ~${a}–${b}", "o'xshashlariga ko'ra o'rinli narx ~${a}–${b}", "by similar listings a fair price is ~${a}–${b}")
 add("Сдавать", "Ijaraga berish", "Renting out")
 add("~${r}/мес, {y}% в год чистыми", "~${r}/oy, yiliga sof {y}%", "~${r}/month, {y}% a year net")
 add("На фото: {s}", "Rasmda: {s}", "In the photos: {s}")
 add("Ипотека ~${p}/мес против аренды такой же ~${r}", "Ipoteka ~${p}/oy, xuddi shunday ijara ~${r}",
     "Mortgage ~${p}/month vs renting the same ~${r}")
-add(" — дороже на ${d}, зато квартира ваша", " — ${d} qimmat, lekin kvartira sizniki",
-    " — ${d} more, but the flat is yours")
-add(" — выгоднее брать", " — sotib olish foydaliroq", " — buying pays off")
+add(" — дороже аренды на ${d}", " — ijaradan ${d} qimmat",
+    " — ${d} more than rent")
+add(" — примерно как аренда", " — ijara bilan deyarli teng", " — about the same as rent")
 add("Аргументы в торге: {a}", "Savdo dalillari: {a}", "Bargaining points: {a}")
 add("Вклад в $ даёт {p}%", "$ omonat {p}% beradi", "A $ deposit gives {p}%")
 add("; окупится за ~{y} лет", "; ~{y} yilda o'zini oqlaydi", "; pays back in ~{y} years")

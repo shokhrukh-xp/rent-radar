@@ -798,9 +798,9 @@ def analyze(store, l: dict, cfg: dict) -> dict:
     beyond_lo = not cmp_.get("p20") or (m2_ is not None and m2_ < cmp_["p20"])
     beyond_hi = not cmp_.get("p80") or (m2_ is not None and m2_ > cmp_["p80"])
     if gap is not None and gap >= VERDICT_GAP and beyond_hi:
-        verdict = ("🔴", t("Дорого"), t("на {pct} дороже похожих{near}{with_reno}", pct=pct, near=near, with_reno=with_reno))
+        verdict = ("🔴", t("Выше рынка"), t("на {pct} дороже похожих{near}{with_reno}", pct=pct, near=near, with_reno=with_reno))
     elif gap is not None and gap <= -VERDICT_GAP and beyond_lo:
-        verdict = ("🟢", t("Хорошая цена"), t("на {pct} дешевле похожих{near}{with_reno}", pct=pct, near=near,
+        verdict = ("🟢", t("Ниже рынка"), t("на {pct} дешевле похожих{near}{with_reno}", pct=pct, near=near,
                                              with_reno=with_reno))
     elif gap is None and out.get("comp_unreliable") is not None and out["comp_unreliable"] < 0:
         c = out["comp"]
@@ -812,15 +812,15 @@ def analyze(store, l: dict, cfg: dict) -> dict:
                        t("рядом продают в основном с ремонтом ({med}), а {what} мало — оценивайте на месте",
                          med=med, what=t("коробок") if cls == "box" else t("таких")))
         else:
-            verdict = ("⚪", t("Подозрительно дёшево"),
-                       t("на {pct} дешевле похожих{same} ({med}) — проверьте адрес, документы и состояние",
+            verdict = ("⚪", t("Намного ниже рынка"),
+                       t("на {pct} дешевле похожих{same} ({med}) — так бывает при ошибке в цене, проблемах с документами или объявлении-приманке",
                          pct=cpct, same=t(" с таким же ремонтом") if out.get("comp_same_repair") else "", med=med))
     elif gap is None:
         verdict = ("⚪", t("Сравнить не с чем"), t("мало похожих объявлений — оценивайте на месте"))
     else:
         tpl = "на {pct} дешевле похожих{near}{with_reno}" if gap < 0 else "на {pct} дороже похожих{near}{with_reno}"
-        verdict = ("🟡", t("Цена в рынке"), (t(tpl, pct=pct, near=near, with_reno=with_reno)
-                                             if abs(gap) >= 0.02 else t("как у похожих")) + t(" — торгуйтесь"))
+        verdict = ("🟡", t("В рынке"), (t(tpl, pct=pct, near=near, with_reno=with_reno)
+                                             if abs(gap) >= 0.02 else t("как у похожих")))
     if "dorm" in out["flags"] and verdict[0] != "🔴":
         verdict = ("🟠", t("{base}, но бывшее общежитие", base=verdict[1]),
                    t("{why}; проверьте кадастр и приватизацию", why=verdict[2]))
@@ -943,16 +943,16 @@ def format_analysis(store, l: dict, cfg: dict) -> str:
         if x.get("rent"):
             diff = m["pay_usd"] - x["rent"]
             lines.append("   " + t("снимать такую же — ~${r}/мес", r=_money(x["rent"]))
-                         + (t(": ипотека дороже на ~${d}/мес, зато квартира ваша", d=_money(diff)) if diff > 30 else
-                            t(": платёж как аренда — выгоднее брать")))
+                         + (t(": ипотека дороже аренды такой же на ~${d}/мес", d=_money(diff)) if diff > 30 else
+                            t(": платёж примерно как аренда такой же")))
 
     # торг
     bg = x.get("bargain")
     if bg:
         if bg["calm"]:
-            line = t("🤝 Торг: цена уже ниже рынка — просите ~${v}, сильно давить не стоит", v=_money(bg["offer"]))
+            line = t("🤝 Торг: цена уже ниже рынка", v=_money(bg["offer"]))
         else:
-            line = t("🤝 Торг: начните с ~${a}, потолок ~${b}", a=_money(bg["offer"]), b=_money(bg["ceiling"]))
+            line = t("🤝 Торг: по похожим разумная цена ~${a}–${b}", a=_money(bg["offer"]), b=_money(bg["ceiling"]))
         if bg["args"]:
             line += t(" · аргументы: {a}", a=", ".join(bg["args"]))
         lines.append(line)

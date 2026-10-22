@@ -1,5 +1,6 @@
 import { MAP_HTML } from "./map.js";
 import { DRAW_HTML } from "./draw.js";
+import { aboutHtml } from "./about.js";
 /* Ra'no — «лицо» бота на Cloudflare Worker.
  *
  * Зачем: Python-бот живёт на GitHub Actions и онлайн лишь ~50 минут из 4–7 часов.
@@ -1133,6 +1134,15 @@ export function cleanAreas(raw) {
   }
   return out;
 }
+export const ABOUT_ASK = /^(кто ты|ты риэлтор|ты риелтор|ты маклер|кому ты служишь|ты бот\??|кто тебя (сделал|создал))\??$/i;
+export const DELETE_ASK = /удали(те)?\s+(все\s+)?мои\s+данные|ma'?lumotlarimni\s+o'?chir/i;
+const ABOUT = {
+  ru: "Я Ra'no — ваш личный ИИ-помощник для поиска жилья. Работаю только на вас: ищу объявления по вашим условиям, " +
+    "показываю факты, по вашей просьбе пишу продавцам и маклерам и всегда говорю, что я ИИ-ассистент. Я не риэлтор, " +
+    "не беру денег с продавцов и маклеров и не участвую в сделке — решаете вы. Подробно:",
+  uz: "Men Ra'no — uy-joy qidirish bo'yicha shaxsiy sun'iy intellekt yordamchingizman. Faqat siz uchun ishlayman, rieltor " +
+    "emasman, sotuvchi va maklerlardan pul olmayman, bitimda qatnashmayman. Batafsil:",
+};
 export const DRAW_ASK = /^\/(draw|area|areas|karta)(@\w+)?$|(нарис|обвест|обвед|очерт)\w*[^.!?\n]{0,40}(карт(?!оч)|облаc|облас)|выдел\w*[^.!?\n]{0,30}карт(?!оч)|(карт\w*)[^.!?\n]{0,20}(нарис|обвест|обвед|очерт)|xaritada\s+(chiz|belgila)|draw\s+(an?\s+)?(area|on the map)/i;
 export const DRAW_HINT = {
   ru: "🗺 Нажмите «Меню» слева внизу → «Карта». Там нажмите «Обвести» и проведите пальцем по краю нужного места — " +
@@ -1790,6 +1800,18 @@ export async function handleUpdate(env, upd) {
   if (text === BTN.search) return (await showMySearch(env, chat, L), "my_search");
   if (text === BTN.offers || /^\/(offers|varianty)(@\w+)?$/i.test(text)) return (await showOffers(env, chat), "ui");
   if (text === BTN.brokers || /^\/(brokers|makler|outreach)(@\w+)?$/i.test(text)) return (await startOutreach(env, chat), "ui");
+  if (/^\/(about|privacy)(@\w+)?$/i.test(text) || ABOUT_ASK.test(text)) {   // кто такая Ra'no, кому служит
+    await say(env, chat, (ABOUT[L] || ABOUT.ru) + `\n\n${ORIGIN || ""}/about${L === "uz" ? "?lang=uz" : ""}`,
+      { disable_web_page_preview: false });
+    return "about";
+  }
+  if (DELETE_ASK.test(text)) {                     // «удали мои данные» — владельцу сервиса, клиенту — подтверждение
+    await say(env, String(env.OWNER_CHAT), `🗑 Просьба удалить данные: чат ${chat}` + (msg.from?.username ? ` (@${msg.from.username})` : "") +
+      `.\nТекст: «${String(text).slice(0, 200)}»`);
+    await say(env, chat, L === "uz" ? "Qabul qilindi — ma'lumotlaringizni 3 kun ichida o'chiramiz va xabar beramiz."
+      : "Приняла — удалим ваши данные в течение 3 дней и напишем, когда готово.");
+    return "delete_request";
+  }
   if (text === BTN.more) {
     await say(env, chat, "Кнопок больше нет — просто скажите, что нужно: «мой поиск», «шортлист», «напиши маклерам», " +
       "«цены рынка», «маклер ответил в WhatsApp», «подключить телеграм». Полный список — /help.");
@@ -1946,6 +1968,10 @@ export default {
       return json({ ok: true, state: await watchdog(env) });
     }
     if (p !== "/svc/updates") maybeWatch(env, ctx);   // Python опрашивает очередь сам — это и есть «жив»
+    if (p === "/about" || p === "/about/") {
+      return new Response(aboutHtml(url.searchParams.get("lang") || "ru"),
+        { headers: { "content-type": "text/html; charset=utf-8", "cache-control": "public, max-age=300" } });
+    }
     if (p === "/draw" || p === "/draw/") {
       return new Response(DRAW_HTML, { headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-cache" } });
     }

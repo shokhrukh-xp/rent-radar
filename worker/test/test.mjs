@@ -818,3 +818,16 @@ console.log("OK — проверка кода: маклер остаётся м�
   assert.ok(ack.parse_mode === "HTML" && /для своего клиента: <a href="https:\/\/t\.me\/shokh">Шохрух<\/a>/.test(ack.text), ack.text);
 }
 console.log("OK — карточки по одной: кнопки «Сохранить / Пропустить / Уточнить»; маклерам — имя клиента ссылкой");
+
+// ── «кому служит Ra'no»: страница /about и команда; «удали мои данные» — владельцу сервиса
+{
+  const page = await (await worker.fetch(new Request("https://w.example/about"), env, { waitUntil() {} })).text();
+  assert.ok(/Не оказывает риэлторских услуг/.test(page) && /только вы/.test(page) && /Xplorence/.test(page));
+  const pageUz = await (await worker.fetch(new Request("https://w.example/about?lang=uz"), env, { waitUntil() {} })).text();
+  assert.ok(/rieltor emas/.test(pageUz));
+  assert.equal(await handleUpdate(env, msg("/about")), "about");
+  assert.ok(/не риэлтор/.test(texts().at(-1)) && /\/about/.test(texts().at(-1)));
+  assert.equal(await handleUpdate(env, msg("удали мои данные пожалуйста")), "delete_request");
+  assert.ok(sent.some(x => String(x.chat_id) === OWNER && /Просьба удалить данные/.test(x.text || "")));
+}
+console.log("OK — «кому служит Ra'no»: страница и команда; просьба удалить данные — владельцу сервиса");

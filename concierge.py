@@ -885,7 +885,9 @@ def broker_welcome(cfg, store) -> str:
               "комиссию — одним сообщением или альбомом, я не тороплю. Передам клиенту сразу же.\n"
               "Знаете хороший канал с объявлениями? Пришлите ссылку — добавлю в поиск 📡\n\n"
               f"Assalomu alaykum! Men {a}, AI-yordamchiman. Mos variantlarni yuboring: foto, "
-              "manzil, qavat, maydon, narx va vositachilik haqi.")
+              "manzil, qavat, maydon, narx va vositachilik haqi."
+              + (f"\n\nКто я и кому служу / Men kimman: {cfg['worker_url'].rstrip('/')}/about"
+                 if cfg.get("worker_url") else ""))
 
 
 def get_offer(store, oid):

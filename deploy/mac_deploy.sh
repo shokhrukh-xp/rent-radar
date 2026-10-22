@@ -6,7 +6,7 @@ set -e
 P="$1"
 cd "$(dirname "$0")/.."
 export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
-before=$(git rev-parse HEAD)
+before=$(git rev-parse origin/main)          # что уже выложено
 [ -n "$P" ] && git am "$P"
 if ! git diff --quiet "$before" HEAD -- worker; then
   (cd worker && npx --yes wrangler deploy > /tmp/wdeploy.log 2>&1) && grep "Current Version ID" /tmp/wdeploy.log || echo "воркер: см. /tmp/wdeploy.log"

@@ -1178,7 +1178,7 @@ def format_message(l: dict, cfg: dict, likely_makler: bool) -> str:
             lines.append("❓ Спросить: " + escape_html("; ".join(q)))
 
     a_ = age_days(l.get("created_at") or "")
-    hurry = "  ⚡ Звоните сразу!" if a_ is not None and a_ <= 2 else ""   # свежее — разбирают за день-два
+    hurry = "  🆕 выложено меньше 2 дней назад" if a_ is not None and a_ <= 2 else ""
     lines.append(f'\n<a href="{l["url"]}">Открыть объявление</a>{hurry}')
     return "\n".join(lines)
 
@@ -2334,8 +2334,10 @@ def send_broker_batch(cfg, store, settings, n=OUTREACH_BATCH) -> str:
     pick = pool[:min(n, room)]
     want = request_districts(store)
     biz = concierge.biz_ready(store)
-    lines = [t("📇 <b>Маклеры под ваш запрос</b> — {n} из {total}", n=len(pick), total=len(pool)),
-             t("Нажмите на имя — откроется чат с маклером, запрос уже вписан. Осталось нажать «Отправить»."), ""]
+    lines = [t("📇 <b>Маклеры с похожими объявлениями</b> — {n} из {total}", n=len(pick), total=len(pool)),
+             t("Список — по их объявлениям на сайтах (районы и цены как у вас); деньги от маклеров Ra'no не берёт и "
+               "никого не продвигает. Кому писать — решаете вы: нажмите на имя — откроется чат, запрос уже вписан."),
+             ""]
     for i, b in enumerate(pick, 1):
         ds = [d for d in b["districts"] if d in want][:2] or b["districts"][:2]
         bits = [", ".join(dist(d) for d in ds)] if ds else []
@@ -4504,8 +4506,8 @@ def format_sale_card(store, l: dict, cfg: dict, head: str = "", note: str = "") 
         econ.append(f'<b>{t("Ипотека")}</b> — {mline}')
     bg = x.get("bargain")
     if bg:
-        econ.append(f'<b>{t("Торг")}</b> — ' + (t("просите ~${v}, цена уже ниже рынка", v=_money(bg["offer"]))
-                    if bg["calm"] else t("начните с ~${a}, потолок ~${b}", a=_money(bg["offer"]),
+        econ.append(f'<b>{t("Торг")}</b> — ' + (t("цена уже ниже рынка", v=_money(bg["offer"]))
+                    if bg["calm"] else t("по похожим разумная цена ~${a}–${b}", a=_money(bg["offer"]),
                                          b=_money(bg["ceiling"]))))
     if x.get("rent"):
         y = f'{x["net_yield"] * 100:.1f}'.replace(".", ",")
@@ -4518,7 +4520,7 @@ def format_sale_card(store, l: dict, cfg: dict, head: str = "", note: str = "") 
     if m and x.get("rent"):
         diff = m["pay_usd"] - x["rent"]
         det.append(t("Ипотека ~${p}/мес против аренды такой же ~${r}", p=_money(m["pay_usd"]), r=_money(x["rent"]))
-                   + (t(" — дороже на ${d}, зато квартира ваша", d=_money(diff)) if diff > 30 else t(" — выгоднее брать")))
+                   + (t(" — дороже аренды на ${d}", d=_money(diff)) if diff > 30 else t(" — примерно как аренда")))
     if bg and bg.get("args"):
         det.append(t("Аргументы в торге: {a}", a=escape_html(", ".join(bg["args"]))))
     if x.get("rent"):

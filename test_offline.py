@@ -1538,7 +1538,7 @@ assert abs(x["invest"][3]["base"] - (27600 * (1.03 ** 3 - 1) + x["rent"] * 11 * 
 txt = mk.format_analysis(mst, dorm_l, ss_all)
 for part in ("📊 <b>Анализ</b>", "на 8% ниже похожих", "Цена через 1 / 3 / 5 лет", "Бывшее общежитие",
              "висит 100 дн.", "🟠 <b>", mk.REPORT_URL, "средняя по району: $1 441/м²", "🏦 Ипотека — в объявлении не указано", "взнос $6 900 (25%)",
-             "🤝 Торг: начните с", "Ремонт не понять", "<blockquote expandable>", "📈 Как вложение"):
+             "🤝 Торг: по похожим разумная цена", "Ремонт не понять", "<blockquote expandable>", "📈 Как вложение"):
     assert part in txt, (part, txt)
 # аренда по объявлениям нереально высокая → в расчёте осторожная средняя, цифра из объявлений рядом
 RENT_HI = dict(dorm_l, text="Квартира", price_usd=12000, area=24)
@@ -1995,10 +1995,10 @@ assert rr.sale_reject(la, ssx, xs, cfg) == ("", False) and la["seller_kind"] == 
 # оценка: собственник + ипотека выше; ниже рынка — «сильный»
 sc_j, why_j, strong_j, _ = SS.score(xs, lj, cfg, ssx)
 assert "собственник" in why_j and "можно в ипотеку" in why_j and not strong_j
-with mock.patch("market.analyze", lambda *a: {"gap": -0.12, "flags": [], "verdict": ("🟢", "Хорошая цена", "")}):
+with mock.patch("market.analyze", lambda *a: {"gap": -0.12, "flags": [], "verdict": ("🟢", "Ниже рынка", "")}):
     sc2, why2, strong2, _ = SS.score(xs, lj, cfg, ssx)
 assert strong2 and sc2 > sc_j and "-12% к рынку" in why2[0]
-with mock.patch("market.analyze", lambda *a: {"gap": -0.12, "flags": [], "verdict": ("🟡", "Цена в рынке", "")}):
+with mock.patch("market.analyze", lambda *a: {"gap": -0.12, "flags": [], "verdict": ("🟡", "В рынке", "")}):
     assert not SS.score(xs, lj, cfg, ssx)[2]          # −12%, но в пределах обычного разброса похожих — не «сразу»
 # дубль с другого сайта: та же площадь, этаж, район, цена ±5%
 xs.save(dict(lj, key="sale:uybor:9", site="Uybor", price_usd=45500, phones=[]), notified=True)
@@ -2222,7 +2222,7 @@ nb_l = dict(base_l, key="sale:joymee:2", district="Яшнабад", area=42, pri
             repair="без ремонта")
 xnb = mk.analyze(rs_, nb_l, cfg_r)
 assert xnb["repair"] == "box" and xnb.get("repair_as_box") and xnb["comp_same_repair"], xnb.get("comp")
-assert round(xnb["comp"]["median_m2"]) == 1400 and xnb["verdict"][0] == "🟢" and "Подозрительно" not in xnb["verdict"][1]
+assert round(xnb["comp"]["median_m2"]) == 1400 and xnb["verdict"][0] == "🟢" and "Намного ниже" not in xnb["verdict"][1]
 # коробок рядом нет: не «подозрительно дёшево», а честно — сравнить не с чем
 rs_.conn.execute("DELETE FROM market WHERE key LIKE 'sale:uybor:80%'"); rs_.conn.commit()
 xnb2 = mk.analyze(rs_, dict(nb_l, price_usd=40000), cfg_r)
@@ -2250,7 +2250,7 @@ assert abs(big["down"] - (100000 - 800_000_000 / 12000)) < 0.01 and big["down_sh
 xc = mk.analyze(rs_, dict(base_l, price_usd=60000, repair="evro"), cfg_r)
 assert xc["bargain"]["calm"] and xc["bargain"]["offer"] == 59000
 t_ = mk.format_analysis(rs_, dict(base_l, price_usd=60000, repair="средний ремонт"), cfg_r)
-assert t_.index("🟡 <b>Цена в рынке</b>") < t_.index("🛠") < t_.index("🏦") < t_.index("🤝") < t_.index("<blockquote expandable>")
+assert t_.index("🟡 <b>В рынке</b>") < t_.index("🛠") < t_.index("🏦") < t_.index("🤝") < t_.index("<blockquote expandable>")
 assert "С ним ≈ $62 500" in t_ and "млн сум/мес" in t_ and len(t_) < 4096
 # ремонт по фото главнее слов продавца; неуверенная оценка — не в счёт
 lp = dict(base_l, price_usd=60000, repair="evro", repair_photo={"state": "none", "confidence": 0.8, "signs": "облезлые стены, старые окна"})
@@ -2761,7 +2761,7 @@ with mock.patch.object(rr, "tg_call", bz_tg):
     bz.conn.commit()
     BZ.clear()
     assert rr.handle_command("/brokers", rr.default_settings(), bz, bcfg)[0] == ""
-    m1 = [pl for m, pl in BZ if "Маклеры под ваш запрос" in pl.get("text", "")]
+    m1 = [pl for m, pl in BZ if "Маклеры с похожими объявлениями" in pl.get("text", "")]
     allb = [pl for m, pl in BZ if m == "sendMessage"]
     joined = "\n".join(pl["text"] for pl in allb)
     assert len(m1) == 1 and joined.count('<a href="https://t.me/') == 5 and "?text=" in joined
@@ -2791,7 +2791,7 @@ with mock.patch.object(rr, "tg_call", bz_tg):
     rr.handle_business_update(bcfg, bz, {"business_connection": {"id": "BC1", "user": {"id": 500}, "user_chat_id": 500,
                                          "is_enabled": True, "rights": {"can_reply": True}}})
     assert any("Вот маклеры" in pl.get("text", "") for m, pl in BZ) and any(
-        "Маклеры под ваш запрос" in pl.get("text", "") for m, pl in BZ) and not bz.get_kv("brokers_pending")
+        "Маклеры с похожими объявлениями" in pl.get("text", "") for m, pl in BZ) and not bz.get_kv("brokers_pending")
     # исходящий запрос до бота не дошёл — узнаём чат по ответу: маклер из подборки или ответ цитатой на запрос
     assert bz.conn.execute("SELECT status FROM brokers WHERE tg='mk0'").fetchone()[0] == "offered"
     def bm2(peer, un, text, **kw):
@@ -2841,7 +2841,7 @@ with mock.patch.object(rr, "tg_call", lambda c, m, p, **k: MN.append((m, p)) or 
     rr.handle_command("/brokers", rr.default_settings(), mn, mcfg)                      # по умолчанию — подключить Telegram
     g = MN[-1][1]["text"]
     assert "Telegram для бизнеса" in g and "предложу другой способ" in g and "без подключения" not in g
-    assert not [p for m, p in MN if "Маклеры под ваш запрос" in p.get("text", "")] and mn.get_kv("brokers_pending")
+    assert not [p for m, p in MN if "Маклеры с похожими объявлениями" in p.get("text", "")] and mn.get_kv("brokers_pending")
     # «не хочу давать доступ» → второй способ: инструкция по пересылке и сразу маклеры
     MN.clear()
     with mock.patch.object(rr, "fetch_updates", lambda c, st, lp=0: ({"result": [{"update_id": 1, "message": {
@@ -2850,7 +2850,7 @@ with mock.patch.object(rr, "tg_call", lambda c, m, p, **k: MN.append((m, p)) or 
     assert mn.get_kv("broker_mode") == "manual" and cg.broker_mode(mn) == "manual" and not mn.get_kv("brokers_pending")
     assert any("ничего от вашего имени не пишу" in p.get("text", "") for m, p in MN)
     def batch_text(L):                                  # подборка может прийти несколькими сообщениями
-        i = max(k for k, (m, p) in enumerate(L) if "Маклеры под ваш запрос" in p.get("text", ""))
+        i = max(k for k, (m, p) in enumerate(L) if "Маклеры с похожими объявлениями" in p.get("text", ""))
         return "\n".join(p.get("text", "") for m, p in L[i:] if m == "sendMessage")
     first = batch_text(MN)
     assert "WhatsApp" in first and "Переслать" in first and "подключить телеграм" not in first
@@ -2927,7 +2927,7 @@ assert I18.detect_lang("Здравствуйте, есть 2-комн на Чи�
 assert I18.detect_lang("Икки хонали уй сотилади, нархи 55 000") == "uz"
 try:
     I18.set_lang("en")
-    assert I18.t("Хорошая цена") == "Good price" and I18.t("на {pct} дешевле похожих{near}{with_reno}", pct="21%",
+    assert I18.t("Ниже рынка") == "Below market" and I18.t("на {pct} дешевле похожих{near}{with_reno}", pct="21%",
                                                                near=I18.t(" рядом"), with_reno="") == "21% less than similar nearby"
     assert I18.dist("Мирабад") == "Mirabad" and "Telegram Business" in cg.biz_guide({})
     assert I18.t(rr.HELP_TEXT).startswith("🏠 <b>Ra'no</b> — your AI assistant") and "/help" in I18.t(rr.VIEW_HINT)
@@ -2940,8 +2940,8 @@ try:
         ocfg2 = dict(cfg, telegram_chat_id="900", worker_url="https://w")
         out = rr._owner_translate(ocfg2, {"chat_id": 900, "text": "Пока тихо — новых вариантов нет, загляните позже, пожалуйста"})
         assert out["text"].startswith("Translated") and seen[-1]["lang"] == "en"
-        same = rr._owner_translate(ocfg2, {"chat_id": 900, "text": I18.t("Хорошая цена") + " · Mirabad"})
-        assert same["text"] == "Good price · Mirabad"                                 # уже по-английски — не трогаем
+        same = rr._owner_translate(ocfg2, {"chat_id": 900, "text": I18.t("Ниже рынка") + " · Mirabad"})
+        assert same["text"] == "Below market · Mirabad"                                 # уже по-английски — не трогаем
         brk = rr._owner_translate(ocfg2, {"chat_id": 555, "text": "Здравствуйте, маклеру — по-русски, как есть"})
         assert brk["text"].startswith("Здравствуйте")                                 # маклеру — не переводим
         media = rr._owner_translate(ocfg2, {"chat_id": 900, "media": json.dumps([{"type": "photo", "media": "x",
@@ -2951,7 +2951,7 @@ try:
     assert I18.t("Ипотека") == "Ipoteka" and I18.dist("Яшнабад") == "Yashnobod"
 finally:
     I18.set_lang("ru")
-assert I18.t("Хорошая цена") == "Хорошая цена"
+assert I18.t("Ниже рынка") == "Ниже рынка"
 # запрос маклерам — на двух языках; узбекскому маклеру отвечаем по-узбекски
 two = cg.compose_request(cfg, cs)
 assert "Здравствуйте" in two and "Assalomu alaykum" in two
@@ -3062,9 +3062,9 @@ try:
     # −12% к медиане, но внутри обычного разброса похожих — «в рынке», а не «хорошая цена»
     xk = _mk2.analyze(kst_, dict(lk, price_usd=ck["median_m2"] * 0.87 * 50), cfg)
     if xk.get("gap") is not None and xk["gap"] <= -0.12 and (xk["m2"] >= (xk["comp"].get("p20") or 0)):
-        assert xk["verdict"][1] != "Хорошая цена", xk["verdict"]
+        assert xk["verdict"][1] != "Ниже рынка", xk["verdict"]
     xg = _mk2.analyze(kst_, dict(lk, price_usd=ck["median_m2"] * 0.6 * 50), cfg)
-    assert xg["verdict"][1] in ("Хорошая цена", "Подозрительно дёшево", "Сравнить не с чем"), xg["verdict"]
+    assert xg["verdict"][1] in ("Ниже рынка", "Намного ниже рынка", "Сравнить не с чем"), xg["verdict"]
 finally:
     _geo_t.GAZ["pts"] = _gz2
     Path("/tmp/test_knn.db").unlink(missing_ok=True)
@@ -3448,8 +3448,8 @@ with mock.patch.object(rr, "send_telegram", lambda c, t_, **k: _RS.append(t_) or
 assert "card" not in _RS and "все уже присылала" in _RS[0], _RS
 assert rr.card_line("🏠 <b>[Uybor]</b> #1 · x\n💰 $700\n🛏 3-комн · 📍 Мирабад\n🕐 09.10") == "3-комн · Мирабад · $700"
 _fm = rr.format_message(dict(_rl2, price_value=1000.0, created_at=_old), cfg, False)
-assert "$1 000" in _fm and "1 000.0" not in _fm and "Звоните сразу" not in _fm
-assert "Звоните сразу" in rr.format_message(dict(_rl2, created_at=datetime.now(timezone.utc).isoformat()), cfg, False)
+assert "$1 000" in _fm and "1 000.0" not in _fm and "меньше 2 дней" not in _fm
+assert "меньше 2 дней" in rr.format_message(dict(_rl2, created_at=datetime.now(timezone.utc).isoformat()), cfg, False)
 _rs.conn.execute("INSERT OR REPLACE INTO seller_counts VALUES('uybor:u9', 166)"); _rs.conn.commit()
 assert "маклер" in rr.owner_only_reject(dict(_rl2, seller_id="uybor:u9", seller_ads=1), _rs, cfg, {})
 _rp.unlink(missing_ok=True)

@@ -115,7 +115,7 @@ def price_verdict(listing, stats):
         return None, ""
     delta = (p - median) / median * 100
     if delta <= -20:
-        word = "заметно дешевле рынка — стоит поспешить"
+        word = "заметно дешевле рынка"
     elif delta <= -8:
         word = "дешевле рынка"
     elif delta < 8:
