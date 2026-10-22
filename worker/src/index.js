@@ -2577,12 +2577,21 @@ export default {
       }
       if (p === "/svc/image" && req.method === "POST") {   // картинка по описанию (бренд: аватар, логотип) — PNG в base64
         // только отдельным ключом: картинки дорогие и не должны съедать лимит, на котором живёт бот
-        if (!env.GEMINI_IMAGE_KEY) return json({ ok: false, error: "нет GEMINI_IMAGE_KEY — картинки только отдельным ключом" }, 400);
         const b = await req.json().catch(() => ({}));
+        let imgKey = env.GEMINI_IMAGE_KEY;
+        if (!imgKey && b.allow_main) {                     // ключ бота — только явно и не больше IMG_MAIN_PER_DAY в сутки
+          const day = new Date(Date.now() + 5 * 3600e3).toISOString().slice(0, 10);
+          const c = (await kvGet(env, "img_main", null)) || {};
+          const n = c.d === day ? c.n : 0;
+          if (n >= +(env.IMG_MAIN_PER_DAY || 6)) return json({ ok: false, error: "дневной лимит картинок на ключе бота" }, 429);
+          await kvSet(env, "img_main", { d: day, n: n + 1 });
+          imgKey = env.GEMINI_KEY;
+        }
+        if (!imgKey) return json({ ok: false, error: "нет GEMINI_IMAGE_KEY — картинки только отдельным ключом" }, 400);
         if (!b.prompt || !b.model) return json({ ok: false, error: "prompt и model" }, 400);
         const m = String(b.model).replace(/^models\//, "");
         const base = `https://generativelanguage.googleapis.com/v1beta/models/${m}`;
-        const hdr = { "content-type": "application/json", "x-goog-api-key": env.GEMINI_IMAGE_KEY };
+        const hdr = { "content-type": "application/json", "x-goog-api-key": imgKey };
         if (/^imagen/.test(m)) {
           const r = await fetch(base + ":predict", { method: "POST", headers: hdr, body: JSON.stringify({
             instances: [{ prompt: String(b.prompt) }], parameters: { sampleCount: Math.min(+b.n || 1, 4), aspectRatio: b.aspect || "1:1" } }) });
