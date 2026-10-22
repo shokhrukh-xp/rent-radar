@@ -968,8 +968,12 @@ def add_site_offer(cfg, store, l):
     if r:
         if r[1] in ("rejected", "new", "later"):
             set_offer_status(store, r[0], "shortlist")
-            return r[0], True
-        return r[0], False
+        pv_ = l.get("price_usd") or (_rr().to_usd(l.get("price_value"), l.get("price_currency"), cfg)
+                                     if l.get("price_value") else None)
+        if pv_:                                # старая запись без цены — дописать, чтобы не спрашивать известное
+            store.conn.execute("UPDATE broker_offers SET price_usd=COALESCE(price_usd, ?) WHERE oid=?", (pv_, r[0]))
+            store.conn.commit()
+        return r[0], r[1] in ("rejected", "new", "later")
     rr = _rr()
     try:                                       # район — как на карточке: по точке, а не по полю сайта
         if not l.get("geo"):
@@ -2039,7 +2043,9 @@ def request_details(cfg, store, oids=None):
             head = f"✍️ Вариант #{o['oid']} пришёл не через бота — уточните сами."
         tail = ("\nОтправьте от себя — ответ продавца в этом чате я увижу и сама уточню остальное."
                 if biz else "\nОтправьте от себя (или позвоните) — ответ перешлите мне, допишу в карточку.")
-        rr.send_telegram(cfg, f"{head}{link}{tail}\n\n<code>{rr.escape_html(q)}</code>")
+        rr.tg_call(cfg, "sendMessage", {"chat_id": cfg["telegram_chat_id"], "parse_mode": "HTML",
+                                        "disable_web_page_preview": True,
+                                        "text": f"{head}{link}{tail}\n\n<code>{rr.escape_html(q)}</code>"})
     return f"Отправлено: {sent}" + (f", вручную: {len(manual)}" if manual else "")
 
 

@@ -3034,6 +3034,8 @@ def still_actual(cfg, l, older_h=20) -> str:
             n, deal = sale_sources.listing_from_url(cfg, url)
             if not n:
                 return "gone"
+            if n.get("photo_urls"):            # ссылки на фото у Joymee живут минуты — берём свежие
+                l["photo_urls"] = n["photo_urls"]
             pv, pc = n.get("price_value"), n.get("price_currency")
             if pv and (pv, pc) != (l.get("price_value"), l.get("price_currency")):
                 old = l.get("price_usd")
@@ -4753,7 +4755,8 @@ def remember_card(cfg, ids, ref, text):
 # Найденное не сыпется пачкой: карточки встают в очередь, клиент видит одну — с кнопками «Сохранить»,
 # «Пропустить», «Уточнить у продавца»; следующая приходит после нажатия (или ответа словами на карточку).
 CARD_QUEUE_MAX = 60
-CARD_KEEP = ("key", "url", "photo_urls", "geo", "lat", "lon", "title", "district", "text_place", "site", "source")
+CARD_KEEP = ("key", "url", "photo_urls", "geo", "lat", "lon", "title", "district", "text_place", "site", "source",
+             "created_at", "price_value", "price_currency", "price_usd")
 
 
 def _queue_store():
@@ -4788,7 +4791,22 @@ def show_next_card(cfg, store):
         it = q.pop(0)
         store.set_kv("card_queue", q)
         left = len(q)
-        text = it["text"] + (f"\n\n<i>В очереди ещё {left}</i>" if left else "")
+        text = it["text"]
+        if time.time() - float(it.get("at") or 0) > 1800:     # долго ждала в очереди — жива ли, та же ли цена
+            l_ = dict(it["l"])
+            st_ = still_actual(cfg, l_, older_h=0)
+            if st_ == "gone":
+                log.info("[очередь] снято, пока ждало: %s", it["ref"])
+                continue
+            if st_ == "changed":
+                text += "\n\n⚠️ " + escape_html(l_.get("price_note") or "цена изменилась") + \
+                        (f" — сейчас ${_money(l_['price_usd'])}" if l_.get("price_usd") else "")
+            it["l"] = l_
+        elif "joymee" in str(it["l"].get("url") or ""):        # ссылки на фото Joymee живут минуты
+            l_ = dict(it["l"])
+            still_actual(cfg, l_, older_h=0)
+            it["l"] = l_
+        text += (f"\n\n<i>В очереди ещё {left}</i>" if left else "")
         ids = _send_card_now(cfg, it["l"], text, kb=card_kb(it["ref"], left), silent=it.get("silent"),
                              ref=it["ref"])
         if ids:
