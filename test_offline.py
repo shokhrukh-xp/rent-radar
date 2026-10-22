@@ -1831,7 +1831,7 @@ with mock.patch.object(rr, "worker_post", fake_post), \
     assert a["price_usd"] == 44000 and a["area"] == 52.5 and a["district"] == "Мирабад"   # regex «44 тыс» не понял
     assert a["extra"]["address"] == "ЖК Mirabad Avenue" and a["extra"]["mortgage"] == "yes"
     card = cg.offer_card(ast, acfg, a)
-    assert "🗺 ЖК Mirabad Avenue" in card and "новостройка, евроремонт" in card and "комиссия: 50%" in card and "ипотека: да" in card
+    assert "🗺 ЖК Mirabad Avenue" in card and "новостройка, евроремонт" in card and "комиссия: 50%" in card and "🏦 Ипотека — можно" in card
     assert "⚠️" not in card                                                    # продажа при покупке — ок
     cg.enrich_offer(acfg, ast, o1, {"deal": "rent"})
     assert "⚠️ Это аренда, а вы ищете покупку" in cg.offer_card(ast, acfg, cg.get_offer(ast, o1))
@@ -3928,3 +3928,56 @@ with mock.patch.object(rr, "tg_call", _stg), mock.patch.object(rr, "ai_parse", l
 for _p in _sp:
     _p.unlink(missing_ok=True)
 print("OK — один ответ продавца — всем клиентам: ждут вместе, свежий ответ сразу, без имени первого клиента")
+
+# ============ качество поиска и покупка: коды операторов, один разбор на всех, шортлист без повторов, ипотека, документы ============
+assert rr.extract_phones("+998873008833") == ["873008833"] and rr.extract_phones("+998 20 013 03 09") == ["200130309"]
+assert rr.extract_phones("тел 50 029 80 24") == ["500298024"]
+assert cg.dedupe_text("[ID: 0028]\n[ID: 0028]\n\n2 комнаты") == "[ID: 0028]\n\n2 комнаты"
+assert cg.dedupe_text("Сдаётся квартира у метро\nСдаётся квартира у метро, есть мебель") == "Сдаётся квартира у метро, есть мебель"
+import sale_sources as _SS2
+_qp = Path("/tmp/test_quality.db"); _qp.unlink(missing_ok=True)
+_qs = rr.Store(_qp)
+_calls = []
+def _wp(c, path, body, timeout=0):
+    _calls.append(path)
+    return {"ok": True, "repair": {"state": "good", "confidence": 0.8, "signs": "ламинат"}}
+_ql = {"key": "sale:uybor:9001", "photo_urls": ["https://x/1.jpg"], "title": "2-комн"}
+with mock.patch.object(rr, "worker_post", _wp), mock.patch.object(_tn, "shared_store", lambda s: _qs):
+    _wcfg = dict(cfg, worker_url="https://w")
+    assert _SS2.photo_repair(_wcfg, dict(_ql), _qs) is True and len(_calls) == 1
+    _l2 = dict(_ql)                                                # другой клиент, то же объявление — без модели
+    assert _SS2.photo_repair(_wcfg, _l2, _qs) == "cached" and len(_calls) == 1 and _l2["repair_photo"]["state"] == "good"
+# старая запись шортлиста без цены — цена из сохранённого объявления; текст без повтора заголовка
+_QT = []
+def _qtg(c, m, pl, **k):
+    _QT.append((m, dict(pl)))
+    return {"ok": True, "result": {"message_id": 1700 + len(_QT)}}
+_qcfg = dict(cfg, telegram_chat_id="90", worker_url="")
+with mock.patch.object(rr, "tg_call", _qtg), mock.patch.dict(cg._BIZ_STORE, {"store": _qs}):
+    _qs.save({"key": "uybor:9100", "source": "uybor", "title": "[ID: 7]", "text": "[ID: 7]\n2 комнаты", "url": "u",
+              "price_value": 700, "price_currency": "USD", "phones": ["901234567"], "created_at": ""}, notified=True)
+    _qs.conn.execute("INSERT INTO broker_offers(broker_chat, broker_name, text, photos, status, extra, created_at) "
+                     "VALUES('site:uybor:9100', 'Uybor', '[ID: 7]\n[ID: 7]\n2 комнаты', '[]', 'shortlist', '{}', '')")
+    _qs.conn.commit()
+    _qo = _qs.conn.execute("SELECT oid FROM broker_offers WHERE broker_chat='site:uybor:9100'").fetchone()[0]
+    _o = cg.refresh_site_offer(_qcfg, _qs, cg.get_offer(_qs, _qo))
+    assert _o["price_usd"] == 700 and _o["extra"]["phones"] == ["901234567"]
+    _card = cg.offer_card(_qs, _qcfg, _o)
+    assert _card.count("[ID: 7]") == 1 and "💰 $700" in _card, _card
+    # покупка: в карточке — ипотека с примерным платежом; «нравится» — один раз список документов
+    _qs.set_kv("anketa", {"ans": {"deal": "buy"}})
+    _qs.conn.execute("UPDATE broker_offers SET price_usd=60000, extra=? WHERE oid=?",
+                     (json.dumps({"deal": "sale", "phones": ["901234567"]}), _qo))
+    _qs.conn.commit()
+    _card = cg.offer_card(_qs, _qcfg, cg.get_offer(_qs, _qo))
+    assert "🏦 Ипотека — не указано" in _card and "млн сум/мес" in _card, _card
+    _qs.conn.execute("UPDATE broker_offers SET extra=? WHERE oid=?", (json.dumps({"deal": "sale", "mortgage": "no"}), _qo))
+    _qs.conn.commit()
+    assert "🏦 Ипотека — нет" in cg.offer_card(_qs, _qcfg, cg.get_offer(_qs, _qo))
+    _QT.clear()
+    cg.handle_offer_cb(f"o:seen:{_qo}:g", _qcfg, _qs)
+    cg.handle_offer_cb(f"o:seen:{_qo}:g", _qcfg, _qs)
+    _docs = [pl["text"] for m, pl in _QT if "Перед задатком" in pl.get("text", "")]
+    assert len(_docs) == 1 and "my.gov.uz" in _docs[0] and "согласие супруга" in _docs[0], _docs
+_qp.unlink(missing_ok=True)
+print("OK — качество: коды 20/50/87, один разбор фото на всех, шортлист без повторов и с ценой, ипотека и документы при покупке")

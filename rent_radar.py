@@ -200,8 +200,8 @@ def load_config() -> dict:
 PHONE_RE = re.compile(
     r"(?:\+?998[\s\-().]{0,3})?(\d{2})[\s\-().]{0,3}(\d{3})[\s\-().]{0,3}(\d{2})[\s\-().]{0,3}(\d{2})\b"
 )
-VALID_PHONE_PREFIXES = {
-    "88", "90", "91", "93", "94", "95", "97", "98", "99", "33", "55", "77", "71", "78",
+VALID_PHONE_PREFIXES = {     # мобильные коды Узбекистана (20 — OQ, 50 — Ucell, 87 — Mobiuz) и городские Ташкента
+    "20", "33", "50", "55", "77", "87", "88", "90", "91", "93", "94", "95", "97", "98", "99", "71", "78",
 }
 
 ROOMS_RE = [
@@ -2474,7 +2474,7 @@ def show_site_listing(cfg, key) -> str:
             return "Объявление не найдено"
         l = json.loads(row[0] or "{}")
         fresh = sale_sources.refresh_listing(l)      # у Joymee ссылки на фото живут 10 минут
-        if sale_sources.photo_repair(cfg, l) or fresh:
+        if sale_sources.photo_repair(cfg, l, sst) or fresh:
             sst.conn.execute("UPDATE listings SET data=? WHERE key=?", (sst.pack(l), l["key"]))
             sst.conn.commit()
         ids = send_card(cfg, l, format_sale_card(sst, l, cfg), ref="L:" + l["key"])
@@ -2683,7 +2683,7 @@ def handle_link(cfg, store, msg):
             classify_sale_seller(l, ss, sst, cfg)
         except Exception as e:
             log.info("продавец по ссылке не определён: %s", e)
-        sale_sources.photo_repair(cfg, l)
+        sale_sources.photo_repair(cfg, l, sst)
         sc, why, _, _ = sale_sources.score(sst, l, cfg, ss)
         l["score"], l["why"] = sc, why
         before = sale_sources.seen_before(sst, l)
@@ -4397,10 +4397,14 @@ def ensure_place(cfg, store, l: dict):
     except Exception as e:
         log.info("[место] %s: %s", l.get("key"), e)
     if not l.get("geo_tried") and cfg.get("worker_url") and (l.get("text") or l.get("title")) and not TESTING:
-        l["geo_tried"] = True                       # модель спрашиваем один раз на объявление
-        r = worker_post(cfg, "/svc/parse", {"text": f'{l.get("title") or ""}\n{l.get("text") or ""}'[:2500],
-                                            "photos": [], "deal": "sale"}, timeout=40)
-        facts = (r or {}).get("offer") or {}
+        l["geo_tried"] = True                       # модель спрашиваем один раз на объявление — и на всех клиентов
+        facts = tenants.memo_get(store, "sale_parse", l["key"]) if l.get("key") else None
+        if facts is None:
+            r = worker_post(cfg, "/svc/parse", {"text": f'{l.get("title") or ""}\n{l.get("text") or ""}'[:2500],
+                                                "photos": [], "deal": "sale"}, timeout=40)
+            facts = (r or {}).get("offer") or {}
+            if r and l.get("key"):
+                tenants.memo_put(store, "sale_parse", l["key"], facts)
         for name, approx in ((facts.get("landmark"), 0.6), (facts.get("address"), 0.4)):
             if not name or geo.generic_place(str(name)):
                 continue                             # «Мечеть», «школа», «базар» — такие есть в каждом квартале
@@ -5245,7 +5249,7 @@ def send_site_cards(cfg, sst, items, title="", more=0, more_cb="R:pick", limit=5
         l = dict(l)
         try:
             fresh = sale_sources.refresh_listing(l)          # у Joymee ссылки на фото живут 10 минут
-            if sale_sources.photo_repair(cfg, l) or fresh:
+            if sale_sources.photo_repair(cfg, l, sst) or fresh:
                 if sst.known(l["key"]):
                     sst.conn.execute("UPDATE listings SET data=? WHERE key=?", (sst.pack(l), l["key"]))
                     sst.conn.commit()
@@ -5468,8 +5472,8 @@ def run_sale_search(cfg: dict, store, settings: dict, force: bool = False) -> in
             sent += act == "cheaper"
             queued += act == "queued"
             continue
-        if photo_budget[0] > 0 and sale_sources.photo_repair(cfg, l):
-            photo_budget[0] -= 1
+        if photo_budget[0] > 0 and sale_sources.photo_repair(cfg, l, store) is True:
+            photo_budget[0] -= 1                     # из общего кэша — не в счёт бюджета модели
         if sale_sources.photo_facts(cfg, store, l):      # на фото график платежей или ЖК — цена и место точнее
             why_ = sale_sources.recheck(l, ss, store, cfg)
             if not why_:

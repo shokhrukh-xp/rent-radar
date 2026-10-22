@@ -136,6 +136,45 @@ def shared_store(store):
     return o.store if o is not None and o._store is not None else store
 
 
+def memo_get(store, name, key):
+    """Общий кэш разборов моделью по объявлению (ремонт по фото, адрес из текста) — один вызов на всех клиентов.
+    None — ещё не разбирали."""
+    st = shared_store(store)
+    try:
+        _memo_table(st)
+        r = st.conn.execute("SELECT v FROM memo WHERE name=? AND k=?", (name, str(key))).fetchone()
+        return json.loads(r[0]) if r else None
+    except Exception as e:
+        log.info("[кэш] %s: %s", name, e)
+        return None
+
+
+def memo_put(store, name, key, value, keep=5000):
+    st = shared_store(store)
+    try:
+        _memo_table(st)
+        st.conn.execute("INSERT OR REPLACE INTO memo(name, k, v, at) VALUES(?,?,?,?)",
+                        (name, str(key), json.dumps(value, ensure_ascii=False), time.time()))
+        n = st.conn.execute("SELECT COUNT(*) FROM memo WHERE name=?", (name,)).fetchone()[0]
+        if n > keep:
+            st.conn.execute("DELETE FROM memo WHERE name=? AND at < (SELECT at FROM memo WHERE name=? "
+                            "ORDER BY at DESC LIMIT 1 OFFSET ?)", (name, name, keep))
+        st.conn.commit()
+    except Exception as e:
+        log.info("[кэш] %s: %s", name, e)
+
+
+def _memo_table(st):
+    if getattr(st, "_memo_ok", False):
+        return
+    st.conn.execute("CREATE TABLE IF NOT EXISTS memo(name TEXT, k TEXT, v TEXT, at REAL, PRIMARY KEY(name, k))")
+    st.conn.commit()
+    try:
+        st._memo_ok = True
+    except Exception:
+        pass
+
+
 def paid(chat) -> bool:
     """Есть оплаченный тариф (или оплата выключена, или это владелец)."""
     if not REG.get("payments"):

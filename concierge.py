@@ -1043,7 +1043,7 @@ def add_site_offer(cfg, store, l):
              "deal": "sale" if key.startswith("sale:") else "rent",
              "seller": l.get("seller") or None}
     extra = {k: v for k, v in extra.items() if v}
-    text = "\n".join(x for x in (l.get("title"), (l.get("text") or "")[:500]) if x)
+    text = dedupe_text("\n".join(x for x in (l.get("title"), (l.get("text") or "")[:500]) if x))
     pv = l.get("price_usd")
     cur = store.conn.execute(
         "INSERT INTO broker_offers(broker_chat, broker_name, text, photos, district, rooms, area, "
@@ -1055,6 +1055,96 @@ def add_site_offer(cfg, store, l):
          datetime.now(timezone.utc).isoformat(), json.dumps(extra, ensure_ascii=False)))
     store.conn.commit()
     return cur.lastrowid, True
+
+
+def dedupe_text(text: str) -> str:
+    """Заголовок сайта часто — начало описания («[ID: 0028]» дважды, первая фраза дважды): убираем повтор."""
+    lines = (text or "").split("\n")
+    out = []
+    for ln in lines:
+        a = re.sub(r"\s+", " ", ln).strip().rstrip(".…").lower()
+        prev = re.sub(r"\s+", " ", out[-1]).strip().rstrip(".…").lower() if out else None
+        if prev is not None and a and prev and (a == prev or a.startswith(prev)):
+            out[-1] = ln                              # следующая строка полнее — оставляем её
+            continue
+        out.append(ln)
+    return "\n".join(out)
+
+
+def refresh_site_offer(cfg, store, o):
+    """Старые записи шортлиста (до 22.10) — без цены и телефона: дописать из сохранённого объявления."""
+    if not o or not is_site_offer(o):
+        return o
+    ex = o.get("extra") or {}
+    if o.get("price_usd") and ex.get("phones"):
+        return o
+    rr = _rr()
+    try:
+        l = rr._listing_any(store, o["broker_chat"][5:]) or {}
+    except Exception:
+        l = {}
+    sets = {}
+    if not o.get("price_usd"):
+        pv = l.get("price_usd") or (rr.to_usd(l.get("price_value"), l.get("price_currency"), cfg)
+                                    if l.get("price_value") else None)
+        if pv:
+            sets.update(price_usd=pv, price_raw=f"{pv:g} USD")
+    if sets:
+        store.conn.execute("UPDATE broker_offers SET " + ", ".join(f"{k}=?" for k in sets) + " WHERE oid=?",
+                           (*sets.values(), o["oid"]))
+        store.conn.commit()
+    if not ex.get("phones") and l.get("phones"):
+        _set_extra(store, o["oid"], phones=l["phones"][:2])
+    return get_offer(store, o["oid"]) if sets or l.get("phones") else o
+
+
+# Покупка: что проверить до задатка. Источники (10.2026): my.gov.uz — «Проверка запрета на кадастровый объект»
+# (№471, бесплатно) и «Проверка выписки и кадастрового паспорта» (№506); davreestr.uz — реестр прав и обременений;
+# yuz.uz (29.07.2026), blog.salomuy.uz — согласие супруга и совладельцев, долги, аванс письменно, нотариус.
+DOCS_CHECK = (
+    "📑 <b>Перед задатком по варианту #{oid} — проверьте документы</b>\n"
+    "1. Собственник и запреты: свежая выписка из реестра прав (davreestr.uz — попросите у продавца) и "
+    "«Проверка запрета на кадастровый объект» на my.gov.uz — бесплатно, по адресу или кадастровому номеру.\n"
+    "2. Паспорт продавца совпадает с выпиской; продаёт по доверенности — она нотариальная и на эту квартиру.\n"
+    "3. Все собственники участвуют в сделке; куплена в браке — нужно согласие супруга.\n"
+    "4. Долги за коммуналку и налог — справки или квитанции; как их закроют — в договоре.\n"
+    "5. Задаток — только письменно: адрес, кадастровый номер, сумма, сроки, когда и как вернут.\n"
+    "6. Сделка — у нотариуса; ключи и остаток денег — после регистрации права.\n"
+    "{extra}"
+    "<i>Это общий список, не юридическая консультация: по сложным случаям (дети-собственники, наследство) — "
+    "к нотариусу или юристу.</i>")
+DOCS_NEW = "Новостройка: разрешение на строительство, договор с застройщиком, сроки сдачи, планировка как в договоре.\n"
+
+
+def send_docs_check(cfg, store, o):
+    """Понравилась квартира на покупку — один раз список проверки документов."""
+    if not o or (o.get("extra") or {}).get("docs_sent"):
+        return False
+    ex = o.get("extra") or {}
+    want = (get_anketa(store).get("ans") or {}).get("deal")
+    if not (ex.get("deal") == "sale" or want in ("buy", "sale")):
+        return False
+    _set_extra(store, o["oid"], docs_sent=datetime.now(timezone.utc).isoformat())
+    return _rr().send_telegram(cfg, DOCS_CHECK.format(oid=o["oid"], extra=DOCS_NEW if ex.get("building") == "new" else ""))
+
+
+def mortgage_hint(cfg, o) -> str:
+    """Строка про ипотеку для покупки: что сказал продавец/сайт и сколько примерно в месяц."""
+    import market
+    ex = o.get("extra") or {}
+    ms = {"yes": "yes", "no": "no"}.get(str(ex.get("mortgage") or ""), None)
+    if ms is None:
+        ms = market.mortgage_status({"title": "", "text": o.get("text") or ""})[0]
+    if ms == "no":
+        return "🏦 Ипотека — нет, по словам продавца"
+    head = "🏦 Ипотека — можно" if ms == "yes" else "🏦 Ипотека — не указано, спрошу у продавца"
+    p = o.get("price_usd")
+    m = market.assumptions(cfg).get("mortgage")
+    if not (p and m):
+        return head
+    x = market.mortgage(p, m, cfg.get("uzs_per_usd") or 11900)
+    return (head + f" · взнос {fmt_money(x['down'])}, ≈ {market._mln(x['pay_uzs'])} млн сум/мес на {x['years']} лет "
+            f"(под {x['rate'] * 100:.0f}%)")
 
 
 def offers_by_status(store, status, limit=50):
@@ -1145,12 +1235,19 @@ def offer_card(store, cfg, o, idx=None, prefix="", pos=None, total=None):
     money = []
     if ex.get("commission"):
         money.append("комиссия: " + ex["commission"])
-    if ex.get("mortgage"):
+    want_ = (get_anketa(store).get("ans") or {}).get("deal")
+    buy_ = ex.get("deal") == "sale" or (want_ in ("buy", "sale") and ex.get("deal") != "rent")
+    if ex.get("mortgage") and not buy_:
         money.append("ипотека: " + {"yes": "да", "no": "нет"}.get(ex["mortgage"], ex["mortgage"]))
     if ex.get("documents"):
         money.append("документы: " + ex["documents"])
     if money:
         head.append("💼 " + rr.escape_html("; ".join(money)))
+    if buy_:
+        try:
+            head.append(rr.escape_html(mortgage_hint(cfg, o)))
+        except Exception as e:
+            rr.log.info("ипотека в карточке: %s", e)
     if ex.get("summary"):
         head.append("✨ " + rr.escape_html(ex["summary"]))
     if ex.get("phones"):
@@ -1164,7 +1261,7 @@ def offer_card(store, cfg, o, idx=None, prefix="", pos=None, total=None):
         wish = {"buy": "покупку", "rent": "аренду", "daily": "посуточную аренду"}
         head.append(f"⚠️ Это {what.get(got, got)}, а вы ищете {wish.get(want, want)}")
     head.append(f"👤 {'объявление с' if is_site_offer(o) else 'от'} {rr.escape_html(o['broker_name'] or 'маклера')}")
-    body = (o["text"] or "").strip()
+    body = dedupe_text((o["text"] or "").strip())
     if body:
         head.append("\n<i>" + rr.escape_html(body[:300 if ex else 400]) + "</i>")
     if o.get("note"):
@@ -1644,7 +1741,7 @@ def offer_caption(store, cfg, o, head=""):
 def show_offer_view(cfg, store, oid, message_id=None, head=""):
     """Карточка варианта одним сообщением: фото + этап + кнопки. После действия — правим её же."""
     rr = _rr()
-    o = get_offer(store, oid)
+    o = refresh_site_offer(cfg, store, get_offer(store, oid))
     if not o:
         return False
     text, kb = offer_caption(store, cfg, o, head)
@@ -1907,6 +2004,11 @@ def handle_offer_cb(data, cfg, store, message_id=None):
                 rr.tg_call(cfg, "sendMessage", done)
             return "👎 Убрала — не наше", True
         toast = "👍 Записала: нравится!" if arg == "g" else "🤔 Записала: думаете"
+        if arg == "g":
+            try:
+                send_docs_check(cfg, store, get_offer(store, oid))
+            except Exception as e:
+                rr.log.info("список документов: %s", e)
     elif act in ("view", "note"):             # ввод текста ведёт воркер; сюда — только если его нет
         rr.send_telegram(cfg, "Напишите день и время просмотра, например «завтра 18:00»."
                          if act == "view" else "Напишите заметку одним сообщением.")
@@ -1935,6 +2037,7 @@ def show_shortlist(cfg, store, message_id=None, offset=0):
     page = items[offset:offset + SL_PAGE]
     n_ask = sum(1 for o in items if askable(o))
     for i, o in enumerate(page, offset + 1):
+        o = refresh_site_offer(cfg, store, o)
         head = f"📋 <b>Шортлист</b> · {i} из {len(items)}"
         if i == offset + 1:                       # кнопок нет — одна подсказка на первой карточке
             head += "\n<i>" + SL_HINT + (f". Могу спросить маклеров сразу по всем ({n_ask})" if n_ask > 1 else "") + "</i>"
