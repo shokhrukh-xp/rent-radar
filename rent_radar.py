@@ -1142,8 +1142,7 @@ def format_message(l: dict, cfg: dict, likely_makler: bool) -> str:
     if val:
         num_ = f"{int(round(float(val))):,}".replace(",", " ")
         if cur == "USD":
-            per = f' · ${float(val) / float(l["area"]):.1f}/м²' if l.get("area") else ""
-            lines.append(f"💰 ${num_}/мес{per}")
+            lines.append(f"💰 ${num_}/мес")
         elif cur == "UZS":
             usd = l.get("price_usd") or to_usd(val, "UZS", cfg)
             lines.append(f"💰 {num_} сум/мес" + (f" (~${usd:.0f})" if usd else ""))
@@ -1172,7 +1171,7 @@ def format_message(l: dict, cfg: dict, likely_makler: bool) -> str:
     dt = parse_iso(l.get("created_at") or "")
     if dt:
         a_ = age_days(l.get("created_at") or "")
-        ago = "" if a_ is None else (" · сегодня" if a_ < 1 else f" · {int(a_)} дн. назад")
+        ago = "" if a_ is None else (f" · {max(1, int(a_ * 24))} ч назад" if a_ < 1 else f" · {int(a_)} дн. назад")
         lines.append(f'🕐 Выложено {dt.astimezone(TASHKENT_TZ).strftime("%d.%m %H:%M")}{ago}')
 
     ev = []
@@ -1196,7 +1195,7 @@ def format_message(l: dict, cfg: dict, likely_makler: bool) -> str:
             lines.append("❓ Спросить: " + escape_html("; ".join(q)))
 
     a_ = age_days(l.get("created_at") or "")
-    hurry = "  🆕 выложено меньше 2 дней назад" if a_ is not None and a_ <= 2 else ""
+    hurry = "  🆕 свежее" if a_ is not None and a_ <= 2 else ""
     lines.append(f'\n<a href="{l["url"]}">Открыть объявление</a>{hurry}')
     return "\n".join(lines)
 

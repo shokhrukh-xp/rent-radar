@@ -3448,8 +3448,8 @@ with mock.patch.object(rr, "send_telegram", lambda c, t_, **k: _RS.append(t_) or
 assert "card" not in _RS and "все уже присылала" in _RS[0], _RS
 assert rr.card_line("🏠 <b>[Uybor]</b> #1 · x\n💰 $700\n🛏 3-комн · 📍 Мирабад\n🕐 09.10") == "3-комн · Мирабад · $700"
 _fm = rr.format_message(dict(_rl2, price_value=1000.0, created_at=_old), cfg, False)
-assert "$1 000" in _fm and "1 000.0" not in _fm and "меньше 2 дней" not in _fm
-assert "меньше 2 дней" in rr.format_message(dict(_rl2, created_at=datetime.now(timezone.utc).isoformat()), cfg, False)
+assert "$1 000" in _fm and "1 000.0" not in _fm and "🆕 свежее" not in _fm
+assert "🆕 свежее" in rr.format_message(dict(_rl2, created_at=datetime.now(timezone.utc).isoformat()), cfg, False)
 _rs.conn.execute("INSERT OR REPLACE INTO seller_counts VALUES('uybor:u9', 166)"); _rs.conn.commit()
 assert "маклер" in rr.owner_only_reject(dict(_rl2, seller_id="uybor:u9", seller_ads=1), _rs, cfg, {})
 _rp.unlink(missing_ok=True)

@@ -448,6 +448,12 @@ export const APPROVED = {
   uz: "🎉 Joy bo'shadi — boshlaymiz! Nima qidirayotganingizni yozing: masalan, «markazda 2 xonali, $60 000 gacha».",
   en: "🎉 A spot opened up — let's start! Tell me what you're looking for, e.g. \"buy a 2-room flat in the centre up to $60,000\".",
 };
+export const APPROVED_INVITE = {
+  ru: "🎉 Доступ открыт — начинаем! Напишите своими словами, что ищете: например, «сниму 1-комн в Чиланзаре до $400» " +
+    "или «купить двушку в центре до $60 000».",
+  uz: "🎉 Kirish ochildi — boshlaymiz! Nima qidirayotganingizni yozing: masalan, «Chilonzorda 1 xonali, $400 gacha».",
+  en: "🎉 Access is open — let's start! Tell me what you're looking for, e.g. \"rent a 1-room flat in Chilanzar up to $400\".",
+};
 const langOf = from => { const l = (from?.language_code || "").slice(0, 2); return l === "uz" ? "uz" : l === "ru" ? "ru" : (l ? "en" : "ru"); };
 /** Новый человек нажал Start (без метки маклера): клиент, если есть место, иначе — лист ожидания. */
 export async function signup(env, msg) {
@@ -498,7 +504,8 @@ export async function adminCommand(env, chat, text) {
     await setUser(env, u.chat, "active", {});
     await setMapMenu(env, u.chat).catch(() => null);
     const L = u.lang === "uz" ? "uz" : u.lang === "ru" || !u.lang ? "ru" : "en";
-    await tg(env, "sendMessage", { chat_id: u.chat, text: APPROVED[L], _noTr: true });
+    const inv = String(env.INVITE_ONLY || "").toLowerCase() === "on";
+    await tg(env, "sendMessage", { chat_id: u.chat, text: (inv ? APPROVED_INVITE : APPROVED)[L], _noTr: true });
     return `✅ Пустила: ${who({ first_name: u.name, username: u.username }, u.chat)}`;
   }
   await setUser(env, u.chat, "removed", {});
