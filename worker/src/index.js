@@ -310,6 +310,8 @@ export async function gemini(env, system, userText, opts = {}) {
         if (r.ok || !(r.status === 400 && /think/i.test(d?.error?.message || ""))) break;
       }
       if (r.ok) {
+        const um = d.usageMetadata || {};
+        await addUsage(env, opts.chat, um.promptTokenCount, (um.candidatesTokenCount || 0) + (um.thoughtsTokenCount || 0));
         const raw = (d.candidates?.[0]?.content?.parts || []).filter(p => !p.thought).map(p => p.text || "").join("")
           .trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
         try { const o = JSON.parse(raw); if (o && typeof o === "object") Object.defineProperty(o, "_via", { value: model + "#" + i }); return o; } catch (e) {
@@ -465,22 +467,69 @@ export async function signup(env, msg) {
   const invite = String(env.INVITE_ONLY || "").toLowerCase() === "on";   // по приглашению: каждого пускает владелец
   if (n < lim && !invite) {
     await setUser(env, chat, "active", from);
+    await track(env, chat, "join", "start");
     await setMapMenu(env, chat).catch(() => null);
     await adminSay(env, `🆕 Новый пользователь: ${who(from, chat)} — ${n + 1}/${lim}`);
     return "active";
   }
   if (st !== "waitlist") {
     await setUser(env, chat, "waitlist", from);
+    await track(env, chat, "request");
     await adminSay(env, invite ? `🙋 Просится в Ra'no: ${who(from, chat)}. Пустить: <code>/approve ${chat}</code>`
       : `⏳ В лист ожидания: ${who(from, chat)} (мест ${lim}/${lim}). Пустить: <code>/approve ${chat}</code>`);
   }
   return invite ? "invite" : "waitlist";
 }
-/** Команды владельца: /users, /approve <chat|@username>, /remove <chat>, /limit <N>. */
+/** Команды владельца: /users, /approve <chat|@username>, /remove <chat>, /limit <N>,
+ *  бета: /invite [N] [метка], /invites, /stats, /reply <chat> текст, /price <тариф> <звёзды> [дни], /refund <chat> <платёж>. */
 export async function adminCommand(env, chat, text) {
   if (String(chat) !== String(env.OWNER_CHAT)) return null;
   const [c0, arg = ""] = text.trim().split(/\s+/, 2);
   const cmd = c0.toLowerCase().split("@")[0];
+  const words = text.trim().split(/\s+/).slice(1);
+  if (cmd === "/stats") return statsText(env);
+  if (cmd === "/invite") {
+    const n = parseInt(words[0], 10);
+    const src = (n > 0 ? words.slice(1) : words).join(" ");
+    const { link } = await makeInvite(env, n > 0 ? Math.min(n, 500) : 10, src);
+    return `🔗 Приглашение на ${n > 0 ? Math.min(n, 500) : 10} мест${src ? " («" + esc(src) + "»)" : ""}:\n${link}\n\n` +
+      `Кто откроет ссылку — сразу получит доступ, пока есть места по ссылке и общий лимит (${await userLimit(env)}) не занят.`;
+  }
+  if (cmd === "/invites") {
+    const list = (await kvGet(env, "inv_list", null)) || [];
+    const rows = [];
+    for (const c of list.slice(-20)) {
+      const v = await kvGet(env, "inv:" + c, null);
+      if (v) rows.push(`• <code>${c}</code>${v.src ? " «" + esc(v.src) + "»" : ""}: пришли ${v.used || 0}, осталось ${v.left}`);
+    }
+    return rows.length ? "🔗 <b>Приглашения</b>\n" + rows.join("\n") : "Приглашений пока нет — <code>/invite 10 друзья</code>";
+  }
+  if (cmd === "/reply") {
+    const [to, ...rest] = words;
+    if (!to || !rest.length) return "Так: <code>/reply 123456 текст ответа</code>";
+    const r = await tg(env, "sendMessage", { chat_id: to, text: "💬 Ответ команды Ra'no:\n" + text.trim().split(/\s+/).slice(2).join(" ") });
+    await track(env, to, "support_reply");
+    return r?.ok ? "✅ Отправила ответ." : "Не отправилось: " + esc(r?.description || "ошибка Telegram");
+  }
+  if (cmd === "/price") {
+    const [id, st, days] = words;
+    const p = PLANS.find(x => x.id === id);
+    if (!p || !(+st > 0)) return "Так: <code>/price rent 500 30</code> — тариф (" + PLANS.map(x => x.id).join(", ") + "), звёзды, дни.";
+    const over = (await kvGet(env, "plan_prices", null)) || {};
+    over[id] = { ...(over[id] || {}), stars: Math.round(+st), ...(days ? { days: Math.round(+days) } : {}) };
+    await kvSet(env, "plan_prices", over);
+    return `✅ «${p.name.ru}»: ${over[id].stars} ⭐` + (over[id].days != null ? `, ${over[id].days} дн.` : "");
+  }
+  if (cmd === "/refund") {
+    const [to, charge] = words;
+    if (!to || !charge) return "Так: <code>/refund 123456 ид_платежа</code> (ид — в сообщении об оплате).";
+    const r = await tg(env, "refundStarPayment", { user_id: +to, telegram_payment_charge_id: charge });
+    if (!r?.ok) return "Возврат не прошёл: " + esc(r?.description || "ошибка Telegram");
+    await (await db(env)).prepare("UPDATE payments SET refunded=1 WHERE charge=?").bind(charge).run();
+    await kvSet(env, "ent:" + to, null);
+    await track(env, to, "refund");
+    return "✅ Вернула звёзды, доступ по тарифу снят.";
+  }
   if (!["/users", "/approve", "/remove", "/limit"].includes(cmd)) return null;
   const m = await usersMap(env);
   const find = a => [...m.values()].find(u => String(u.chat) === a || (u.username && "@" + u.username.toLowerCase() === a.toLowerCase()));
@@ -505,7 +554,9 @@ export async function adminCommand(env, chat, text) {
     await setMapMenu(env, u.chat).catch(() => null);
     const L = u.lang === "uz" ? "uz" : u.lang === "ru" || !u.lang ? "ru" : "en";
     const inv = String(env.INVITE_ONLY || "").toLowerCase() === "on";
-    await tg(env, "sendMessage", { chat_id: u.chat, text: (inv ? APPROVED_INVITE : APPROVED)[L], _noTr: true });
+    await track(env, u.chat, "join", "approve");
+    if (inv) await welcome(env, u.chat, L);              // знакомство: что умею, кнопки «что ищем», язык
+    else await tg(env, "sendMessage", { chat_id: u.chat, text: APPROVED[L], _noTr: true });
     return `✅ Пустила: ${who({ first_name: u.name, username: u.username }, u.chat)}`;
   }
   await setUser(env, u.chat, "removed", {});
@@ -785,6 +836,12 @@ async function db(env) {
       env.DB.prepare("CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT)"),
       env.DB.prepare("CREATE TABLE IF NOT EXISTS users (chat TEXT PRIMARY KEY, status TEXT, name TEXT, " +
         "username TEXT, lang TEXT, at INTEGER)"),
+      env.DB.prepare("CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, chat TEXT, ev TEXT, at INTEGER, meta TEXT)"),
+      env.DB.prepare("CREATE INDEX IF NOT EXISTS events_at ON events (at)"),
+      env.DB.prepare("CREATE TABLE IF NOT EXISTS usage (day TEXT, chat TEXT, calls INTEGER, tin INTEGER, tout INTEGER, " +
+        "PRIMARY KEY (day, chat))"),
+      env.DB.prepare("CREATE TABLE IF NOT EXISTS payments (charge TEXT PRIMARY KEY, chat TEXT, plan TEXT, stars INTEGER, " +
+        "at INTEGER, until INTEGER, refunded INTEGER DEFAULT 0)"),
     ]);
     schemaReady = true;
   }
@@ -818,8 +875,8 @@ export async function tg(env, method, body) {
   // (кроме кнопок карточки из очереди «Сохранить / Пропустить / Уточнить» — Q:…)
   const ik = body?.reply_markup?.inline_keyboard;
   if (body && method !== "editMessageReplyMarkup" && client && ik?.length
-      && !(ik.flat().every(b => String(b.callback_data || "").startsWith("Q:") || b.url)
-           && ik.flat().some(b => String(b.callback_data || "").startsWith("Q:")))) {
+      && !(ik.flat().every(b => CLIENT_BTN.test(String(b.callback_data || "")) || b.url)
+           && ik.flat().some(b => CLIENT_BTN.test(String(b.callback_data || ""))))) {
     body = { ...body }; delete body.reply_markup;
   }
   // клиент на узбекском/английском: готовые русские тексты — в перевод
@@ -1143,6 +1200,372 @@ function maybeWatch(env, ctx) {
   lastWatch = Date.now();
   ctx.waitUntil(watchdog(env).catch(e => console.log("watchdog error", e.stack || e)));
 }
+// ───────────────────────────── бета: приглашения, знакомство, поддержка, отзывы, тарифы, метрики ─────────────────────────────
+// Кнопки, которые клиенту можно (остальные tg() снимает: управление словами)
+export const CLIENT_BTN = /^(Q:|ob:|lang:|fb:|pl:)/;
+const tday = (ms = Date.now()) => new Date(ms + 5 * 3600e3).toISOString().slice(0, 10);   // день по Ташкенту
+const L3 = l => (l === "uz" || l === "en") ? l : "ru";
+export const payOn = env => String(env.PAYMENTS || "").toLowerCase() === "on";
+
+/** Событие воронки: кто, что, когда. Ошибка записи не мешает работе. */
+export async function track(env, chat, ev, meta = null) {
+  try {
+    await (await db(env)).prepare("INSERT INTO events (chat, ev, at, meta) VALUES (?, ?, ?, ?)")
+      .bind(String(chat ?? ""), String(ev).slice(0, 40), Date.now(),
+            meta == null ? null : String(typeof meta === "object" ? JSON.stringify(meta) : meta).slice(0, 300)).run();
+  } catch (e) { console.log("track error", e.message); }
+}
+/** Расход модели за день: вызовы и токены (chat "-" — служебные: перевод, разбор вариантов). */
+async function addUsage(env, chat, tin = 0, tout = 0) {
+  try {
+    await (await db(env)).prepare("INSERT INTO usage (day, chat, calls, tin, tout) VALUES (?, ?, 1, ?, ?) " +
+      "ON CONFLICT(day, chat) DO UPDATE SET calls=calls+1, tin=tin+excluded.tin, tout=tout+excluded.tout")
+      .bind(tday(), String(chat || "-"), tin | 0, tout | 0).run();
+  } catch (e) { console.log("usage error", e.message); }
+}
+async function callsToday(env, chat) {
+  const r = await (await db(env)).prepare("SELECT calls FROM usage WHERE day=? AND chat=?").bind(tday(), String(chat)).first();
+  return r?.calls || 0;
+}
+export const AI_LIMIT_TEXT = {
+  ru: "На сегодня я с вами уже очень много наговорила 🙈 Поиск по сайтам идёт дальше, новые варианты пришлю. Поговорим завтра!",
+  uz: "Bugun juda ko'p gaplashdik 🙈 Saytlarda qidiruv davom etyapti, yangi variantlarni yuboraman. Ertaga gaplashamiz!",
+  en: "We've talked a lot today 🙈 The search keeps running and I'll send new options. Let's continue tomorrow!",
+};
+
+// ── приглашения: /invite 10 друзья → ссылка t.me/<бот>?start=i<код> на 10 мест
+const botName = env => env.BOT_USERNAME || "rano_smart_bot";
+export async function makeInvite(env, n = 10, src = "") {
+  const code = [...crypto.getRandomValues(new Uint8Array(6))].map(b => "abcdefghjkmnpqrstuvwxyz23456789"[b % 31]).join("");
+  await kvSet(env, "inv:" + code, { left: n, src: String(src).slice(0, 30), at: Date.now(), used: 0 });
+  const list = (await kvGet(env, "inv_list", null)) || [];
+  list.push(code);
+  await kvSet(env, "inv_list", list.slice(-50));
+  return { code, link: `https://t.me/${botName(env)}?start=i${code}` };
+}
+/** Новый человек пришёл по ссылке-приглашению: место есть — сразу клиент. */
+async function redeemInvite(env, msg, code) {
+  const chat = String(msg.chat.id), from = msg.from || {};
+  const inv = await kvGet(env, "inv:" + code, null);
+  if (!inv || inv.left <= 0) return null;
+  const n = await activeCount(env), lim = await userLimit(env);
+  if (n >= lim) return null;
+  inv.left -= 1; inv.used = (inv.used || 0) + 1;
+  await kvSet(env, "inv:" + code, inv);
+  await setUser(env, chat, "active", from);
+  await track(env, chat, "join", inv.src || code);
+  await adminSay(env, `🆕 По приглашению${inv.src ? " «" + esc(inv.src) + "»" : ""}: ${who(from, chat)} — ${n + 1}/${lim}` +
+    `, по ссылке осталось мест: ${inv.left}`);
+  await welcome(env, chat, langOf(from));
+  return "active";
+}
+
+// ── знакомство: что умею, три кнопки «что ищем», язык
+export const WELCOME = {
+  ru: "🎉 Доступ открыт! Я Ra'no — ваш личный ИИ-помощник по поиску квартиры в Ташкенте. Работаю только на вас: " +
+    "денег от продавцов и маклеров не беру.\n\n" +
+    "🔎 Каждые 10 минут смотрю сайты и Telegram-каналы и присылаю свежие варианты по одному — с ценой против рынка и местом на карте.\n" +
+    "✍️ По вашей просьбе спрошу продавца о том, что важно, — от вашего имени.\n\n" +
+    "Что ищем? Нажмите кнопку или напишите своими словами — например, «сниму 2-комн в Юнусабаде до $600, с котом».\n\n" +
+    "Сейчас бета: всё бесплатно. Вопрос или что-то сломалось — /support.",
+  uz: "🎉 Kirish ochildi! Men Ra'no — Toshkentda kvartira qidirish bo'yicha shaxsiy AI-yordamchingizman. Faqat siz uchun " +
+    "ishlayman: sotuvchi va maklerlardan pul olmayman.\n\n" +
+    "🔎 Har 10 daqiqada saytlar va Telegram-kanallarni ko'rib, yangi variantlarni bittadan yuboraman — bozor narxi bilan " +
+    "solishtirib, xaritadagi joyi bilan.\n✍️ Iltimosingiz bilan sotuvchidan muhim savollarni sizning nomingizdan so'rayman.\n\n" +
+    "Nima qidiramiz? Tugmani bosing yoki o'zingizcha yozing — masalan, «Yunusobodda 2 xonali, $600 gacha».\n\n" +
+    "Hozir beta: hammasi bepul. Savol yoki nimadir ishlamasa — /support.",
+  en: "🎉 You're in! I'm Ra'no, your personal AI assistant for finding a flat in Tashkent. I work only for you: " +
+    "I take no money from sellers or brokers.\n\n" +
+    "🔎 Every 10 minutes I check listing sites and Telegram channels and send fresh options one by one — with the price " +
+    "against the market and the spot on the map.\n✍️ On request I'll ask the seller what matters to you, on your behalf, " +
+    "in Russian or Uzbek.\n\n" +
+    "What are we looking for? Tap a button or just write, e.g. \"rent a 2-room flat in Yunusabad up to $600, with a cat\".\n\n" +
+    "It's a beta: everything is free. Questions or something broke — /support.",
+};
+const OB_BTN = {
+  ru: { rent: "🏠 Снять", buy: "🔑 Купить", daily: "🛏 Посуточно" },
+  uz: { rent: "🏠 Ijaraga olish", buy: "🔑 Sotib olish", daily: "🛏 Kunlik" },
+  en: { rent: "🏠 Rent", buy: "🔑 Buy", daily: "🛏 Short stay" },
+};
+export const OB_SEED = {
+  ru: { rent: "Хочу снять квартиру", buy: "Хочу купить квартиру", daily: "Нужна квартира посуточно" },
+  uz: { rent: "Kvartirani ijaraga olmoqchiman", buy: "Kvartira sotib olmoqchiman", daily: "Kunlik kvartira kerak" },
+  en: { rent: "I want to rent a flat", buy: "I want to buy a flat", daily: "I need a flat for a short stay" },
+};
+const LANG_ROW = [{ text: "🇺🇿 O'zbekcha", callback_data: "lang:uz" }, { text: "🇬🇧 English", callback_data: "lang:en" },
+  { text: "🇷🇺 Русский", callback_data: "lang:ru" }];
+export function welcomeKb(L, withLang = true) {
+  const b = OB_BTN[L3(L)];
+  return { inline_keyboard: [[{ text: b.rent, callback_data: "ob:rent" }, { text: b.buy, callback_data: "ob:buy" }],
+    [{ text: b.daily, callback_data: "ob:daily" }], ...(withLang ? [LANG_ROW.filter(x => x.callback_data !== "lang:" + L3(L))] : [])] };
+}
+const CLIENT_CMDS = {
+  ru: [["new", "🔎 Новый поиск"], ["mysearch", "✏️ Что ищем"], ["shortlist", "📋 Сохранённые"], ["plans", "💳 Тарифы"],
+       ["support", "🆘 Написать команде"], ["about", "ℹ️ Кто такая Ra'no"]],
+  uz: [["new", "🔎 Yangi qidiruv"], ["mysearch", "✏️ Nima qidiryapmiz"], ["shortlist", "📋 Saqlanganlar"], ["plans", "💳 Tariflar"],
+       ["support", "🆘 Jamoaga yozish"], ["about", "ℹ️ Ra'no kim"]],
+  en: [["new", "🔎 New search"], ["mysearch", "✏️ My search"], ["shortlist", "📋 Saved"], ["plans", "💳 Plans"],
+       ["support", "🆘 Message the team"], ["about", "ℹ️ About Ra'no"]],
+};
+export async function welcome(env, chat, L = "ru") {
+  L = L3(L);
+  const iv = (await kvGet(env, ivKey(chat), null)) || emptyIv();
+  if (L !== "ru" && !iv.ans.lang) { iv.ans.lang = L; await kvSet(env, ivKey(chat), iv); resetLangCache(); }
+  await setMapMenu(env, chat).catch(() => null);
+  await tg(env, "setMyCommands", { commands: CLIENT_CMDS[L].map(([command, description]) => ({ command, description })),
+    scope: { type: "chat", chat_id: +chat } }).catch(() => null);
+  return say(env, chat, WELCOME[L], { reply_markup: welcomeKb(L), _noTr: true });
+}
+
+// ── поддержка: /support → следующее сообщение — команде; владелец отвечает /reply <chat> текст
+export const SUPPORT_ASK = /^\/(support|help_me|feedback)(@\w+)?$|(напис[а-яёa-z]*|связат[а-яёa-z]*)\s+(в\s+)?(поддержк|команд|разработчик|владельц|админ)[а-яёa-z]*|^поддержк[а-яёa-z]*$|^(support|yordam kerak|adminga yozish)$/i;
+const SUPPORT_HINT = {
+  ru: "🆘 Напишите одним сообщением, что случилось или что улучшить, — передам команде Ra'no, ответ придёт сюда. " +
+    "Можно приложить скриншот. Передумали — «отмена».",
+  uz: "🆘 Nima bo'lganini yoki nimani yaxshilash kerakligini bitta xabarda yozing — Ra'no jamoasiga yetkazaman, javob shu yerga keladi. " +
+    "Skrinshot ham mumkin. Fikringiz o'zgarsa — «bekor».",
+  en: "🆘 Write in one message what happened or what to improve — I'll pass it to the Ra'no team, the reply comes here. " +
+    "A screenshot is welcome. Changed your mind — \"cancel\".",
+};
+const SUPPORT_OK = { ru: "✅ Передала команде. Ответ придёт сюда.", uz: "✅ Jamoaga yetkazdim. Javob shu yerga keladi.",
+  en: "✅ Passed to the team. The reply will come here." };
+export async function startSupport(env, chat, L, kind = "support") {
+  const iv = (await kvGet(env, ivKey(chat), null)) || emptyIv();
+  iv.mode = "await_support"; iv.modeAt = Date.now(); iv.supportKind = kind;
+  await kvSet(env, ivKey(chat), iv);
+  return say(env, chat, SUPPORT_HINT[L3(L)], { _noTr: true });
+}
+async function forwardSupport(env, msg, iv, confirm = true) {
+  const chat = String(msg.chat.id), kind = iv.supportKind || "support";
+  iv.mode = ""; iv.supportKind = ""; await kvSet(env, ivKey(chat), iv);
+  const text = String(msg.text || msg.caption || "").trim();
+  await adminSay(env, `${kind === "feedback" ? "💬 Отзыв" : "🆘 Поддержка"} от ${who(msg.from, chat)}:\n«${esc(text.slice(0, 1500)) || "(без текста)"}»\n` +
+    `Ответить: <code>/reply ${chat} </code>текст`);
+  if (msg.photo || msg.document) await tg(env, "copyMessage", { chat_id: env.OWNER_CHAT, from_chat_id: chat, message_id: msg.message_id });
+  await track(env, chat, kind, text.slice(0, 120));
+  if (confirm) await say(env, chat, SUPPORT_OK[L3(await ownerLang(env, chat))], { _noTr: true });
+}
+
+// ── отзыв на 5-й день: как идут поиски → оценка 1–5 → сколько заплатили бы → пара слов
+const FB = {
+  status: { ru: "Как идут поиски? Мне важно понять, помогаю ли я 🙏", uz: "Qidiruv qanday ketyapti? Yordam berayotganimni bilishim muhim 🙏",
+    en: "How is the search going? I'd like to know whether I'm helping 🙏" },
+  statusBtn: { ru: [["found", "🏠 Уже нашёл(ла)"], ["search", "🔎 Ещё ищу"], ["stop", "⏸ Бросил(а) искать"]],
+    uz: [["found", "🏠 Topdim"], ["search", "🔎 Hali qidiryapman"], ["stop", "⏸ Qidirmay qo'ydim"]],
+    en: [["found", "🏠 Found one"], ["search", "🔎 Still searching"], ["stop", "⏸ Stopped searching"]] },
+  rate: { ru: "Насколько я полезна — от 1 до 5?", uz: "Men qanchalik foydaliman — 1 dan 5 gacha?", en: "How useful am I, from 1 to 5?" },
+  pay: { ru: "Последний вопрос. Если бы после беты такой поиск стал платным — сколько вы бы заплатили за месяц?",
+    uz: "Oxirgi savol. Betadan keyin bunday qidiruv pullik bo'lsa — bir oy uchun qancha to'lardingiz?",
+    en: "Last question. If after the beta this search became paid — how much would you pay for a month?" },
+  payBtn: { ru: [["0", "Не стал(а) бы платить"], ["50", "до 50 000 сум"], ["100", "около 100 000 сум"], ["200", "около 200 000 сум"], ["300", "300 000 сум и больше"]],
+    uz: [["0", "To'lamagan bo'lardim"], ["50", "50 000 so'mgacha"], ["100", "100 000 so'm atrofida"], ["200", "200 000 so'm atrofida"], ["300", "300 000 so'm va ko'proq"]],
+    en: [["0", "Wouldn't pay"], ["50", "up to $4"], ["100", "about $8"], ["200", "about $16"], ["300", "$25 or more"]] },
+  thanks: { ru: "Спасибо! 🙌 Если есть что сказать — что мешает, чего не хватает — напишите одним сообщением, передам команде. " +
+    "Или просто продолжим поиск.", uz: "Rahmat! 🙌 Nima xalaqit beryapti, nima yetishmayapti — bitta xabarda yozing, jamoaga yetkazaman. " +
+    "Yoki qidiruvni davom ettiramiz.", en: "Thank you! 🙌 If anything gets in the way or is missing — write one message and I'll " +
+    "pass it to the team. Or we just keep searching." },
+};
+export const FEEDBACK_AFTER_DAYS = 5;
+async function askFeedback(env, chat, L) {
+  L = L3(L);
+  await say(env, chat, FB.status[L], { _noTr: true,
+    reply_markup: { inline_keyboard: FB.statusBtn[L].map(([k, t]) => [{ text: t, callback_data: "fb:s:" + k }]) } });
+  await track(env, chat, "fb_asked");
+}
+/** Ответы на кнопки отзыва. */
+async function feedbackCb(env, cb, chat) {
+  const [, step, val] = cb.data.split(":");
+  const L = L3(await ownerLang(env, chat));
+  await tg(env, "answerCallbackQuery", { callback_query_id: cb.id, text: "🙏" });
+  await tg(env, "editMessageReplyMarkup", { chat_id: chat, message_id: cb.message.message_id, reply_markup: { inline_keyboard: [] } });
+  if (step === "s") {
+    await track(env, chat, "status", val);
+    if (val === "found") await adminSay(env, `🏠 Нашёл квартиру: <code>${chat}</code>`);
+    return say(env, chat, FB.rate[L], { _noTr: true, reply_markup: { inline_keyboard: [[1, 2, 3, 4, 5].map(n =>
+      ({ text: String(n), callback_data: "fb:r:" + n }))] } });
+  }
+  if (step === "r") {
+    await track(env, chat, "rating", +val);
+    return say(env, chat, FB.pay[L], { _noTr: true,
+      reply_markup: { inline_keyboard: FB.payBtn[L].map(([k, t]) => [{ text: t, callback_data: "fb:p:" + k }]) } });
+  }
+  if (step === "p") {
+    await track(env, chat, "wtp", +val);
+    const iv = (await kvGet(env, ivKey(chat), null)) || emptyIv();
+    iv.mode = "await_support"; iv.modeAt = Date.now(); iv.supportKind = "feedback";
+    await kvSet(env, ivKey(chat), iv);
+    return say(env, chat, FB.thanks[L], { _noTr: true });
+  }
+}
+/** Раз в полчаса (из запросов к воркеру): отзыв тем, кто с нами 5+ дней, и вечерняя сводка владельцу. */
+let lastSweep = 0;
+export async function betaSweep(env, now = Date.now()) {
+  if (now - (await kvGet(env, "sweep_at", 0)) < 30 * 60e3) return "skip";
+  await kvSet(env, "sweep_at", now);
+  let asked = 0;
+  if (isMulti(env)) {
+    const d = await db(env);
+    for (const u of (await usersMap(env)).values()) {
+      if (u.status !== "active" || String(u.chat) === String(env.OWNER_CHAT) || now - (u.at || now) < FEEDBACK_AFTER_DAYS * 864e5) continue;
+      if (await kvGet(env, "fb:" + u.chat, null)) continue;
+      const used = await d.prepare("SELECT 1 FROM events WHERE chat=? AND ev IN ('anketa','card') LIMIT 1").bind(String(u.chat)).first();
+      await kvSet(env, "fb:" + u.chat, { at: now, skipped: !used });
+      if (!used) continue;
+      await askFeedback(env, u.chat, u.lang);
+      if (++asked >= 15) break;
+    }
+  }
+  const h = new Date(now + 5 * 3600e3).getUTCHours();          // 20:00 по Ташкенту и позже — сводка за день
+  if (h >= 20 && (await kvGet(env, "stats_day", "")) !== tday(now)) {
+    await kvSet(env, "stats_day", tday(now));
+    if (env.OWNER_CHAT) await tg(env, "sendMessage", { chat_id: env.OWNER_CHAT, parse_mode: "HTML", _noTr: true,
+      disable_notification: true, text: await statsText(env, now) });
+  }
+  return asked ? "asked:" + asked : "ok";
+}
+function maybeSweep(env, ctx) {
+  if (Date.now() - lastSweep < 30 * 60e3) return;
+  lastSweep = Date.now();
+  ctx.waitUntil(betaSweep(env).catch(e => console.log("sweep error", e.stack || e)));
+}
+
+// ── тарифы: в бете — витрина «после беты будет так» (и счёт нажатий); PAYMENTS=on — оплата в Telegram Stars
+export const PLANS = [
+  { id: "rent", stars: 500, days: 30, price: { ru: "99 000 сум", uz: "99 000 so'm", en: "≈ $8" },
+    name: { ru: "Аренда · 30 дней", uz: "Ijara · 30 kun", en: "Rent · 30 days" },
+    what: { ru: "все варианты, вопросы продавцам от вашего имени, сохранённые, просмотры",
+            uz: "barcha variantlar, sotuvchilarga sizning nomingizdan savollar, saqlanganlar, ko'rishlar",
+            en: "all options, questions to sellers on your behalf, saved list, viewings" } },
+  { id: "buy", stars: 1500, days: 60, price: { ru: "290 000 сум", uz: "290 000 so'm", en: "≈ $23" },
+    name: { ru: "Покупка · 60 дней", uz: "Sotib olish · 60 kun", en: "Buy · 60 days" },
+    what: { ru: "всё из «Аренды» + цена за м² против района, дубли и история объявления",
+            uz: "«Ijara»dagi hammasi + m² narxi tuman bilan, dublikatlar va e'lon tarixi",
+            en: "everything in Rent + price per m² vs the district, duplicates and listing history" } },
+  { id: "reloc", stars: 1900, days: 30, price: { ru: "$29", uz: "$29", en: "$29" },
+    name: { ru: "Relocation · 30 дней", uz: "Relocation · 30 kun", en: "Relocation · 30 days" },
+    what: { ru: "всё из «Аренды» на английском, Ra'no переписывается с маклерами за вас",
+            uz: "«Ijara»dagi hammasi ingliz tilida, Ra'no maklerlar bilan siz uchun yozishadi",
+            en: "everything in Rent in English; Ra'no talks to brokers in Russian and Uzbek for you" } },
+  { id: "check", stars: 250, days: 0, price: { ru: "49 000 сум", uz: "49 000 so'm", en: "≈ $4" },
+    name: { ru: "Проверка квартиры · разово", uz: "Kvartirani tekshirish · bir martalik", en: "Flat check · one-off" },
+    what: { ru: "цена против рынка, история и дубли объявления, вопросы продавцу",
+            uz: "bozor narxi bilan solishtirish, e'lon tarixi va dublikatlari, sotuvchiga savollar",
+            en: "price vs market, listing history and duplicates, questions for the seller" } },
+];
+async function plans(env) {
+  const over = (await kvGet(env, "plan_prices", null)) || {};        // /price rent 450 30 — без правки кода
+  return PLANS.map(p => ({ ...p, ...(over[p.id] || {}) }));
+}
+export const PLANS_ASK = /^\/(plans|tariffs|pricing|pay|tarif)(@\w+)?$|тариф[а-яёa-z]*|сколько\s+стоит\s+(ваш[а-яёa-z]*|ra'?no|рано|сервис[а-яёa-z]*|бот[а-яёa-z]*|пользоват[а-яёa-z]*|подписк[а-яёa-z]*)|(это|ты|вы|сервис)\s+(бесплатн[а-яёa-z]*|платн[а-яёa-z]*)\??$|pullikmi|bepulmi|is it free|how much (do|does) (you|it|ra'?no) cost/i;
+export async function showPlans(env, chat, L) {
+  L = L3(L);
+  const ps = await plans(env), on = payOn(env);
+  const ent = await kvGet(env, "ent:" + chat, null);
+  const head = { ru: "💳 <b>Тарифы Ra'no</b>", uz: "💳 <b>Ra'no tariflari</b>", en: "💳 <b>Ra'no plans</b>" }[L];
+  const beta = { ru: "Сейчас бета — всё бесплатно, ничего не списываю. Так будет после беты (цены ещё могут поменяться):",
+    uz: "Hozir beta — hammasi bepul, hech narsa yechmayman. Betadan keyin shunday bo'ladi (narxlar o'zgarishi mumkin):",
+    en: "It's a beta — everything is free, nothing is charged. After the beta it will look like this (prices may still change):" }[L];
+  const free = { ru: "Бесплатно всегда: анкета и 3 варианта в день.", uz: "Doim bepul: anketa va kuniga 3 ta variant.",
+    en: "Always free: the questionnaire and 3 options a day." }[L];
+  const mine = ent && ent.until > Date.now()
+    ? "\n\n✅ " + { ru: "У вас: ", uz: "Sizda: ", en: "Yours: " }[L] + (ps.find(p => p.id === ent.plan)?.name[L] || ent.plan) +
+      { ru: " до ", uz: " gacha ", en: " until " }[L] + new Date(ent.until + 5 * 3600e3).toISOString().slice(0, 10) : "";
+  const lines = ps.map(p => `• <b>${p.name[L]}</b> — ${p.price[L]}${on ? ` (${p.stars} ⭐)` : ""}\n   ${p.what[L]}`);
+  const tail = on ? { ru: "Оплата — Telegram Stars, прямо здесь. Денег от продавцов и маклеров я не беру.",
+    uz: "To'lov — Telegram Stars, shu yerning o'zida. Sotuvchi va maklerlardan pul olmayman.",
+    en: "Payment is in Telegram Stars, right here. I take no money from sellers or brokers." }[L]
+    : { ru: "Какой вам ближе? Нажмите — я запишу, это поможет нам выбрать цены.", uz: "Qaysi biri sizga yaqin? Bosing — yozib qo'yaman, narxlarni tanlashga yordam beradi.",
+        en: "Which one fits you? Tap it — I'll note it, it helps us choose prices." }[L];
+  await say(env, chat, `${head}\n\n${on ? "" : beta + "\n\n"}${lines.join("\n")}\n\n${free}${mine}\n\n${tail}`,
+    { parse_mode: "HTML", _noTr: true, reply_markup: { inline_keyboard: ps.map(p => [{ text: (on ? "⭐ " : "👉 ") + p.name[L], callback_data: "pl:" + p.id }]) } });
+  await track(env, chat, "plans_view");
+}
+async function planCb(env, cb, chat) {
+  const id = cb.data.slice(3), L = L3(await ownerLang(env, chat));
+  const p = (await plans(env)).find(x => x.id === id);
+  if (!p) return tg(env, "answerCallbackQuery", { callback_query_id: cb.id });
+  await track(env, chat, "plan_tap", id);
+  if (!payOn(env)) return tg(env, "answerCallbackQuery", { callback_query_id: cb.id, show_alert: true,
+    text: { ru: "В бете всё бесплатно 🙌 Записала, что вам ближе «" + p.name.ru + "».", uz: "Betada hammasi bepul 🙌 Sizga «" + p.name.uz + "» yaqinligini yozib qo'ydim.",
+            en: "Everything is free in the beta 🙌 Noted that \"" + p.name.en + "\" fits you." }[L] });
+  await tg(env, "answerCallbackQuery", { callback_query_id: cb.id });
+  return tg(env, "sendInvoice", { chat_id: chat, title: p.name[L].slice(0, 32), description: p.what[L].slice(0, 255),
+    payload: `${p.id}:${chat}:${Date.now()}`, currency: "XTR", prices: [{ label: p.name[L].slice(0, 32), amount: p.stars }] });
+}
+/** Перед списанием: тариф есть, оплата включена, счёт выставлен этому человеку. */
+export async function preCheckout(env, q) {
+  const [id, chat] = String(q.invoice_payload || "").split(":");
+  const p = (await plans(env)).find(x => x.id === id);
+  const ok = payOn(env) && !!p && String(chat) === String(q.from?.id) && q.currency === "XTR" && q.total_amount === p.stars;
+  await tg(env, "answerPreCheckoutQuery", { pre_checkout_query_id: q.id, ok,
+    ...(ok ? {} : { error_message: "Счёт устарел — откройте /plans ещё раз 🙏" }) });
+  return ok;
+}
+/** Оплата прошла: записать, продлить доступ, сказать спасибо. */
+export async function paid(env, msg) {
+  const sp = msg.successful_payment, chat = String(msg.chat.id);
+  const [id] = String(sp.invoice_payload || "").split(":");
+  const p = (await plans(env)).find(x => x.id === id) || { id, days: 30, name: { ru: id, uz: id, en: id } };
+  const ent = (await kvGet(env, "ent:" + chat, null)) || {};
+  const until = p.days ? Math.max(ent.until || 0, Date.now()) + p.days * 864e5 : (ent.until || 0);
+  await (await db(env)).prepare("INSERT INTO payments (charge, chat, plan, stars, at, until, refunded) VALUES (?, ?, ?, ?, ?, ?, 0) " +
+    "ON CONFLICT(charge) DO NOTHING").bind(sp.telegram_payment_charge_id, chat, p.id, sp.total_amount | 0, Date.now(), until).run();
+  if (p.days) await kvSet(env, "ent:" + chat, { plan: p.id, until });
+  await track(env, chat, "paid", { plan: p.id, stars: sp.total_amount });
+  await adminSay(env, `💳 Оплата: ${who(msg.from, chat)} — ${esc(p.name.ru)}, ${sp.total_amount} ⭐\n` +
+    `Возврат: <code>/refund ${chat} ${esc(sp.telegram_payment_charge_id)}</code>`);
+  const L = L3(await ownerLang(env, chat));
+  return say(env, chat, { ru: "🙌 Спасибо! Оплата прошла", uz: "🙌 Rahmat! To'lov o'tdi", en: "🙌 Thank you! Payment received" }[L] +
+    (p.days ? { ru: ` — «${p.name.ru}» до `, uz: ` — «${p.name.uz}» `, en: ` — "${p.name.en}" until ` }[L] +
+      new Date(until + 5 * 3600e3).toISOString().slice(0, 10) + (L === "uz" ? " gacha." : ".") : "."), { _noTr: true });
+}
+
+// ── метрики для владельца: /stats и вечерняя сводка
+const AI_PRICE = env => ({ in: +(env.AI_PRICE_IN || 0.3), out: +(env.AI_PRICE_OUT || 2.5) });   // $ за 1 млн токенов, оценка
+export async function statsText(env, now = Date.now()) {
+  const d = await db(env), owner = String(env.OWNER_CHAT || "");
+  const since = now - 30 * 864e5, wk = now - 7 * 864e5;
+  const evs = ((await d.prepare("SELECT chat, ev, at, meta FROM events WHERE at>=? AND chat<>?").bind(since, owner).all()).results) || [];
+  const users = [...(await usersMap(env)).values()].filter(u => String(u.chat) !== owner);
+  const act = users.filter(u => u.status === "active"), wl = users.filter(u => u.status === "waitlist");
+  const chats = ev => new Set(evs.filter(e => e.ev === ev).map(e => e.chat));
+  const cnt = (ev, t0 = since) => evs.filter(e => e.ev === ev && e.at >= t0).length;
+  const anketa = chats("anketa"), card = chats("card");
+  const engaged = new Set(evs.filter(e => ["save", "ask"].includes(e.ev)).map(e => e.chat));
+  const active7 = new Set(evs.filter(e => e.at >= wk && !["card", "fb_asked"].includes(e.ev)).map(e => e.chat));
+  // время от анкеты до первой карточки — медиана, минуты
+  const firstOf = ev => { const m = new Map(); for (const e of evs) if (e.ev === ev && !(m.get(e.chat) <= e.at)) m.set(e.chat, e.at); return m; };
+  const fa = firstOf("anketa"), fc = firstOf("card");
+  const gaps = [...fa].filter(([c, t]) => fc.get(c) >= t).map(([c, t]) => (fc.get(c) - t) / 60e3).sort((a, b) => a - b);
+  const med = gaps.length ? Math.round(gaps[Math.floor(gaps.length / 2)]) : null;
+  const cards7 = cnt("card", wk), saves7 = cnt("save", wk), asks7 = cnt("ask", wk), skips7 = cnt("skip", wk);
+  const ratings = evs.filter(e => e.ev === "rating").map(e => +e.meta).filter(Boolean);
+  const avg = ratings.length ? (ratings.reduce((a, b) => a + b, 0) / ratings.length).toFixed(1) : "—";
+  const dist = (ev) => { const m = {}; for (const e of evs.filter(x => x.ev === ev)) m[e.meta] = (m[e.meta] || 0) + 1; return m; };
+  const fmt = (m, names = {}) => Object.entries(m).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${names[k] || k} ${v}`).join(" · ") || "—";
+  const joins = dist("join");
+  const u7 = ((await d.prepare("SELECT chat, SUM(calls) c, SUM(tin) i, SUM(tout) o FROM usage WHERE day>=? GROUP BY chat")
+    .bind(tday(wk)).all()).results) || [];
+  const tot = u7.reduce((a, r) => ({ c: a.c + (r.c || 0), i: a.i + (r.i || 0), o: a.o + (r.o || 0) }), { c: 0, i: 0, o: 0 });
+  const pr = AI_PRICE(env), usd = (tot.i * pr.in + tot.o * pr.out) / 1e6;
+  const perUser = act.length ? usd / 7 / Math.max(1, act.length) : 0;
+  const pct = (a, b) => b ? Math.round(100 * a / b) + "%" : "—";
+  return [
+    `📈 <b>Ra'no — бета</b> · ${tday(now)}`,
+    `👥 Клиентов: <b>${act.length}</b> (лимит ${await userLimit(env)}), ждут: ${wl.length}`,
+    `🔗 Пришли (30 дн.): ${fmt(joins)}`,
+    `🪜 Воронка 30 дн.: анкета ${anketa.size} → первая карточка ${card.size} → сохранил/спросил ${engaged.size}`,
+    `⏱ От анкеты до первой карточки: ${med == null ? "—" : med + " мин (медиана)"}`,
+    `🗓 За 7 дн.: активных ${active7.size}, карточек ${cards7}, 💾 ${saves7}, ✍️ ${asks7}, ⏭ ${skips7} — интерес ${pct(saves7 + asks7, cards7)}`,
+    `⭐ Оценка: ${avg} (${ratings.length}) · поиски: ${fmt(dist("status"), { found: "нашли", search: "ищут", stop: "бросили" })}`,
+    `💰 Заплатили бы (тыс. сум): ${fmt(dist("wtp"), { 0: "не стали бы" })} · тарифы нажимали: ${fmt(dist("plan_tap"))}`,
+    `🆘 Обращений за 7 дн.: ${cnt("support", wk) + cnt("feedback", wk)}`,
+    `🤖 Модель за 7 дн.: ${tot.c} вызовов, ≈ $${usd.toFixed(2)} (≈ $${perUser.toFixed(3)} на клиента в день)` +
+      (cnt("ai_limit", wk) ? `, упёрлись в лимит: ${cnt("ai_limit", wk)}` : ""),
+    payOn(env) ? `💳 Оплаты: ${cnt("paid")} за 30 дн.` : "💳 Оплата выключена (PAYMENTS=off)",
+  ].join("\n");
+}
+
 // ───────────────────────────── «Обвести на карте» (Mini App из кнопки «Меню») ─────────────────────────────
 const hexOf = buf => [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, "0")).join("");
 /** Подпись Telegram WebApp (initData): HMAC-SHA256 ключом от токена бота. Возвращает user или null. */
@@ -1181,6 +1604,9 @@ const ABOUT = {
     "не беру денег с продавцов и маклеров и не участвую в сделке — решаете вы. Подробно:",
   uz: "Men Ra'no — uy-joy qidirish bo'yicha shaxsiy sun'iy intellekt yordamchingizman. Faqat siz uchun ishlayman, rieltor " +
     "emasman, sotuvchi va maklerlardan pul olmayman, bitimda qatnashmayman. Batafsil:",
+  en: "I'm Ra'no, your personal AI assistant for finding a home. I work only for you: I search listings on your terms, " +
+    "show facts, write to sellers and brokers when you ask and always say I'm an AI assistant. I'm not a realtor, " +
+    "I take no money from sellers or brokers and I'm not part of the deal — you decide. More:",
 };
 export const DRAW_ASK = /^\/(draw|area|areas|karta)(@\w+)?$|(нарис|обвест|обвед|очерт)\w*[^.!?\n]{0,40}(карт(?!оч)|облаc|облас)|выдел\w*[^.!?\n]{0,30}карт(?!оч)|(карт\w*)[^.!?\n]{0,20}(нарис|обвест|обвед|очерт)|xaritada\s+(chiz|belgila)|draw\s+(an?\s+)?(area|on the map)/i;
 export const DRAW_HINT = {
@@ -1364,8 +1790,8 @@ function buildPrompt(iv, text, today, ctx = null) {
 }
 
 /** Один ход интервью без отправки в Telegram: модель → проверка → новое состояние. */
-export async function interviewCore(env, iv, text, ctx = null) {
-  const out = await gemini(env, SYSTEM, buildPrompt(iv, text, new Date().toISOString().slice(0, 10), ctx));
+export async function interviewCore(env, iv, text, ctx = null, opts = {}) {
+  const out = await gemini(env, SYSTEM, buildPrompt(iv, text, new Date().toISOString().slice(0, 10), ctx), { chat: opts.chat });
   const set = pairsToSet(out.set);
   const roomsAny = Array.isArray(set.rooms) && set.rooms.includes("any");
   iv.ans = applyPatch(iv.ans, set, out.clear);
@@ -1503,6 +1929,10 @@ export async function cardAction(env, chat, raw, card, recent, iv, text) {
 
 export async function interviewTurn(env, chat, text, card = null) {
   const iv = await kvGet(env, ivKey(chat), null) || emptyIv();
+  if (String(chat) !== String(env.OWNER_CHAT) && await callsToday(env, chat) >= +(env.AI_USER_DAY || 150)) {
+    await track(env, chat, "ai_limit");                // защита от зацикливания и злоупотреблений: модель не зовём
+    return say(env, chat, AI_LIMIT_TEXT[L3(iv.ans?.lang)], { _noTr: true });
+  }
   tg(env, "sendChatAction", { chat_id: chat, action: "typing" }).catch(() => {});
   let res;
   const ui = await kvGet(env, uiKey(env, chat), null);
@@ -1510,7 +1940,7 @@ export async function interviewTurn(env, chat, text, card = null) {
   const ctx = { ...(ui?.ctx || {}), recent_cards: recent.map((c, i) => ({ n: i + 1, line: c.line })),
     ...(card ? { card: { line: card.line } } : {}) };
   try {
-    res = await interviewCore(env, iv, text, ctx);
+    res = await interviewCore(env, iv, text, ctx, { chat });
   } catch (e) {
     console.log("gemini error", e.message);
     await say(env, chat, "Ой, я запнулась 🙈 Попробуйте ещё раз через минуту.");
@@ -1521,7 +1951,7 @@ export async function interviewTurn(env, chat, text, card = null) {
   if (intent === "restart") {
     // «давай заново, теперь аренда» — начинаем с чистого листа, но сказанное сейчас не теряем
     const fresh = emptyIv();
-    fresh.ans = applyPatch({}, pairsToSet(res.raw?.set));
+    fresh.ans = applyPatch(iv.ans?.lang ? { lang: iv.ans.lang } : {}, pairsToSet(res.raw?.set));
     if (!Object.keys(fresh.ans).length) { await kvSet(env, ivKey(chat), fresh); return startInterview(env, chat, true, fin.lang || "ru"); }
     fresh.hist = [{ r: "u", t: String(text).slice(0, 1000) }, { r: "a", t: reply }];
     await kvSet(env, ivKey(chat), fresh);
@@ -1529,6 +1959,7 @@ export async function interviewTurn(env, chat, text, card = null) {
     return;
   }
   if (ready) {                                   // параметры собраны — поиск в Python при любом intent
+    await track(env, chat, "anketa", fin.deal || "");
     iv.sent = res.sig; iv.sentAt = Date.now();
     await kvSet(env, ivKey(chat), iv);
     await enqueue(env, { message: { chat: { id: +chat || chat, type: "private" }, from: { id: +chat || chat },
@@ -1563,8 +1994,11 @@ export async function interviewTurn(env, chat, text, card = null) {
 
 async function startInterview(env, chat, fresh, lang = "ru") {
   let iv = await kvGet(env, ivKey(chat), null);
+  lang = iv?.ans?.lang || lang;                          // язык, выбранный клиентом, важнее языка Telegram
   if (fresh || !iv || !essentialsOk(iv.ans || {})) {
+    const keepLang = iv?.ans?.lang;
     iv = emptyIv();
+    if (keepLang) iv.ans.lang = keepLang;               // «начать заново» — язык клиента остаётся
     await kvSet(env, ivKey(chat), iv);
     await say(env, chat, GREET[lang] || GREET.ru, { reply_markup: OWNER_KB });
     return;
@@ -1592,12 +2026,35 @@ export async function handleUpdate(env, upd) {
     if (upd.update_id % 50 === 0)
       await d.prepare("DELETE FROM kv WHERE k LIKE 'upd:%' AND CAST(v AS INTEGER) < ?").bind(Date.now() - 2 * 864e5).run();
   }
+  if (upd.pre_checkout_query) { await preCheckout(env, upd.pre_checkout_query); return "precheckout"; }
 
   const cb = upd.callback_query;
   if (cb) {
     const chat = String(cb.message?.chat?.id ?? "");
     if (!(await isClient(env, chat))) return "skip";
     const data = cb.data || "";
+    if (/^ob:(rent|buy|daily)$/.test(data)) {          // знакомство: «Снять / Купить / Посуточно»
+      const iv0 = (await kvGet(env, ivKey(chat), null)) || emptyIv();
+      await tg(env, "answerCallbackQuery", { callback_query_id: cb.id });
+      await tg(env, "editMessageReplyMarkup", { chat_id: chat, message_id: cb.message.message_id, reply_markup: { inline_keyboard: [] } });
+      await track(env, chat, "ob_pick", data.slice(3));
+      await interviewTurn(env, chat, OB_SEED[L3(iv0.ans?.lang)][data.slice(3)]);
+      return "onboarding";
+    }
+    if (/^lang:(ru|uz|en)$/.test(data)) {               // язык общения — сразу и для всех готовых текстов
+      const L = data.slice(5);
+      const iv0 = (await kvGet(env, ivKey(chat), null)) || emptyIv();
+      iv0.ans = { ...(iv0.ans || {}), lang: L };
+      await kvSet(env, ivKey(chat), iv0);
+      resetLangCache();
+      await tg(env, "answerCallbackQuery", { callback_query_id: cb.id, text: { ru: "Русский ✅", uz: "O'zbekcha ✅", en: "English ✅" }[L] });
+      await track(env, chat, "lang", L);
+      await tg(env, "editMessageText", { chat_id: chat, message_id: cb.message.message_id, text: WELCOME[L],
+        reply_markup: welcomeKb(L), _noTr: true });
+      return "lang";
+    }
+    if (/^fb:[srp]:\w+$/.test(data)) return (await feedbackCb(env, cb, chat), "feedback");
+    if (/^pl:\w+$/.test(data)) return (await planCb(env, cb, chat), "plan");
     if (data === "b" || data === "off2" || data === "q:ok") {
       await tg(env, "answerCallbackQuery", { callback_query_id: cb.id });
       if (data === "off2") await showOffers(env, chat, true); else await startOutreach(env, chat);
@@ -1616,6 +2073,7 @@ export async function handleUpdate(env, upd) {
       return "outreach";
     }
     if (/^Q:[sna]\|/.test(data)) {             // карточка из очереди: ответ сразу, дальше — Python (и следующая)
+      await track(env, chat, { s: "save", n: "skip", a: "ask" }[data[2]]);
       await tg(env, "answerCallbackQuery", { callback_query_id: cb.id,
         text: { s: "💾 Сохранила", n: "⏭ Дальше", a: "✍️ Готовлю вопросы продавцу" }[data[2]] });
       await tg(env, "editMessageReplyMarkup", { chat_id: chat, message_id: cb.message.message_id, reply_markup: { inline_keyboard: [] } });
@@ -1686,6 +2144,7 @@ export async function handleUpdate(env, upd) {
       return "site";
     }
     if (/^L:[sn]:/.test(data) || data === "R:check") {     // объявление с сайта / «проверить сайты»
+      if (data !== "R:check") await track(env, chat, data[2] === "s" ? "save" : "skip");
       await tg(env, "answerCallbackQuery", { callback_query_id: cb.id,
         text: data === "R:check" ? "🔄 Пробегусь по всем сайтам — минута-две" : data[2] === "s" ? "👍 Добавила в шортлист" : "👎 Убрала — больше не покажу" });
       let removed = false;
@@ -1782,11 +2241,12 @@ export async function handleUpdate(env, upd) {
   const msg = upd.message || upd.edited_message;
   if (!msg) { await enqueue(env, upd); return "queued"; }
   const chat = String(msg.chat?.id ?? "");
+  if (msg.successful_payment) { await paid(env, msg); return "paid"; }
   let client = chat === owner || await isClient(env, chat);
   if (client) await rememberWho(env, chat, msg.from).catch(() => null);
   if (!client && /^\/(about|privacy)(@\w+)?$/i.test(String(msg.text || "").trim())) {   // кто такая Ra'no — любому
-    const L0 = langOf(msg.from) === "uz" ? "uz" : "ru";
-    await say(env, chat, ABOUT[L0] + `\n\n${ORIGIN || ""}/about${L0 === "uz" ? "?lang=uz" : ""}`);
+    const L0 = langOf(msg.from);
+    await say(env, chat, ABOUT[L0] + `\n\n${ORIGIN || ""}/about${L0 !== "ru" ? "?lang=" + L0 : ""}`, { _noTr: true });
     return "about";
   }
   if (!client && isMulti(env)) {
@@ -1795,6 +2255,8 @@ export async function handleUpdate(env, upd) {
     const st0 = await userStatus(env, chat);
     const sm = /^\/start(?:@\w+)?(?:\s+(\S+))?/i.exec(String(msg.text || "").trim());
     const payload = sm ? (sm[1] || "") : null;
+    if (payload && /^i[a-z0-9]{4,12}$/.test(payload) && st0 !== "removed" && await redeemInvite(env, msg, payload.slice(1)))
+      return "joined";                                 // ссылка-приглашение: место есть — сразу клиент
     if (payload !== null && /^m[0-9a-z]+$/i.test(payload)) {
       const cid = String(parseInt(payload.slice(1), 36));
       if (cid && (cid === owner || (await userStatus(env, cid)) === "active")) await kvSet(env, "broker_of:" + chat, cid);
@@ -1841,8 +2303,24 @@ export async function handleUpdate(env, upd) {
 
   if (Object.values(BTN).includes(text) || text.startsWith("/")) {   // нажали другое — ввод даты/заметки бросили
     const ivA = await kvGet(env, ivKey(chat), null);
-    if (ivA && /^await_(view|note)$/.test(ivA.mode)) { ivA.mode = ""; await kvSet(env, ivKey(chat), ivA); }
+    if (ivA && /^await_(view|note|support)$/.test(ivA.mode)) { ivA.mode = ""; await kvSet(env, ivKey(chat), ivA); }
   }
+  // поддержка: следующее сообщение после /support — команде (отзыв после опроса — и команде, и дальше в разговор)
+  const ivS = await kvGet(env, ivKey(chat), null);
+  if (ivS?.mode === "await_support" && Date.now() - (ivS.modeAt || 0) < 30 * 60e3 && !text.startsWith("/")
+      && !Object.values(BTN).includes(text)) {
+    if (/^(отмена|cancel|bekor|не надо|стоп)[.!]?$/i.test(text)) {
+      ivS.mode = ""; await kvSet(env, ivKey(chat), ivS);
+      await say(env, chat, "Хорошо, отменила.");
+      return "cancel";
+    }
+    const fbk = ivS.supportKind === "feedback";
+    await forwardSupport(env, msg, ivS, !fbk);
+    if (!fbk) return "support";
+    if (!text || msg.photo || msg.document) return "support";
+  }
+  if (SUPPORT_ASK.test(text)) { await startSupport(env, chat, ivS?.ans?.lang); return "support_start"; }
+  if (PLANS_ASK.test(text)) { await showPlans(env, chat, ivS?.ans?.lang); return "plans"; }
   // кнопки внизу — обычный текст с подписью кнопки
   if (text === BTN.rano || /^\/(rano|sites)(@\w+)?$/i.test(text)) return (await showScreen(env, chat, "/rano"), "rano");
   if (text === BTN.via || /^\/via(@\w+)?$/i.test(text)) return (await showScreen(env, chat, "/via"), "via");
@@ -1850,8 +2328,9 @@ export async function handleUpdate(env, upd) {
   if (text === BTN.offers || /^\/(offers|varianty)(@\w+)?$/i.test(text)) return (await showOffers(env, chat), "ui");
   if (text === BTN.brokers || /^\/(brokers|makler|outreach)(@\w+)?$/i.test(text)) return (await startOutreach(env, chat), "ui");
   if (/^\/(about|privacy)(@\w+)?$/i.test(text) || ABOUT_ASK.test(text)) {   // кто такая Ra'no, кому служит
-    await say(env, chat, (ABOUT[L] || ABOUT.ru) + `\n\n${ORIGIN || ""}/about${L === "uz" ? "?lang=uz" : ""}`,
-      { disable_web_page_preview: false });
+    const La = L3((await kvGet(env, ivKey(chat), null))?.ans?.lang || L);
+    await say(env, chat, ABOUT[La] + `\n\n${ORIGIN || ""}/about${La !== "ru" ? "?lang=" + La : ""}`,
+      { disable_web_page_preview: false, _noTr: true });
     return "about";
   }
   if (DELETE_ASK.test(text)) {                     // «удали мои данные» — владельцу сервиса, клиенту — подтверждение
@@ -2007,6 +2486,7 @@ export default {
   async scheduled(event, env, ctx) {
     ctx.waitUntil(wake(env).catch(e => console.log("cron wake error", e.stack || e)));
     ctx.waitUntil(watchdog(env).catch(e => console.log("watchdog error", e.stack || e)));
+    ctx.waitUntil(betaSweep(env).catch(e => console.log("sweep error", e.stack || e)));
   },
   async fetch(req, env, ctx) {
     const url = new URL(req.url);
@@ -2014,9 +2494,11 @@ export default {
     if (url.origin.startsWith("https://")) ORIGIN = url.origin;
     if (p === "/watch") {                      // GitHub Actions раз в 30 минут; ничего не раскрывает
       lastWatch = Date.now();
+      ctx.waitUntil(betaSweep(env).catch(e => console.log("sweep error", e.stack || e)));
       return json({ ok: true, state: await watchdog(env) });
     }
-    if (p !== "/svc/updates") maybeWatch(env, ctx);   // Python опрашивает очередь сам — это и есть «жив»
+    if (p !== "/svc/updates") maybeWatch(env, ctx);
+    if (isMulti(env)) maybeSweep(env, ctx);          // отзыв на 5-й день и вечерняя сводка — не чаще раза в полчаса   // Python опрашивает очередь сам — это и есть «жив»
     if (p === "/about" || p === "/about/") {
       return new Response(aboutHtml(url.searchParams.get("lang") || "ru"),
         { headers: { "content-type": "text/html; charset=utf-8", "cache-control": "public, max-age=300" } });
@@ -2077,7 +2559,17 @@ export default {
       if (p === "/svc/owner") return json({ chat: env.OWNER_CHAT || null });   // для .env сервера: не секрет
       if (p === "/svc/users") {                                // Python: кто клиент (этап 2)
         const users = [...(await usersMap(env)).values()].map(u => ({ chat: u.chat, status: u.status, lang: u.lang, name: u.name }));
-        return json({ multi: isMulti(env), limit: await userLimit(env), users });
+        const ents = ((await (await db(env)).prepare("SELECT k, v FROM kv WHERE k LIKE 'ent:%'").all()).results) || [];
+        const paidUntil = Object.fromEntries(ents.map(r => { try { return [r.k.slice(4), JSON.parse(r.v)?.until || 0]; } catch (e) { return [r.k.slice(4), 0]; } }));
+        for (const u of users) u.paid_until = paidUntil[u.chat] || 0;
+        return json({ multi: isMulti(env), limit: await userLimit(env), payments: payOn(env), users });
+      }
+      if (p === "/svc/stats") return json({ ok: true, text: await statsText(env) });   // Python: в дневной отчёт
+      if (p === "/svc/event" && req.method === "POST") {   // Python: событие воронки (например, лимит бесплатных)
+        const b = await req.json().catch(() => null);
+        if (!b || !b.ev) return json({ ok: false }, 400);
+        await track(env, b.chat || env.OWNER_CHAT, String(b.ev), b.meta ?? null);
+        return json({ ok: true });
       }
       if (p === "/svc/link" && req.method === "POST") {    // Python: прочитать объявление по ссылке
         const body = await req.json().catch(() => ({}));
@@ -2114,6 +2606,7 @@ export default {
         list.push({ ids: b.ids.map(Number).filter(Boolean).slice(0, 12), ref: String(b.ref).slice(0, 80),
                     line: String(b.line || "").slice(0, 140), at: Date.now() });
         await kvSet(env, ck, list.slice(-40));
+        await track(env, b.chat || env.OWNER_CHAT, "card");
         return json({ ok: true });
       }
       if (p === "/svc/pricemap" && req.method === "POST") {   // Python: сетка цен после среза рынка
@@ -2130,7 +2623,7 @@ export default {
       if (p === "/svc/bye") { await kvSet(env, "py_alive", null); return json({ ok: true }); }
       if (p === "/svc/setup") {
         const hook = await tg(env, "setWebhook", { url: url.origin + "/tg", secret_token: env.TG_SECRET || undefined,
-          allowed_updates: ["message", "edited_message", "callback_query", "business_connection",
+          allowed_updates: ["message", "edited_message", "callback_query", "pre_checkout_query", "business_connection",
                             "business_message", "edited_business_message", "deleted_business_messages"],
           drop_pending_updates: false });
         const me = await tg(env, "getMe", {});           // включён ли бизнес-режим в BotFather

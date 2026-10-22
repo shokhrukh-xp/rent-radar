@@ -17,7 +17,7 @@ from pathlib import Path
 
 log = logging.getLogger("rent-radar")
 
-REG = {"multi": False, "at": 0.0, "t": {}, "owner": None, "depth": 0}
+REG = {"multi": False, "at": 0.0, "t": {}, "owner": None, "depth": 0, "payments": False}
 REFRESH_EVERY = 60
 BROKER_SYNC_EVERY = 12 * 3600
 BROKER_COLS = "bid, source, name, phone, ads, districts, min_price, max_price, first_seen, deals, tg"
@@ -106,6 +106,7 @@ def refresh(cfg, store, sale, force=False, fetch=None):
     if users is None:                       # воркер не ответил — оставляем прежний список
         return list(REG["t"].values())
     REG["multi"] = bool(users.get("multi") or cfg.get("multi_user"))   # включает воркер (MULTI_USER=on)
+    REG["payments"] = bool(users.get("payments"))     # оплата включена (PAYMENTS=on) — бесплатным лимит карточек
     if not REG["multi"]:
         REG["t"] = {owner: REG["owner"]}
         return list(REG["t"].values())
@@ -126,6 +127,23 @@ def get(chat):
 
 def all_tenants():
     return list(REG["t"].values())
+
+
+def shared_store(store):
+    """Общие кэши (место по тексту поста, геокодер OSM) — в базе владельца: одно объявление и один адрес
+    разбираем один раз на всех пользователей, а не по разу на каждого (деньги за модель, лимит Nominatim)."""
+    o = REG.get("owner")
+    return o.store if o is not None and o._store is not None else store
+
+
+def paid(chat) -> bool:
+    """Есть оплаченный тариф (или оплата выключена, или это владелец)."""
+    if not REG.get("payments"):
+        return True
+    t = REG["t"].get(str(chat))
+    if t is None or t.owner:
+        return True
+    return float(t.info.get("paid_until") or 0) > time.time() * 1000
 
 
 def others():

@@ -3606,3 +3606,38 @@ with mock.patch.object(rr, "worker_post", _wp_), \
     assert len(_calls) == 2, _calls                                   # бюджет в сутки
 _ap2.unlink(missing_ok=True)
 print("OK — посты без точки: адрес и ориентир из текста, кэш и дневной бюджет")
+
+# ============ бета: общий кэш места для всех пользователей; лимит бесплатных карточек — только при включённой оплате ============
+import tenants as _tn
+_bp = Path("/tmp/test_beta.db"); _bp.unlink(missing_ok=True); Path("/tmp/test_beta2.db").unlink(missing_ok=True)
+_bs = rr.Store(_bp)
+_own = _tn.Tenant("1", cfg, owner=True, store=_bs)
+with mock.patch.dict(_tn.REG, {"owner": _own, "payments": False, "t": {}}):
+    _other = rr.Store(Path("/tmp/test_beta2.db"))
+    assert _tn.shared_store(_other) is _bs and _tn.paid("77")       # бета: оплата выключена — всё можно
+    _tn.REG["payments"] = True
+    _u = _tn.Tenant("77", cfg, info={"paid_until": 0})
+    _tn.REG["t"]["77"] = _u
+    assert not _tn.paid("77")
+    _BT = []
+    def _btg(c, m, pl, **k):
+        _BT.append((m, dict(pl)))
+        return {"ok": True, "result": {"message_id": 500 + len(_BT)}}
+    _bcfg = dict(cfg, telegram_chat_id="77", card_queue=True, worker_url="")
+    with mock.patch.object(rr, "tg_call", _btg), mock.patch.dict(cg._BIZ_STORE, {"store": _other}), \
+            mock.patch.object(rr, "remember_card", lambda *a, **k: None):
+        for i in range(1, 6):
+            rr.send_card(_bcfg, {"key": f"uybor:{i}", "photo_urls": []}, f"карточка {i}", ref=f"L:uybor:{i}", queue=True)
+        with mock.patch.object(rr, "_listing_any", lambda st, k: None):
+            for i in (1, 2, 3):
+                rr.card_action(_bcfg, _other, rr.default_settings(), f"Q:n|L:uybor:{i}", 500)
+    shown_ = [pl["text"] for m, pl in _BT if m == "sendMessage" and pl.get("text", "").startswith("карточка")]
+    assert len(shown_) == 3, shown_                                  # 3 бесплатных, остальные ждут
+    assert any("бесплатных" in pl.get("text", "") and "/plans" in pl.get("text", "") for m, pl in _BT)
+    assert len(_other.get_kv("card_queue")) == 2
+    _u.info["paid_until"] = (time.time() + 86400) * 1000               # оплатил — очередь пошла дальше
+    with mock.patch.object(rr, "tg_call", _btg), mock.patch.dict(cg._BIZ_STORE, {"store": _other}):
+        assert _tn.paid("77") and rr.show_next_card(_bcfg, _other)
+for _p in (_bp, Path("/tmp/test_beta2.db")):
+    _p.unlink(missing_ok=True)
+print("OK — бета: место по тексту разбирается раз на всех; без тарифа при включённой оплате — 3 карточки в день")

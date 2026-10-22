@@ -870,3 +870,101 @@ console.log("OK — по приглашению: новые — в заявки 
   await env.DB.prepare("DELETE FROM users").run(); W.resetUsersCache();
 }
 console.log("OK — по приглашению: ждущий, который присылает вариант, — маклер");
+
+// ── бета: ссылка-приглашение, знакомство с кнопками и языком, поддержка, тарифы, оплата Stars, отзыв, сводка, лимит модели
+{
+  const W = await import("../src/index.js");
+  W.resetUsersCache();
+  const envB = { ...env, MULTI_USER: "on", USER_LIMIT: "20", INVITE_ONLY: "on", WAKE_GH: "off" };
+  const cbq = (chat, data, mid = 50) => ({ update_id: ++uid, callback_query: { id: "cb" + uid, data, from: { id: +chat },
+    message: { message_id: mid, chat: { id: +chat } } } });
+  const to = chat => sent.filter(x => String(x.chat_id) === String(chat));
+  // приглашение на 2 места
+  await handleUpdate(envB, msg("/invite 2 чат релокантов"));
+  const link = sent.at(-1).text.match(/start=i([a-z0-9]+)/);
+  assert.ok(link && /2 мест/.test(sent.at(-1).text) && /релокантов/.test(sent.at(-1).text), sent.at(-1).text);
+  assert.equal(await handleUpdate(envB, msg("/start i" + link[1], "7401")), "joined");
+  assert.ok(await W.isClient(envB, "7401"));
+  const wel = to("7401").find(x => /Доступ открыт/.test(x.text || ""));
+  assert.ok(wel && wel.reply_markup.inline_keyboard.flat().some(b => b.callback_data === "ob:rent"), "кнопки знакомства клиенту можно");
+  assert.ok(sent.some(x => x.m === "setMyCommands" && x.scope?.chat_id === 7401));
+  assert.ok(sent.some(x => String(x.chat_id) === OWNER && /По приглашению «чат релокантов»/.test(x.text || "")));
+  assert.equal(await handleUpdate(envB, { ...msg("/start i" + link[1], "7402"), message: { ...msg("x", "7402").message,
+    text: "/start i" + link[1], from: { id: 7402, language_code: "en" } } }), "joined");
+  assert.ok(to("7402").some(x => /You're in/.test(x.text || "")), "англичанину — по-английски");
+  assert.equal(await handleUpdate(envB, msg("/start i" + link[1], "7403")), "waitlist");   // места по ссылке кончились
+  await handleUpdate(envB, msg("/invites"));
+  assert.ok(/пришли 2, осталось 0/.test(sent.at(-1).text));
+  // кнопка «Снять» — начало анкеты; язык — переключается
+  geminiQueue.push({ reply: "Какой район и бюджет?", ready: false, set: [{ k: "deal", v: "rent" }] });
+  assert.equal(await handleUpdate(envB, cbq("7401", "ob:rent")), "onboarding");
+  assert.ok(/Хочу снять квартиру/.test(geminiCalls.at(-1)));
+  assert.equal(await handleUpdate(envB, cbq("7401", "lang:uz")), "lang");
+  assert.ok(sent.some(x => x.m === "editMessageText" && /Kirish ochildi/.test(x.text || "")));
+  assert.equal((await svc("/svc/state")).ok, true);
+  // поддержка: /support → следующее сообщение владельцу; /reply — ответ клиенту
+  assert.equal(await handleUpdate(envB, msg("/support", "7401")), "support_start");
+  assert.equal(await handleUpdate(envB, msg("карточки не приходят", "7401")), "support");
+  assert.ok(sent.some(x => String(x.chat_id) === OWNER && /Поддержка/.test(x.text || "") && /reply 7401/.test(x.text || "")));
+  await handleUpdate(envB, msg("/reply 7401 Починили, проверьте"));
+  assert.ok(to("7401").some(x => /Починили, проверьте/.test(x.text || "")));
+  // тарифы: в бете — витрина и счёт нажатий
+  assert.equal(await handleUpdate(envB, msg("/plans", "7402")), "plans");
+  const pl = to("7402").at(-1);
+  assert.ok(/You're|beta|Rent · 30 days/.test(pl.text) && pl.reply_markup.inline_keyboard.flat().some(b => b.callback_data === "pl:rent"), pl.text);
+  assert.ok(!/⭐/.test(pl.text), "без оплаты звёзд не показываем");
+  assert.equal(await handleUpdate(envB, cbq("7402", "pl:reloc")), "plan");
+  assert.ok(sent.some(x => x.m === "answerCallbackQuery" && x.show_alert && /free in the beta/.test(x.text || "")));
+  assert.ok(W.PLANS_ASK.test("это платно?") && W.PLANS_ASK.test("сколько стоит ваш сервис") && !W.PLANS_ASK.test("сколько стоит квартира в Чиланзаре"));
+  // оплата включена: счёт в звёздах, проверка перед списанием, оплата → доступ
+  const envP = { ...envB, PAYMENTS: "on" };
+  await handleUpdate(envP, cbq("7402", "pl:rent"));
+  const inv = sent.filter(x => x.m === "sendInvoice").at(-1);
+  assert.ok(inv && inv.currency === "XTR" && inv.prices[0].amount === 500 && !inv.provider_token, JSON.stringify(inv));
+  await handleUpdate(envP, { update_id: ++uid, pre_checkout_query: { id: "pq1", from: { id: 7402 }, currency: "XTR", total_amount: 1,
+    invoice_payload: inv.payload } });
+  assert.equal(sent.filter(x => x.m === "answerPreCheckoutQuery").at(-1).ok, false);
+  await handleUpdate(envP, { update_id: ++uid, pre_checkout_query: { id: "pq2", from: { id: 7402 }, currency: "XTR", total_amount: 500,
+    invoice_payload: inv.payload } });
+  assert.equal(sent.filter(x => x.m === "answerPreCheckoutQuery").at(-1).ok, true);
+  assert.equal(await handleUpdate(envP, { update_id: ++uid, message: { message_id: 77, chat: { id: 7402 }, from: { id: 7402 },
+    successful_payment: { currency: "XTR", total_amount: 500, invoice_payload: inv.payload, telegram_payment_charge_id: "ch1" } } }), "paid");
+  const us = await (await worker.fetch(new Request("https://w.example/svc/users", { headers: { "x-svc": "svc" } }), envP, { waitUntil() {} })).json();
+  assert.ok(us.payments && us.users.find(u => u.chat === "7402").paid_until > Date.now() + 29 * 864e5);
+  assert.ok(sent.some(x => String(x.chat_id) === OWNER && /refund 7402 ch1/.test(x.text || "")));
+  await handleUpdate(envP, msg("/refund 7402 ch1"));
+  assert.ok(sent.some(x => x.m === "refundStarPayment" && x.telegram_payment_charge_id === "ch1"));
+  await handleUpdate(envB, msg("/price rent 450 30"));
+  assert.ok(/450 ⭐, 30 дн/.test(sent.at(-1).text));
+  // отзыв на 5-й день: был вход 6 дней назад и карточки
+  await env.DB.prepare("UPDATE users SET at=? WHERE chat='7401'").bind(Date.now() - 6 * 864e5).run(); W.resetUsersCache();
+  await worker.fetch(new Request("https://w.example/svc/cards", { method: "POST", headers: { "x-svc": "svc" },
+    body: JSON.stringify({ ids: [1], ref: "L:uybor:9", line: "2-комн", chat: "7401" }) }), envB, { waitUntil() {} });
+  await env.DB.prepare("DELETE FROM kv WHERE k='sweep_at'").run();
+  const sw = await W.betaSweep(envB);
+  assert.equal(sw, "asked:1", sw);
+  assert.ok(to("7401").some(x => x.reply_markup?.inline_keyboard?.flat().some(b => b.callback_data === "fb:s:found")));
+  assert.equal(await W.betaSweep(envB), "skip");          // не чаще раза в полчаса
+  await handleUpdate(envB, cbq("7401", "fb:s:found"));
+  assert.ok(to("7401").at(-1).reply_markup.inline_keyboard[0].length === 5);
+  await handleUpdate(envB, cbq("7401", "fb:r:5"));
+  await handleUpdate(envB, cbq("7401", "fb:p:100"));
+  geminiQueue.push({ reply: "Спасибо! Продолжаю искать.", ready: false, set: [] });
+  assert.equal(await handleUpdate(envB, msg("мало вариантов с фото", "7401")), "interview");   // отзыв — команде и дальше в разговор
+  assert.ok(sent.some(x => String(x.chat_id) === OWNER && /Отзыв/.test(x.text || "") && /мало вариантов/.test(x.text || "")));
+  // сводка владельцу
+  await handleUpdate(envB, msg("/stats"));
+  const st = sent.at(-1).text;
+  assert.ok(/Воронка/.test(st) && /Оценка: 5\.0 \(1\)/.test(st) && /нашли 1/.test(st) && /100 1/.test(st) && /reloc 1/.test(st), st);
+  // лимит модели на человека в день
+  const envL = { ...envB, AI_USER_DAY: "1" };
+  await env.DB.prepare("INSERT INTO usage (day, chat, calls, tin, tout) VALUES (?, '7402', 5, 0, 0) ON CONFLICT(day, chat) DO UPDATE SET calls=5")
+    .bind(new Date(Date.now() + 5 * 3600e3).toISOString().slice(0, 10)).run();
+  const before = geminiCalls.length;
+  await handleUpdate(envL, msg("ещё вопрос", "7402"));
+  assert.equal(geminiCalls.length, before);
+  assert.ok(/talked a lot today/.test(to("7402").at(-1).text));
+  geminiQueue.length = 0;
+  await env.DB.prepare("DELETE FROM users").run(); W.resetUsersCache();
+}
+console.log("OK — бета: приглашения, знакомство и язык, поддержка, тарифы, оплата звёздами, отзыв, сводка, лимит модели");

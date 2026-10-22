@@ -4819,9 +4819,46 @@ def enqueue_card(cfg, store, l, text, silent=False, ref=None):
     return ["q"]
 
 
+FREE_CARDS_PER_DAY = 3
+
+
+def free_limit_hit(cfg, store, q) -> bool:
+    """Оплата включена, а тарифа нет: бесплатно — FREE_CARDS_PER_DAY карточек в день, остальные ждут в очереди.
+    Один раз в день — сказать, сколько ждёт и как снять лимит. Без оплаты (бета) — никаких ограничений."""
+    chat = str(cfg.get("telegram_chat_id") or "")
+    if tenants.paid(chat):
+        return False
+    day = datetime.now(TASHKENT_TZ).strftime("%Y-%m-%d")
+    fc = store.get_kv("free_cards") or {}
+    if fc.get("d") != day:
+        fc = {"d": day, "n": 0}
+        store.set_kv("free_cards", fc)
+    if fc["n"] < FREE_CARDS_PER_DAY:
+        return False
+    if not fc.get("told"):
+        fc["told"] = True
+        store.set_kv("free_cards", fc)
+        tg_call(cfg, "sendMessage", {"chat_id": chat, "parse_mode": "HTML", "text":
+                f"На сегодня показала {FREE_CARDS_PER_DAY} бесплатных варианта. Ещё {len(q)} ждут в очереди — "
+                "завтра покажу дальше. Без ограничений — /plans"})
+        if cfg.get("worker_url"):
+            worker_post(cfg, "/svc/event", {"chat": chat, "ev": "free_limit", "meta": len(q)}, timeout=10)
+    return True
+
+
+def _count_free(cfg, store):
+    if tenants.paid(str(cfg.get("telegram_chat_id") or "")):
+        return
+    fc = store.get_kv("free_cards") or {}
+    fc["n"] = int(fc.get("n") or 0) + 1
+    store.set_kv("free_cards", fc)
+
+
 def show_next_card(cfg, store):
     """Следующая карточка из очереди: фото (с картой) альбомом, под ними текст с кнопками."""
     q = store.get_kv("card_queue") or []
+    if q and free_limit_hit(cfg, store, q):
+        return None
     while q:
         it = q.pop(0)
         store.set_kv("card_queue", q)
@@ -4845,6 +4882,7 @@ def show_next_card(cfg, store):
         ids = _send_card_now(cfg, it["l"], text, kb=card_kb(it["ref"], left, it["l"]), silent=it.get("silent"),
                              ref=it["ref"])
         if ids:
+            _count_free(cfg, store)
             store.set_kv("card_open", {"ref": it["ref"], "mid": (ids[-1] if isinstance(ids, list) else None),
                                        "ids": ids if isinstance(ids, list) else [], "text": text,
                                        "at": time.time()})
@@ -5542,7 +5580,7 @@ def sale_status_text(cfg: dict) -> str:
     return "\n".join(lines)
 
 
-AI_PLACE_PER_DAY = 150
+AI_PLACE_PER_DAY = 400          # на всех: кэш и счётчик общие (tenants.shared_store)
 PLACE_KEYS = ("street", "house", "landmark", "mahalla", "kvartal", "metro", "district")
 
 
@@ -5555,6 +5593,7 @@ def ai_locate(cfg, store, l, budget=AI_PLACE_PER_DAY):
         return g
     if not cfg.get("worker_url") or not l.get("key"):
         return g
+    store = tenants.shared_store(store)            # одно объявление — один разбор моделью на всех
     cache = store.get_kv("ai_place") or {}
     f = cache.get(l["key"])
     if f is None:
@@ -5919,12 +5958,15 @@ def run():
 
             _rent_listings(cfg, store, settings, name, listings, first_run, market)
             for t_ in tenants.others():                # те же объявления — другим пользователям, каждому по-своему
+                t0_ = time.time()
                 with tenants.ctx(t_):
                     try:
                         _rent_listings(t_.cfg, t_.store, t_.settings(), name, [dict(x) for x in listings],
                                        t_.store.counts()[0] == 0, analyst.market_stats(t_.store), harvest=False)
                     except Exception as e:
                         log.warning("[%s] пользователь %s: %s", name, t_.chat, e)
+                HEALTH["slow"] = max(HEALTH.get("slow", 0.0), time.time() - t0_)   # самый долгий разбор на одного
+                HEALTH["users"] = len(tenants.others())
 
         if not once and now >= next_sale_brokers:   # маклеры по продаже — для запросов на покупку
             next_sale_brokers = now + (sale_cfg.get("broker_interval_seconds") or BROKER_HARVEST_EVERY)
@@ -6007,7 +6049,7 @@ def run():
 # ------------------------------------------------------------------ здоровье --
 # Сколько проходов, падений и предупреждений за сутки — владельцу сервиса раз в день (без звука), падение
 # прохода — сразу (не чаще раза в час). Версия кода — в логе при старте: видно, что работает свежий код.
-HEALTH = {"warn": collections.Counter(), "errors": 0}
+HEALTH = {"warn": collections.Counter(), "errors": 0, "slow": 0.0, "users": 0}
 
 
 class _HealthCounter(logging.Handler):
@@ -6055,8 +6097,11 @@ def health_flush(cfg, store, started=False, crashed=None):
     w.update(HEALTH["warn"])
     h["warn"] = dict(w.most_common(30))
     h["version"] = code_version()
+    h["slow"] = round(max(float(h.get("slow") or 0), HEALTH.get("slow", 0.0)), 1)
+    h["users"] = max(int(h.get("users") or 0), HEALTH.get("users", 0))
     HEALTH["warn"].clear()
     HEALTH["errors"] = 0
+    HEALTH["slow"] = 0.0
     store.set_kv("health_day", h)
     return h
 
@@ -6068,6 +6113,8 @@ def send_health_report(cfg, h):
     lines = [f"🩺 <b>Ra'no за {d}</b>: {'всё работает' if ok else 'были сбои'} · проходов {h.get('passes', 0)}, "
              f"падений {h.get('crashes', 0)}, ошибок {h.get('errors', 0)}, предупреждений "
              f"{sum((h.get('warn') or {}).values())} · версия {h.get('version', '?')}"]
+    if h.get("users"):
+        lines.append(f"• клиентов {h['users'] + 1}, самый долгий разбор объявлений на одного — {h.get('slow', 0)} с")
     lines += [f"• ×{n} {escape_html(k)}" for k, n in top]
     tg_call(cfg, "sendMessage", {"chat_id": cfg.get("admin_chat_id") or cfg["telegram_chat_id"], "parse_mode": "HTML",
                                  "text": "\n".join(lines), "disable_notification": True, "_noTr": True})
