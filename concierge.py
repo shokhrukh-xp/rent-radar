@@ -782,6 +782,33 @@ def pending_answer(store, chat_id, hours=72):
     return r[0] if r else None
 
 
+def loc_from_answer(cfg, store, o, text) -> str:
+    """Просили уточнить адрес: где квартира по ответу продавца и внутри ли она области / радиуса клиента."""
+    rr = _rr()
+    import geo
+    st = {**rr.default_settings(), **(store.get_kv("settings") or {})}
+    ss = cfg.get("sale_search") or {}
+    areas = st.get("areas") or ss.get("areas")
+    near = st.get("near") or ss.get("near") or {}
+    if not areas and near.get("lat") is None:
+        return ""
+    l = {"key": f"ans:{o['oid']}:{int(time.time())}", "title": "", "text": text or "", "district": o.get("district")}
+    try:
+        g = geo.locate(dict(l))
+        if g:
+            l["geo"] = g
+        rr.ai_locate(cfg, store, l)
+    except Exception as e:
+        rr.log.info("[место] из ответа продавца: %s", e)
+    reason = geo.area_reject(l, areas) if areas else geo.too_far(l, near)
+    label = ((l.get("geo") or {}).get("label") or "").strip()
+    if not reason:
+        return "📍 " + (f"{rr.escape_html(label)} — " if label else "") + "внутри вашей области ✅"
+    if reason.startswith(geo.LOC_UNSURE):
+        return "📍 Точного адреса в ответе нет — можно попросить дом или ориентир."
+    return f"📍 По ответу продавца — {rr.escape_html(reason)}: не подходит."
+
+
 def attach_answer(cfg, store, oid, text):
     """Ответ маклера на «уточните детали» — к своему варианту, а не новой карточкой."""
     rr = _rr()
@@ -802,12 +829,17 @@ def attach_answer(cfg, store, oid, text):
     store.conn.execute("UPDATE broker_offers SET " + ", ".join(f"{k}=?" for k in sets)
                        + " WHERE oid=?", (*sets.values(), oid))
     store.conn.commit()
+    loc = ""
+    if (o.get("extra") or {}).get("loc_ask"):    # спрашивали адрес — сразу сказать, подходит ли место
+        loc = loc_from_answer(cfg, store, o, text)
+        if loc and not loc.startswith("📍 Точного"):
+            _set_extra(store, oid, loc_ask=None)
     o = get_offer(store, oid)
     rr.tg_call(cfg, "sendMessage", {
         "chat_id": cfg["telegram_chat_id"], "parse_mode": "HTML",
         "text": f"💬 <b>Маклер ответил по варианту #{oid}</b> — принесла:\n\n"
                 f"{rr.escape_html(__import__('i18n').quote_for_client(cfg, (text or '').strip()[:800]))}\n\n"
-                + offer_card(store, cfg, o)[:1500],
+                + (loc + "\n\n" if loc else "") + offer_card(store, cfg, o)[:1500],
         "reply_markup": json.dumps({"inline_keyboard": [[
             {"text": "📂 Карточка", "callback_data": f"s:o:{oid}"},
             {"text": "📋 Шортлист", "callback_data": "s:show"}]]}, ensure_ascii=False)})

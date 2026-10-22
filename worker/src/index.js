@@ -117,7 +117,8 @@ const SYSTEM = `Ты — Ra'no, ИИ-ассистент по подбору жи
 Твой характер: живая, весёлая девушка из Ташкента с лёгким юмором, которая обожает разбираться
 в квартирах. О себе — только в женском роде («нашла», «поняла», «записала»). К клиенту — на «вы».
 Можно 1–2 эмодзи и лёгкую шутку на сообщение, но по делу. К месту — узбекские словечки
-(Assalomu alaykum, rahmat, zo'r, xo'p). Не шути про деньги клиента, риски, документы и отказы —
+(Assalomu alaykum, rahmat, zo'r, xo'p) — только латиницей и ровно так, никогда кириллицей («Хо'р», «Рахмат» — ошибка);
+не чаще одного на сообщение и не в каждом ответе. Не шути про деньги клиента, риски, документы и отказы —
 там спокойно и ясно. Без сарказма над клиентом, маклерами и районами.
 
 Как вести разговор:
@@ -1650,20 +1651,9 @@ async function queueAndWake(env, upd, chat, note) {
 }
 
 // ───────────────────────────── интервью ─────────────────────────────
-const GREET = {
-  ru: "Привет! Я Ra'no 👋 — ИИ-ассистент, которая обожает квартиры в Ташкенте: аренда и покупка.\n\n" +
-    "Ищу двумя способами:\n🔎 Сначала сама — каждый день прочёсываю сайты и Telegram-каналы, выгодное приношу сразу.\n" +
-    "📇 Если на сайтах пусто — подберу маклеров: нажмёте на имя, запрос уже вписан, останется «Отправить».\n" +
-    "К каждому варианту — честный разбор цены: дешевле рынка или кто-то загнул 😉\n\n" +
-    "С чего начнём? Напишите своими словами, что ищете, — например: «купить двушку в центре до $50 000, нужна ипотека».",
-  uz: "Salom! Men Ra'no 👋 — Toshkentdagi kvartiralarni juda yaxshi ko'radigan AI-yordamchiman: ijara va sotib olish.\n\n" +
-    "🔎 O'zim har kuni saytlar va Telegram-kanallarni ko'rib chiqaman, zo'r variantlarni darhol olib kelaman.\n" +
-    "📇 Saytlarda bo'lmasa — maklerlarni tanlayman: ismini bosasiz, so'rov tayyor yozilgan, faqat «Yuborish»ni bosasiz.\n" +
-    "Har bir variantga — halol narx tahlili 😉\n\n" +
-    "Nima qidirayotganingizni yozing — masalan: «markazda 2 xonali, $50 000 gacha, ipoteka kerak».",
-  en: "Hi! I'm Ra'no, an AI assistant for finding a home in Tashkent. Tell me in your own words what you're looking for — " +
-    "e.g. \"buy a 2-room flat in the centre up to $50,000, mortgage needed\". No buttons to learn — just write to me.",
-};
+// «/new», «/start» без анкеты: что умею и кнопки «что ищем» (как при первом входе, без «доступ открыт»)
+const GREET = Object.fromEntries(Object.entries(WELCOME).map(([l, t]) =>
+  [l, t.replace(/^🎉 [^!]+! /, { ru: "Привет! ", uz: "Salom! ", en: "Hi! " }[l])]));
 // Профиль бота: «О боте» (до 120 символов) и экран до Start (до 512) — русский по умолчанию, узбекский отдельно
 export const AVATAR_URL = "https://raw.githubusercontent.com/shokhrukh-xp/rent-radar/main/docs/brand/rano_avatar_navy.jpg";
 export const PROFILE = {
@@ -2000,7 +1990,7 @@ async function startInterview(env, chat, fresh, lang = "ru") {
     iv = emptyIv();
     if (keepLang) iv.ans.lang = keepLang;               // «начать заново» — язык клиента остаётся
     await kvSet(env, ivKey(chat), iv);
-    await say(env, chat, GREET[lang] || GREET.ru, { reply_markup: OWNER_KB });
+    await say(env, chat, GREET[L3(lang)], { reply_markup: welcomeKb(lang, false), _noTr: true });
     return;
   }
   await say(env, chat, `С возвращением! 🙌 Сейчас ищем: ${summary(iv.ans)}.\n` +
@@ -2072,10 +2062,10 @@ export async function handleUpdate(env, upd) {
       await queueAndWake(env, upd);
       return "outreach";
     }
-    if (/^Q:[sna]\|/.test(data)) {             // карточка из очереди: ответ сразу, дальше — Python (и следующая)
-      await track(env, chat, { s: "save", n: "skip", a: "ask" }[data[2]]);
+    if (/^Q:[snal]\|/.test(data)) {            // карточка из очереди: ответ сразу, дальше — Python (и следующая)
+      await track(env, chat, { s: "save", n: "skip", a: "ask", l: "loc_ask" }[data[2]]);
       await tg(env, "answerCallbackQuery", { callback_query_id: cb.id,
-        text: { s: "💾 Сохранила", n: "⏭ Дальше", a: "✍️ Готовлю вопросы продавцу" }[data[2]] });
+        text: { s: "💾 Сохранила", n: "⏭ Дальше", a: "✍️ Готовлю вопросы продавцу", l: "📍 Спрашиваю адрес" }[data[2]] });
       await tg(env, "editMessageReplyMarkup", { chat_id: chat, message_id: cb.message.message_id, reply_markup: { inline_keyboard: [] } });
       upd.callback_query = { ...cb, _toast_done: true };
       await queueAndWake(env, upd);

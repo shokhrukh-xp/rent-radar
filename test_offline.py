@@ -3641,3 +3641,46 @@ with mock.patch.dict(_tn.REG, {"owner": _own, "payments": False, "t": {}}):
 for _p in (_bp, Path("/tmp/test_beta2.db")):
     _p.unlink(missing_ok=True)
 print("OK — бета: место по тексту разбирается раз на всех; без тарифа при включённой оплате — 3 карточки в день")
+
+# ============ неточный адрес: не выбрасываем молча — «уточнить у продавца?» в одно нажатие ============
+import geo as _g2
+_near = {"lat": 41.3005, "lon": 69.2735, "km": 2, "label": "центр"}
+_lx = {"key": "uybor:77", "district": "Мирабад", "geo": {"src": "район"}, "phones": ["901234567"], "url": "https://uybor.uz/listings/77",
+       "title": "2-комн, Мирабад", "photo_urls": ["https://img/1.jpg"]}
+with mock.patch.object(_g2, "districts_within", lambda *a: ["Мирабад", "Яккасарай"]):
+    assert _g2.loc_unsure(dict(_lx), None, _near)
+    assert not _g2.loc_unsure(dict(_lx, district="Сергели"), None, _near)        # район далеко — не спрашиваем
+    assert rr.loc_ask_ok(dict(_lx), {"near": _near})
+    assert not rr.loc_ask_ok(dict(_lx, phones=[], seller=""), {"near": _near})    # спросить некого — как раньше
+assert not _g2.loc_unsure(dict(_lx, geo={"lat": 41.2, "lon": 69.1, "src": "сайт", "spread": 0}), None, _near)  # точно и далеко
+_kbl = rr.card_kb("L:uybor:77", 0, _lx, "loc")
+assert [b["callback_data"] for r in _kbl["inline_keyboard"] for b in r] == ["Q:l|L:uybor:77", "Q:n|L:uybor:77"]
+_lp = Path("/tmp/test_loc.db"); _lp.unlink(missing_ok=True)
+_ls = rr.Store(_lp)
+_LT = []
+def _ltg(c, m, pl, **k):
+    _LT.append((m, dict(pl)))
+    return {"ok": True, "result": {"message_id": 700 + len(_LT)}}
+_lcfg = dict(cfg, telegram_chat_id="78", card_queue=True, worker_url="")
+with mock.patch.object(rr, "tg_call", _ltg), mock.patch.dict(cg._BIZ_STORE, {"store": _ls}), \
+        mock.patch.object(rr, "remember_card", lambda *a, **k: None):
+    _ids = rr.send_loc_ask(_lcfg, _ls, dict(_lx), "🏠 <b>2-комн · 60 м² · этаж 3/9</b>\n💰 $700/мес\n📍 Мирабад")
+    assert _ids
+    _m = [pl for m, pl in _LT if m == "sendMessage"][-1]
+    assert "адрес неточный" in _m["text"] and "Q:l|L:uybor:77" in _m["reply_markup"]
+    for i in range(rr.LOC_ASK_PER_DAY):                                          # не больше N в день
+        rr.send_loc_ask(_lcfg, _ls, dict(_lx, key=f"uybor:{80 + i}"), "x")
+    assert (_ls.get_kv("loc_ask_day") or {})["n"] == rr.LOC_ASK_PER_DAY
+    # нажали «Уточнить адрес» — вариант в шортлист с пометкой, вопрос продавцу
+    _ls.save(dict(_lx, source="uybor", text="2-комн, Мирабад", price_value=700, price_currency="USD", price_usd=700, created_at=""), notified=True)
+    with mock.patch.object(cg, "request_details", lambda c, s, oids: "ok"):
+        rr.handle_callback("L:loc:uybor:77", rr.default_settings(), _ls, _lcfg, None)
+    _oid = _ls.conn.execute("SELECT oid FROM broker_offers ORDER BY oid DESC LIMIT 1").fetchone()[0]
+    assert cg.get_offer(_ls, _oid)["extra"].get("loc_ask")
+    # продавец ответил: метро рядом — внутри радиуса
+    _ls.set_kv("settings", {"near": _near})
+    _ans = cg.loc_from_answer(_lcfg, _ls, cg.get_offer(_ls, _oid), "Возле метро Ойбек, дом 12")
+    assert "внутри" in _ans, _ans
+    assert "не подходит" in cg.loc_from_answer(_lcfg, _ls, cg.get_offer(_ls, _oid), "Сергели, метро Чоштепа")
+_lp.unlink(missing_ok=True)
+print("OK — неточный адрес: вопрос «уточнить у продавца?» вместо карточки, лимит в день, проверка места по ответу")

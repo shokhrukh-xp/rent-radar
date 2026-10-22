@@ -531,6 +531,39 @@ def km_to_areas(lat, lon, areas) -> float:
     return min((km(lat, lon, p[0], p[1]) for a in areas or [] for p in a), default=99.0)
 
 
+LOC_UNSURE = ("точный адрес не указан", "место примерное")
+
+
+def loc_unsure(l: dict, areas=None, near=None) -> bool:
+    """Место не проверить (нет точного адреса или он примерный), но по району или примерной точке вариант
+    может быть внутри области / радиуса — стоит спросить продавца, а не отбрасывать молча."""
+    near = near or {}
+    if areas:
+        reason = area_reject(l, areas)
+    elif near.get("lat") is not None:
+        reason = too_far(l, near)
+    else:
+        return False
+    if not reason.startswith(LOC_UNSURE):
+        return False
+    g = l.get("geo") or {}
+    if g.get("lat") is not None and g.get("src") != "район":      # примерная точка: рядом с областью / в радиусе
+        sp = float(g.get("spread") or 1.0)
+        if areas:
+            return in_areas(g["lat"], g["lon"], areas) or km_to_areas(g["lat"], g["lon"], areas) <= sp
+        return km(near["lat"], near["lon"], g["lat"], g["lon"]) <= float(near.get("km", 2)) + sp
+    d = l.get("district")
+    if not d:
+        return False
+    if areas:                                  # район задевает нарисованную область
+        pts = [p for a in areas for p in a if len(a) >= 3]
+        if not pts:
+            return False
+        cs = [(sum(p[0] for p in a) / len(a), sum(p[1] for p in a) / len(a)) for a in areas if len(a) >= 3]
+        return d in {district_at(p[0], p[1], 1.2) for p in pts + cs}
+    return d in districts_within(near["lat"], near["lon"], float(near.get("km", 2)))
+
+
 def area_reject(l: dict, areas) -> str:
     """Причина отказа или '': внутри нарисованных областей и с точным местом."""
     if not areas:

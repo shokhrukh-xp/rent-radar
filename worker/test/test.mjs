@@ -86,8 +86,8 @@ assert.equal(r.status, 403);
 
 // ── /start → приветствие и снятие старой клавиатуры
 await handleUpdate(env, msg("/start"));
-assert.match(texts().at(-1), /Я Ra'no 👋 — ИИ-ассистент/);
-assert.deepEqual(sent.at(-1).reply_markup, OWNER_KB);              // постоянные кнопки внизу
+assert.match(texts().at(-1), /Я Ra'no — ваш личный ИИ-помощник/);
+assert.ok(sent.at(-1).reply_markup.inline_keyboard.flat().some(b => b.callback_data === "ob:buy"));   // «что ищем» кнопками
 assert.doesNotMatch(texts().at(-1), /\/new/);                       // команды учить не нужно
 
 // ── ход 1: модель разобрала часть, спрашивает дальше — в очередь ничего
@@ -157,7 +157,7 @@ assert.equal(q.result[1].message.text, "Мой собственный текст
 const id4 = q.result[1].update_id;
 await handleUpdate(env, { update_id: ++uid, callback_query: { id: "c2", data: "q:again",
   message: { message_id: 9, chat: { id: +OWNER } } } });
-assert.match(texts().at(-1), /Ищу двумя способами/);
+assert.match(texts().at(-1), /ваш личный ИИ-помощник/);
 q = await (await svc(`/svc/updates?after=${id4}`)).json();
 assert.equal(q.result.length, 0);
 
@@ -228,7 +228,7 @@ sent.length = 0;
 await handleUpdate(env, msg(BTN.more));
 assert.ok(!sent.at(-1).reply_markup && /напиши маклерам/.test(texts().at(-1)));
 await handleUpdate(env, msg(BTN.search));
-assert.match(texts().at(-1), /Сейчас ищем|Ищу двумя способами/);
+assert.match(texts().at(-1), /Сейчас ищем|ваш личный ИИ-помощник/);
 // «⋯ Ещё» → шортлист: колбэк превращается в команду для Python
 await handleUpdate(env, { update_id: ++uid, callback_query: { id: "c9", data: "cmd:/shortlist", message: { message_id: 3, chat: { id: +OWNER } } } });
 got = await drain();
@@ -240,7 +240,7 @@ got = await drain();
 assert.equal(got.at(-1).message.text, "/offers");
 geminiQueue.push({ reply: "Хорошо.", ready: false, set: [], intent: "restart" });
 await handleUpdate(env, msg("давай начнём заново"));
-assert.match(texts().at(-1), /Ищу двумя способами/);                 // без деталей — приветствие
+assert.match(texts().at(-1), /ваш личный ИИ-помощник/);                 // без деталей — приветствие
 geminiQueue.push({ reply: "Ищем аренду. В каком районе?", ready: false, set: [{ k: "deal", v: "rent" }], intent: "restart" });
 await handleUpdate(env, msg("давай заново, теперь аренда"));
 assert.match(texts().at(-1), /С чистого листа!\n\nИщем аренду/);

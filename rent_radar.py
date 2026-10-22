@@ -3261,12 +3261,14 @@ def handle_callback(data: str, settings: dict, store, cfg: dict, message_id=None
         finally:
             sst.conn.close()
         return search_like(cfg, store, l, settings), None
-    if d.startswith("L:a:"):                   # из чата: «уточни» по объявлению — в шортлист и спросить
-        key = d[4:]
+    if d.startswith(("L:a:", "L:loc:")):       # из чата: «уточни» по объявлению — в шортлист и спросить
+        key = d.split(":", 2)[2]
         l = _listing_any(store, key)
         if not l:
             return "Объявление не найдено", None
         oid, _ = concierge.add_site_offer(cfg, store, l)
+        if d.startswith("L:loc:"):             # ответ продавца проверим: внутри ли области
+            concierge._set_extra(store, oid, loc_ask=True)
         return concierge.request_details(cfg, store, [oid]), None
     if d.startswith("L:v:"):                   # фото и разбор объявления из подборки
         return show_site_listing(cfg, d[4:].split("|")[0]), None
@@ -4176,7 +4178,9 @@ def sale_reject(l: dict, ss: dict, store, cfg) -> tuple:
                 log.info("[место] %s: %s", l.get("key"), e)
         far = geo.area_reject(l, ss["areas"]) if ss.get("areas") else geo.too_far(l, near)
         if far:
-            return far, False
+            if not (geo.loc_unsure(l, ss.get("areas"), near) and can_ask_seller("L:" + (l.get("key") or ""), l)):
+                return far, False
+            l["_loc_ask"] = True               # адрес неточный, но район подходит — спросим продавца
     elif ss.get("districts") and l.get("district") not in ss["districts"]:
         return f"район {l.get('district') or 'не указан'}", False
 
@@ -4794,8 +4798,11 @@ def can_ask_seller(ref, l) -> bool:
     return bool([p for p in (l.get("phones") or []) if p]) or str(l.get("seller") or "").startswith("@")
 
 
-def card_kb(ref, left=0, l=None):
+def card_kb(ref, left=0, l=None, kind=""):
     l = l or {}
+    if kind == "loc":                          # адрес неточный — сначала уточнить у продавца
+        return {"inline_keyboard": [[{"text": t("📍 Уточнить адрес"), "callback_data": f"Q:l|{ref}"[:64]},
+                                     {"text": t("⏭ Пропустить"), "callback_data": f"Q:n|{ref}"[:64]}]]}
     rows = [[{"text": t("💾 Сохранить"), "callback_data": f"Q:s|{ref}"[:64]},
              {"text": t("⏭ Пропустить"), "callback_data": f"Q:n|{ref}"[:64]}]]
     if can_ask_seller(ref, l):
@@ -4805,14 +4812,14 @@ def card_kb(ref, left=0, l=None):
     return {"inline_keyboard": rows}
 
 
-def enqueue_card(cfg, store, l, text, silent=False, ref=None):
+def enqueue_card(cfg, store, l, text, silent=False, ref=None, kind=""):
     """В очередь. Ничего не открыто — сразу показываем первую. Возвращает ["q"] (принято) или id показанной."""
     q = store.get_kv("card_queue") or []
     op = store.get_kv("card_open") or {}
     if op.get("ref") == ref or any(x.get("ref") == ref for x in q):
         return ["q"]
     q.append({"ref": ref, "l": {k: l.get(k) for k in CARD_KEEP if l.get(k) is not None},
-              "text": text, "silent": bool(silent), "at": time.time()})
+              "text": text, "silent": bool(silent), "at": time.time(), **({"kind": kind} if kind else {})})
     store.set_kv("card_queue", q[-CARD_QUEUE_MAX:])
     if not op.get("ref"):
         return show_next_card(cfg, store) or ["q"]
@@ -4879,8 +4886,8 @@ def show_next_card(cfg, store):
             still_actual(cfg, l_, older_h=0)
             it["l"] = l_
         text += (f"\n\n<i>В очереди ещё {left}</i>" if left else "")
-        ids = _send_card_now(cfg, it["l"], text, kb=card_kb(it["ref"], left, it["l"]), silent=it.get("silent"),
-                             ref=it["ref"])
+        ids = _send_card_now(cfg, it["l"], text, kb=card_kb(it["ref"], left, it["l"], it.get("kind", "")),
+                             silent=it.get("silent"), ref=it["ref"])
         if ids:
             _count_free(cfg, store)
             store.set_kv("card_open", {"ref": it["ref"], "mid": (ids[-1] if isinstance(ids, list) else None),
@@ -4996,7 +5003,7 @@ def card_action(cfg, store, settings, d, message_id=None):
     act, _, ref = d[2:].partition("|")
     kind, _, key = ref.partition(":")
     if kind == "L":
-        sub = {"s": f"L:s:{key}", "n": f"L:n:{key}", "a": f"L:a:{key}"}.get(act)
+        sub = {"s": f"L:s:{key}", "n": f"L:n:{key}", "a": f"L:a:{key}", "l": f"L:loc:{key}"}.get(act)
     elif kind == "O":
         sub = {"s": f"o:like:{key}", "n": f"o:skip:{key}:x", "a": f"o:ask:{key}"}.get(act)
     else:
@@ -5005,7 +5012,8 @@ def card_action(cfg, store, settings, d, message_id=None):
     if sub:
         toast, _ = handle_callback(sub, settings, store, cfg, None)
     status = {"s": "💾 Сохранила в шортлист", "n": "⏭ Пропущено",
-              "a": "✍️ Уточняю у продавца — подробности ниже"}.get(act, "")
+              "a": "✍️ Уточняю у продавца — подробности ниже",
+              "l": "📍 Уточняю адрес у продавца — подробности ниже"}.get(act, "")
     op = store.get_kv("card_open") or {}
     if op.get("ref") == ref:
         if act == "n" and op.get("ids"):     # пропущенную убираем из чата целиком, остаётся строка «пропущено»
@@ -5025,16 +5033,60 @@ def card_action(cfg, store, settings, d, message_id=None):
     return toast or status
 
 
-def send_card(cfg, l: dict, text: str, kb: dict = None, silent: bool = False, ref: str = None, queue=False):
+def send_card(cfg, l: dict, text: str, kb: dict = None, silent: bool = False, ref: str = None, queue=False,
+              kind=""):
     """Карточка. queue=True — найденное само (не по просьбе клиента): в очередь «по одной с кнопками»,
-    если она включена (cfg card_queue). Иначе — сразу."""
+    если она включена (cfg card_queue). Иначе — сразу. kind="loc" — «адрес неточный, уточнить?»."""
     st = _queue_store() if queue and ref and cfg.get("card_queue") else None
     if st is not None:
         try:
-            return enqueue_card(cfg, st, l, text, silent=silent, ref=ref)
+            return enqueue_card(cfg, st, l, text, silent=silent, ref=ref, kind=kind)
         except Exception as e:
             log.warning("очередь карточек: %s — шлю сразу", e)
+    if kind and kb is None:
+        kb = card_kb(ref, 0, l, kind)
     return _send_card_now(cfg, l, text, kb=kb, silent=silent, ref=ref)
+
+
+LOC_ASK_PER_DAY = 6
+
+
+def loc_ask_ok(l: dict, settings: dict) -> bool:
+    """Отсеялось только из-за места: адрес неточный, но район подходит, продавцу можно написать,
+    а по остальным условиям вариант подходит — тогда не выбрасываем, а предлагаем уточнить."""
+    if not geo.loc_unsure(l, settings.get("areas"), settings.get("near")):
+        return False
+    if not can_ask_seller("L:" + (l.get("key") or ""), l):
+        return False                           # спросить некого — такие не показываем, как и раньше
+    rest = {k: v for k, v in settings.items() if k not in ("areas", "near")}
+    return passes_user_filters(l, rest)
+
+
+def send_loc_ask(cfg, store, l: dict, card_text: str, silent=False):
+    """Вместо полной карточки — «есть вариант, адрес неточный, уточнить?» (с фото). Не больше LOC_ASK_PER_DAY в день.
+    Нажал «Уточнить адрес» — Ra'no спрашивает продавца от имени клиента; полная карточка — с его ответом."""
+    day = datetime.now(TASHKENT_TZ).strftime("%Y-%m-%d")
+    b = store.get_kv("loc_ask_day") or {}
+    if b.get("d") != day:
+        b = {"d": day, "n": 0}
+    if b["n"] >= LOC_ASK_PER_DAY:
+        return False
+    g = l.get("geo") or {}
+    seen_ = ", ".join(x for x in (l.get("district") and f"{l['district']} район",
+                                  g.get("label") if g.get("src") != "район" else "") if x)
+    text = ("📍 <b>Есть вариант, но адрес неточный</b> — не могу проверить, что он в нужном месте.\n"
+            f"{escape_html(card_line(card_text))}\n"
+            + (f"Видно только: {escape_html(seen_)}\n" if seen_ else "")
+            + "По остальным условиям подходит. Уточнить у продавца, где именно? Спрошу от вашего имени — "
+              "полную карточку пришлю с его ответом.")
+    if str(l.get("url") or "").startswith("http"):
+        text += f'\n<a href="{escape_html(l["url"])}">Объявление</a>'
+    ids = send_card(cfg, l, text, silent=silent, ref="L:" + (l.get("key") or ""), queue=True, kind="loc")
+    if ids:
+        b["n"] += 1
+        store.set_kv("loc_ask_day", b)
+        log.info("[место] спросить адрес? %s", (l.get("title") or "")[:50])
+    return ids
 
 
 def _send_card_now(cfg, l: dict, text: str, kb: dict = None, silent: bool = False, ref: str = None):
@@ -5373,6 +5425,10 @@ def run_sale_search(cfg: dict, store, settings: dict, force: bool = False) -> in
             photo_budget[0] -= 1
         if sale_sources.photo_facts(cfg, store, l):      # на фото график платежей или ЖК — цена и место точнее
             why_ = sale_sources.recheck(l, ss, store, cfg)
+            if not why_:
+                l.pop("_loc_ask", None)                  # место нашлось — и оно внутри
+            elif l.get("_loc_ask") and why_.startswith(geo.LOC_UNSURE):
+                why_ = ""
             if why_:
                 store.save(l, notified=False)
                 log.info("[продажа] мимо после фото — %s: %s", why_, l["title"][:45])
@@ -5383,6 +5439,11 @@ def run_sale_search(cfg: dict, store, settings: dict, force: bool = False) -> in
         if not sale_sources.has_photos(l):           # без фото не сравнить — не показываем
             store.save(l, notified=False)
             log.info("[продажа] без фото — не показываю: %s", l["title"][:50])
+            continue
+        if l.pop("_loc_ask", False):                 # адрес неточный — не карточкой, а «уточнить у продавца?»
+            ids = send_loc_ask(cfg, store, l if settings.get("photos", True) else dict(l, photo_urls=[]),
+                               format_sale_card(store, l, cfg), silent=is_night())
+            store.save(l, notified=bool(ids))
             continue
         if mins is not None or (strong and day.get("instant", 0) + capped < cap):
             silent = is_night()
@@ -5684,9 +5745,14 @@ def _rent_listings(cfg, store, settings, name, listings, first_run, market, harv
                 ai_locate(cfg, store, l)
             except Exception as e:
                 log.info("[место] не определила по тексту: %s", e)
-        if not passes_filters(l, eff) or not passes_user_filters(l, settings):
+        if not passes_filters(l, eff):
             store.save(l, notified=False)
             continue
+        if not passes_user_filters(l, settings):
+            if not loc_ask_ok(l, settings):
+                store.save(l, notified=False)
+                continue
+            l["_loc_ask"] = True                # адрес неточный — дальше те же проверки, но вместо карточки вопрос
 
         reject = relevance_reject(l, cfg, settings, store)
         if reject:
@@ -5717,8 +5783,11 @@ def _rent_listings(cfg, store, settings, name, listings, first_run, market, harv
             analyst.score_listing(l, store, cfg, market, settings)
         except Exception as e:
             log.warning("анализ %s не удался: %s", l.get("key"), e)
-        ok = send_listing(cfg, settings, l, likely_makler, silent=is_night())
-        store.save(l, notified=ok)
+        if l.pop("_loc_ask", False):
+            ok = send_loc_ask(cfg, store, l, format_message(l, cfg, likely_makler), silent=is_night())
+        else:
+            ok = send_listing(cfg, settings, l, likely_makler, silent=is_night())
+        store.save(l, notified=bool(ok))
         if ok:
             fresh += 1
             log.info("[%s] уведомление: %s", name, l["title"][:60])
