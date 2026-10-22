@@ -821,7 +821,8 @@ console.log("OK — карточки по одной: кнопки «Сохра�
 
 // ── «кому служит Ra'no»: страница /about и команда; «удали мои данные» — владельцу сервиса
 {
-  const page = await (await worker.fetch(new Request("https://w.example/about"), env, { waitUntil() {} })).text();
+  assert.ok(/rieltor emas/.test(await (await worker.fetch(new Request("https://w.example/about"), env, { waitUntil() {} })).text()));   // по умолчанию — узбекский
+  const page = await (await worker.fetch(new Request("https://w.example/about?lang=ru"), env, { waitUntil() {} })).text();
   assert.ok(/Не оказывает риэлторских услуг/.test(page) && /только вы/.test(page) && /Xplorence/.test(page));
   const pageUz = await (await worker.fetch(new Request("https://w.example/about?lang=uz"), env, { waitUntil() {} })).text();
   assert.ok(/rieltor emas/.test(pageUz));
@@ -885,22 +886,24 @@ console.log("OK — по приглашению: ждущий, который п
   assert.ok(link && /2 мест/.test(sent.at(-1).text) && /релокантов/.test(sent.at(-1).text), sent.at(-1).text);
   assert.equal(await handleUpdate(envB, msg("/start i" + link[1], "7401")), "joined");
   assert.ok(await W.isClient(envB, "7401"));
-  const wel = to("7401").find(x => /Доступ открыт/.test(x.text || ""));
+  const wel = to("7401").find(x => /Kirish ochildi/.test(x.text || ""));        // по умолчанию — узбекский
   assert.ok(wel && wel.reply_markup.inline_keyboard.flat().some(b => b.callback_data === "ob:rent"), "кнопки знакомства клиенту можно");
   assert.ok(sent.some(x => x.m === "setMyCommands" && x.scope?.chat_id === 7401));
   assert.ok(sent.some(x => String(x.chat_id) === OWNER && /По приглашению «чат релокантов»/.test(x.text || "")));
   assert.equal(await handleUpdate(envB, { ...msg("/start i" + link[1], "7402"), message: { ...msg("x", "7402").message,
     text: "/start i" + link[1], from: { id: 7402, language_code: "en" } } }), "joined");
-  assert.ok(to("7402").some(x => /You're in/.test(x.text || "")), "англичанину — по-английски");
+  assert.ok(to("7402").some(x => /Kirish ochildi/.test(x.text || "")), "узбекский для всех, язык — кнопкой");
+  assert.ok(wel.reply_markup.inline_keyboard.flat().some(b => b.callback_data === "lang:ru"));
   assert.equal(await handleUpdate(envB, msg("/start i" + link[1], "7403")), "waitlist");   // места по ссылке кончились
   await handleUpdate(envB, msg("/invites"));
   assert.ok(/пришли 2, осталось 0/.test(sent.at(-1).text));
   // кнопка «Снять» — начало анкеты; язык — переключается
+  assert.equal(await handleUpdate(envB, cbq("7401", "lang:ru")), "lang");
+  assert.ok(sent.some(x => x.m === "editMessageText" && /Доступ открыт/.test(x.text || "")));
   geminiQueue.push({ reply: "Какой район и бюджет?", ready: false, set: [{ k: "deal", v: "rent" }] });
   assert.equal(await handleUpdate(envB, cbq("7401", "ob:rent")), "onboarding");
   assert.ok(/Хочу снять квартиру/.test(geminiCalls.at(-1)));
-  assert.equal(await handleUpdate(envB, cbq("7401", "lang:uz")), "lang");
-  assert.ok(sent.some(x => x.m === "editMessageText" && /Kirish ochildi/.test(x.text || "")));
+  await handleUpdate(envB, cbq("7402", "lang:en"));
   assert.equal((await svc("/svc/state")).ok, true);
   // поддержка: /support → следующее сообщение владельцу; /reply — ответ клиенту
   assert.equal(await handleUpdate(envB, msg("/support", "7401")), "support_start");

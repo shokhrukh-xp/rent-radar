@@ -59,7 +59,7 @@ const EN = {
   h: ["What she does", "What she doesn't do", "Who pays", "Brokers and realtors", "Your data"], open: "Open Ra'no in Telegram",
 };
 const esc = s => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;");
-export function aboutHtml(lang = "ru", bot = "rano_smart_bot") {
+export function aboutHtml(lang = "uz", bot = "rano_smart_bot") {
   const T = lang === "uz" ? UZ : lang === "en" ? EN : RU;
   const ul = xs => "<ul>" + xs.map(x => `<li>${esc(x)}</li>`).join("") + "</ul>";
   return `<!doctype html><html lang="${lang === "uz" ? "uz" : lang === "en" ? "en" : "ru"}"><head><meta charset="utf-8">
@@ -72,7 +72,7 @@ h2{font-size:18px;margin:28px 0 8px;color:var(--accent)}p,li{color:var(--ink)}ul
 .lead{font-size:18px}.tag{font-size:20px;font-weight:600;color:var(--accent);margin:0 0 14px}.muted{color:var(--muted);font-size:14px;margin-top:32px;border-top:1px solid var(--line);padding-top:12px}
 a.btn{display:inline-block;margin-top:18px;background:var(--accent);color:#fff;text-decoration:none;padding:12px 18px;border-radius:12px;font-weight:600}
 .lang{float:right;font-size:14px}.lang a{color:var(--muted)}</style></head><body><main>
-<div class="lang"><a href="?lang=ru">Русский</a> · <a href="?lang=uz">O'zbekcha</a> · <a href="?lang=en">English</a></div>
+<div class="lang"><a href="?lang=uz">O'zbekcha</a> · <a href="?lang=ru">Русский</a> · <a href="?lang=en">English</a></div>
 <h1>${esc(T.title)}</h1><p class="tag">${esc(T.tag)}</p><p class="lead">${esc(T.lead)}</p>
 <h2>${T.h[0]}</h2>${ul(T.does)}<h2>${T.h[1]}</h2>${ul(T.doesnt)}<h2>${T.h[2]}</h2><p>${esc(T.money)}</p>
 <h2>${T.h[3]}</h2><p>${esc(T.law)}</p><h2>${T.h[4]}</h2><p>${esc(T.data)}</p>

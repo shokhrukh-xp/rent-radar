@@ -449,15 +449,8 @@ export const WAITLIST = {
   en: "Hi! I'm Ra'no 👋 — an AI assistant for finding flats in Tashkent.\n\nRight now I work with a small group and " +
     "all spots are taken. I've put you on the waitlist — I'll message you here as soon as a spot opens 🙌",
 };
-export const INVITE = {
-  ru: "Привет! Я Ra'no 👋 — личный ИИ-помощник для поиска квартир в Ташкенте.\n\nСейчас я работаю по приглашению. " +
-    "Я передала вашу заявку — как только доступ откроют, напишу сюда сама 🙌\n\nВы маклер или хозяин? Просто " +
-    "пришлите вариант сюда: фото, адрес, цену — передам клиенту.\nКто я и кому служу — /about",
-  uz: "Salom! Men Ra'no 👋 — Toshkentda kvartira qidirish uchun shaxsiy AI-yordamchiman.\n\nHozir taklif bo'yicha " +
-    "ishlayapman. Arizangizni yubordim — kirish ochilishi bilan shu yerga o'zim yozaman 🙌",
-  en: "Hi! I'm Ra'no 👋 — a personal AI assistant for finding flats in Tashkent.\n\nRight now access is by invitation. " +
-    "I've passed on your request — I'll message you here as soon as access is open 🙌",
-};
+export const INVITE = {};
+INVITE.ru = INVITE.uz = INVITE.en = "Salom! Men Ra'no 👋 — Toshkentda kvartira qidirish uchun shaxsiy AI-yordamchiman. Hozir taklif bo'yicha ishlayapman: arizangizni yubordim, kirish ochilishi bilan shu yerga o'zim yozaman 🙌\n\nПривет! Я Ra'no — личный ИИ-помощник для поиска квартир в Ташкенте. Сейчас я работаю по приглашению: заявку передала, как только доступ откроют — напишу сюда сама.\n\nMakler yoki uy egasimisiz? / Вы маклер или хозяин? Variantni shu yerga yuboring / Пришлите вариант сюда: фото, адрес, цену.\nKim ekanman va kimga xizmat qilaman / Кто я и кому служу — /about";
 export const APPROVED = {
   ru: "🎉 Место освободилось — начинаем! Напишите своими словами, что ищете: например, «купить двушку в центре до $60 000».",
   uz: "🎉 Joy bo'shadi — boshlaymiz! Nima qidirayotganingizni yozing: masalan, «markazda 2 xonali, $60 000 gacha».",
@@ -568,7 +561,7 @@ export async function adminCommand(env, chat, text) {
     const L = u.lang === "uz" ? "uz" : u.lang === "ru" || !u.lang ? "ru" : "en";
     const inv = String(env.INVITE_ONLY || "").toLowerCase() === "on";
     await track(env, u.chat, "join", "approve");
-    if (inv) await welcome(env, u.chat, L);              // знакомство: что умею, кнопки «что ищем», язык
+    if (inv) await welcome(env, u.chat, "uz");           // знакомство на узбекском: что умею, кнопки «что ищем», язык
     else await tg(env, "sendMessage", { chat_id: u.chat, text: APPROVED[L], _noTr: true });
     return `✅ Пустила: ${who({ first_name: u.name, username: u.username }, u.chat)}`;
   }
@@ -1269,7 +1262,7 @@ async function redeemInvite(env, msg, code) {
   await track(env, chat, "join", inv.src || code);
   await adminSay(env, `🆕 По приглашению${inv.src ? " «" + esc(inv.src) + "»" : ""}: ${who(from, chat)} — ${n + 1}/${lim}` +
     `, по ссылке осталось мест: ${inv.left}`);
-  await welcome(env, chat, langOf(from));
+  await welcome(env, chat, "uz");                  // по умолчанию узбекский; русский/английский — кнопкой
   return "active";
 }
 
@@ -1670,34 +1663,13 @@ const GREET = Object.fromEntries(Object.entries(WELCOME).map(([l, t]) =>
   [l, t.replace(/^🎉 [^!]+! /, { ru: "Привет! ", uz: "Salom! ", en: "Hi! " }[l])]));
 // Профиль бота: «О боте» (до 120 символов) и экран до Start (до 512) — русский по умолчанию, узбекский отдельно
 export const AVATAR_URL = "https://raw.githubusercontent.com/shokhrukh-xp/rent-radar/main/docs/brand/rano_avatar.jpg";
-export const PROFILE = {
+export const PROFILE = {           // узбекский + русский для всех: язык приложения Telegram ≠ язык человека
   name: { "": "Ra'no", uz: "Ra'no", en: "Ra'no" },
-  short: {
-    "": "Ra'no — ваш ИИ-помощник по поиску жилья в Ташкенте. Поиск и общение — на мне. Решение — за вами.",
-    uz: "Ra'no — Toshkentda uy-joy qidirish bo'yicha AI-yordamchingiz. Qidiruv va muloqot — menda. Qaror — sizda.",
-    en: "Ra'no — your AI assistant for finding a home in Tashkent. I search and talk. You decide.",
-  },
-  long: {
-    "": "Ra'no — личный ИИ-помощник для тех, кто снимает или покупает квартиру в Ташкенте.\n\n" +
-      "Поиск и общение — на мне. Решение — за вами.\n\n" +
-      "🔎 Слежу за сайтами и Telegram-каналами и присылаю свежие варианты по одному — с ценой против рынка и местом на карте.\n" +
-      "✍️ Продавцам и маклерам пишу сама — от вашего имени, когда попросите.\n" +
-      "🤝 Работаю только на вас: денег от продавцов и маклеров не беру.\n\n" +
-      "Маклерам: жмите Start и присылайте варианты — передам клиенту.",
-    uz: "Ra'no — Toshkentda kvartira ijaraga oluvchi yoki sotib oluvchilar uchun shaxsiy AI-yordamchi.\n\n" +
-      "Qidiruv va muloqot — menda. Qaror — sizda.\n\n" +
-      "🔎 Saytlar va Telegram-kanallarni kuzatib, yangi variantlarni bittadan yuboraman — bozor narxi va xaritadagi joyi bilan.\n" +
-      "✍️ Sotuvchi va maklerlarga o'zim yozaman — siz so'rasangiz, sizning nomingizdan.\n" +
-      "🤝 Faqat siz uchun ishlayman: sotuvchi va maklerlardan pul olmayman.\n\n" +
-      "Maklerlar: Start ni bosing va variantlarni yuboring.",
-    en: "Ra'no is a personal AI assistant for people renting or buying a flat in Tashkent.\n\n" +
-      "I search and talk. You decide.\n\n" +
-      "🔎 I watch listing sites and Telegram channels and send fresh options one by one — with the price against the market and the spot on the map.\n" +
-      "✍️ I write to sellers and brokers myself — on your behalf, when you ask.\n" +
-      "🤝 I work only for you: no money from sellers or brokers.\n\n" +
-      "Brokers: press Start and send your options.",
-  },
+  short: {},
+  long: {},
 };
+PROFILE.short[""] = PROFILE.short.uz = PROFILE.short.en = "Uy-joy qidirishda AI-yordamchi · AI-помощник по поиску жилья. Qidiruv va muloqot — menda · Поиск и общение — на мне.";
+PROFILE.long[""] = PROFILE.long.uz = PROFILE.long.en = "Ra'no — Toshkentda uy-joy qidirish bo'yicha shaxsiy AI-yordamchi. Qidiruv va muloqot — menda. Qaror — sizda.\n🔎 Yangi variantlarni bittadan yuboraman — bozor narxi va xaritadagi joyi bilan. ✍️ So'rasangiz, sotuvchi va maklerlarga sizning nomingizdan yozaman.\n\nRa'no — личный AI-помощник по поиску жилья в Ташкенте. Поиск и общение — на мне. Решение — за вами.\n🔎 Присылаю свежие варианты по одному — с ценой против рынка и местом на карте. ✍️ Продавцам и маклерам пишу от вашего имени, когда попросите.";
 const WAIT = {
   ru: "⏳ Секундочку, бужу свой «мозг» — отвечу через минуту-две.",
   uz: "⏳ Bir daqiqa, asosiy modulimni uyg'otyapman — 1–2 daqiqada javob beraman.",
@@ -2250,7 +2222,7 @@ export async function handleUpdate(env, upd) {
   if (client) await rememberWho(env, chat, msg.from).catch(() => null);
   if (!client && /^\/(about|privacy)(@\w+)?$/i.test(String(msg.text || "").trim())) {   // кто такая Ra'no — любому
     const L0 = langOf(msg.from);
-    await say(env, chat, ABOUT[L0] + `\n\n${ORIGIN || ""}/about${L0 !== "ru" ? "?lang=" + L0 : ""}`, { _noTr: true });
+    await say(env, chat, ABOUT[L0] + `\n\n${ORIGIN || ""}/about?lang=${L0}`, { _noTr: true });
     return "about";
   }
   if (!client && isMulti(env)) {
@@ -2333,7 +2305,7 @@ export async function handleUpdate(env, upd) {
   if (text === BTN.brokers || /^\/(brokers|makler|outreach)(@\w+)?$/i.test(text)) return (await startOutreach(env, chat), "ui");
   if (/^\/(about|privacy)(@\w+)?$/i.test(text) || ABOUT_ASK.test(text)) {   // кто такая Ra'no, кому служит
     const La = L3((await kvGet(env, ivKey(chat), null))?.ans?.lang || L);
-    await say(env, chat, ABOUT[La] + `\n\n${ORIGIN || ""}/about${La !== "ru" ? "?lang=" + La : ""}`,
+    await say(env, chat, ABOUT[La] + `\n\n${ORIGIN || ""}/about?lang=${La}`,
       { disable_web_page_preview: false, _noTr: true });
     return "about";
   }
@@ -2504,7 +2476,7 @@ export default {
     if (p !== "/svc/updates") maybeWatch(env, ctx);
     if (isMulti(env)) maybeSweep(env, ctx);          // отзыв на 5-й день и вечерняя сводка — не чаще раза в полчаса   // Python опрашивает очередь сам — это и есть «жив»
     if (p === "/about" || p === "/about/") {
-      return new Response(aboutHtml(url.searchParams.get("lang") || "ru"),
+      return new Response(aboutHtml(url.searchParams.get("lang") || "uz"),
         { headers: { "content-type": "text/html; charset=utf-8", "cache-control": "public, max-age=300" } });
     }
     if (p === "/draw" || p === "/draw/") {
