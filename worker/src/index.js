@@ -203,8 +203,9 @@ intent — что клиент хочет сделать этим сообщен
     вживую / заметка / найти похожие. Он ответил на её сообщение (в данных есть card) или говорит о ней иначе.
     Клиент пишет как удобно, своими словами — никаких «правильных» фраз нет, понимай по смыслу:
     «норм вариант» / «вот эта ничего» / «оставь её» → like; «не, не то» / «дороговато» / «первый этаж не хочу» → skip;
-    «а документы там чистые?» / «спроси, торг есть?» → ask; «давай глянем её в субботу» → view; «потом решу» → later.
-    Поля: card_act — одно или несколько через запятую, по порядку: like | skip | later | ask | view | note | similar | search_like
+    «а документы там чистые?» / «спроси, торг есть?» → ask; «давай глянем её в субботу» → view; «потом решу» → later;
+    «где это точно?» / «какой адрес?» / «далеко от метро?» → where (покажу, что известно о месте; спросить продавца — ask).
+    Поля: card_act — одно или несколько через запятую, по порядку: like | skip | later | ask | where | view | note | similar | search_like
       («нравится, узнай про документы» → "like,ask»; «посмотрим в субботу в 11» → "view");
     note_text — для view: когда смотреть как сказал клиент («суббота 11:00»); для note: что записать;
       для ask: что именно спросить, если сказал;
@@ -258,7 +259,7 @@ export const SCHEMA = {
     },
     clear: { type: "array", items: { type: "string" } },
     intent: { type: "string", description: "search | restart | search_now | show_pick | show_item | rano_status | via_status | show_offers | shortlist | sl_item | brokers | add_offer | market | help | request_text | card" },
-    card_act: { type: "string", description: "для intent=card: like | skip | later | ask | view | note | similar | search_like" },
+    card_act: { type: "string", description: "для intent=card: like | skip | later | ask | where | view | note | similar | search_like" },
     reason: { type: "string", description: "для card_act=skip: p | d | c | a" },
     note_text: { type: "string", description: "для card_act=note — текст заметки; для view — когда смотреть" },
     items: { type: "array", items: { type: "string" }, description: "номера пунктов для show_item / sl_item" },
@@ -777,7 +778,8 @@ export async function tg(env, method, body) {
   // (кроме кнопок карточки из очереди «Сохранить / Пропустить / Уточнить» — Q:…)
   const ik = body?.reply_markup?.inline_keyboard;
   if (body && method !== "editMessageReplyMarkup" && client && ik?.length
-      && !ik.flat().every(b => String(b.callback_data || "").startsWith("Q:"))) {
+      && !(ik.flat().every(b => String(b.callback_data || "").startsWith("Q:") || b.url)
+           && ik.flat().some(b => String(b.callback_data || "").startsWith("Q:")))) {
     body = { ...body }; delete body.reply_markup;
   }
   // клиент на узбекском/английском: готовые русские тексты — в перевод
@@ -1424,6 +1426,7 @@ export async function cardAction(env, chat, raw, card, recent, iv, text) {
     await queueCb(L ? `L:n:${ref}` : `o:skip:${ref}:${reason}`);
     out = `👎 Убрала ${what}` + (L ? " — похожие больше не покажу" : " — маклеру отвечу вежливо");
   } else if (act === "later") { if (O) await queueCb(`t:l:${ref}`); out = `🕐 Хорошо, ${what} — на потом`; }
+  else if (act === "where") { await queueCb(L ? `L:w:${ref}` : `o:where:${ref}`); out = `📍 Сейчас скажу, что известно о месте ${what}`; }
   else if (act === "ask") { await queueCb(L ? `L:a:${ref}` : `o:ask:${ref}`); out = `📨 Уточняю по ${what}` + (raw.note_text ? ` (${String(raw.note_text).slice(0, 80)})` : "") + " — ответ принесу сюда"; }
   else if (act === "view") {
     const w = parseWhen(raw.note_text || text);

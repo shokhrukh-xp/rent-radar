@@ -285,7 +285,8 @@ def run(cfg, store, sale_store=None, now=None, force=False):
                      ("viewing", lambda: viewing_reminders(cfg, store, now)),
                      ("morning", lambda: morning_note(cfg, store, now)),
                      ("digest", lambda: evening_digest(cfg, store, sale_store, now)),
-                     ("brokers", lambda: broker_offer(cfg, store, sale_store, now))):
+                     ("brokers", lambda: broker_offer(cfg, store, sale_store, now)),
+                     ("shortlist", lambda: _rr().check_shortlist(cfg, store))):
         try:
             out[name] = fn()
         except Exception as e:                  # напоминания не должны ронять радар

@@ -1220,7 +1220,8 @@ def _owner_no_buttons(cfg, payload):
         return payload
     if isinstance(kb, dict) and kb.get("inline_keyboard"):
         btns = [b for row in kb["inline_keyboard"] for b in row]
-        if btns and all(str(b.get("callback_data", "")).startswith("Q:") for b in btns):
+        if btns and all(str(b.get("callback_data", "")).startswith("Q:") or b.get("url") for b in btns) \
+                and any(str(b.get("callback_data", "")).startswith("Q:") for b in btns):
             return payload                       # кнопки карточки из очереди — их клиент просил
         payload = dict(payload)
         payload.pop("reply_markup", None)
@@ -3190,6 +3191,9 @@ def handle_callback(data: str, settings: dict, store, cfg: dict, message_id=None
     d = data or ""
     if d.startswith("Q:"):                     # кнопки карточки из очереди
         return card_action(cfg, store, settings, d, message_id), None
+    if d.startswith(("L:w:", "o:where:")):     # «где это?» про карточку — что известно о месте, честно
+        send_telegram(cfg, where_text(cfg, store, d))
+        return "", None
     if d.startswith("a:"):
         toast, _ = concierge.handle_anketa_cb(d, cfg, store, message_id)
         return toast, None
@@ -4756,17 +4760,29 @@ def remember_card(cfg, ids, ref, text):
 # «Пропустить», «Уточнить у продавца»; следующая приходит после нажатия (или ответа словами на карточку).
 CARD_QUEUE_MAX = 60
 CARD_KEEP = ("key", "url", "photo_urls", "geo", "lat", "lon", "title", "district", "text_place", "site", "source",
-             "created_at", "price_value", "price_currency", "price_usd")
+             "created_at", "price_value", "price_currency", "price_usd", "phones", "seller")
 
 
 def _queue_store():
     return concierge._BIZ_STORE.get("store")
 
 
-def card_kb(ref, left=0):
+def can_ask_seller(ref, l) -> bool:
+    """«Уточнить у продавца» — только когда есть как связаться: маклер в боте или в чате клиента (O:…), у
+    объявления — телефон или ник продавца. Иначе честнее кнопка «Открыть объявление»."""
+    if str(ref).startswith("O:"):
+        return True
+    return bool([p for p in (l.get("phones") or []) if p]) or str(l.get("seller") or "").startswith("@")
+
+
+def card_kb(ref, left=0, l=None):
+    l = l or {}
     rows = [[{"text": "💾 Сохранить", "callback_data": f"Q:s|{ref}"[:64]},
-             {"text": "⏭ Пропустить", "callback_data": f"Q:n|{ref}"[:64]}],
-            [{"text": "✍️ Уточнить у продавца", "callback_data": f"Q:a|{ref}"[:64]}]]
+             {"text": "⏭ Пропустить", "callback_data": f"Q:n|{ref}"[:64]}]]
+    if can_ask_seller(ref, l):
+        rows.append([{"text": "✍️ Уточнить у продавца", "callback_data": f"Q:a|{ref}"[:64]}])
+    elif str(l.get("url") or "").startswith("http"):
+        rows.append([{"text": "🔗 Открыть объявление — там контакт", "url": l["url"]}])
     return {"inline_keyboard": rows}
 
 
@@ -4807,7 +4823,7 @@ def show_next_card(cfg, store):
             still_actual(cfg, l_, older_h=0)
             it["l"] = l_
         text += (f"\n\n<i>В очереди ещё {left}</i>" if left else "")
-        ids = _send_card_now(cfg, it["l"], text, kb=card_kb(it["ref"], left), silent=it.get("silent"),
+        ids = _send_card_now(cfg, it["l"], text, kb=card_kb(it["ref"], left, it["l"]), silent=it.get("silent"),
                              ref=it["ref"])
         if ids:
             store.set_kv("card_open", {"ref": it["ref"], "mid": (ids[-1] if isinstance(ids, list) else None),
@@ -4830,6 +4846,81 @@ def card_done(cfg, store, ref, status=""):
                                          "reply_markup": json.dumps({"inline_keyboard": []})}, quiet=True)
     store.set_kv("card_open", {})
     return show_next_card(cfg, store)
+
+
+SHORTLIST_CHECK_EVERY = 20 * 3600
+
+
+def check_shortlist(cfg, store, now=None, limit=20, force=False) -> int:
+    """Раз в сутки: живы ли объявления из шортлиста (Uybor, Joymee) и та же ли цена. Сняли — сказать и убрать
+    из шортлиста; цена другая — сказать и обновить. Возвращает, сколько изменений."""
+    now = now or time.time()
+    if (globals().get("TESTING") and not force) or \
+            (not force and now - float(store.get_kv("sl_live_at") or 0) < SHORTLIST_CHECK_EVERY):
+        return 0
+    store.set_kv("sl_live_at", now)
+    items = [o for o in concierge.offers_by_status(store, "shortlist") + concierge.offers_by_status(store, "asked")
+             if o and str(o.get("broker_chat") or "").startswith("site:") and (o.get("extra") or {}).get("url")]
+    n = 0
+    for o in items[:limit]:
+        ex = o["extra"]
+        l = {"url": ex["url"], "price_value": o.get("price_usd"), "price_currency": "USD", "price_usd": o.get("price_usd")}
+        st = still_actual(cfg, l, older_h=0)
+        tag = concierge.offer_tag_client(o) or f"#{o['oid']}"
+        if st == "gone":
+            concierge.set_offer_status(store, o["oid"], "rejected")
+            concierge._set_extra(store, o["oid"], gone_at=datetime.now(timezone.utc).isoformat())
+            send_telegram(cfg, f"❌ Из шортлиста сняли объявление: {escape_html(tag)} — похоже, уже сдали или продали. "
+                               f"Убрала его из шортлиста.")
+            n += 1
+        elif st == "changed" and l.get("price_usd") and o.get("price_usd"):
+            down = l["price_usd"] < o["price_usd"]
+            store.conn.execute("UPDATE broker_offers SET price_usd=? WHERE oid=?", (l["price_usd"], o["oid"]))
+            store.conn.commit()
+            send_telegram(cfg, f"{'💸 Подешевело' if down else '📈 Подорожало'} из шортлиста: {escape_html(tag)} — "
+                               f"было ${_money(o['price_usd'])}, сейчас ${_money(l['price_usd'])}.")
+            n += 1
+    return n
+
+
+def where_text(cfg, store, d) -> str:
+    """Что известно о месте квартиры: адрес/ориентир из объявления, точка и насколько ей верить, метро, ссылка
+    на карту. Не знаем — так и говорим и предлагаем уточнить у продавца."""
+    if d.startswith("L:w:"):
+        l = _listing_any(store, d[4:]) or {}
+    else:
+        o = concierge.get_offer(store, int(d.split(":")[2])) or {}
+        ex = o.get("extra") or {}
+        l = {"title": "", "text": o.get("text") or "", "district": o.get("district"), "lat": ex.get("lat"),
+             "lon": ex.get("lon"), "district_raw": ex.get("address")}
+    if not l:
+        return "Не нашла это объявление 🙈"
+    g = l.get("geo") or geo.locate(l) or {}
+    bits = []
+    addr = ", ".join(x for x in (l.get("district"), l.get("district_raw") if l.get("district_raw") != l.get("district")
+                                 else None) if x)
+    if addr:
+        bits.append(f"📍 В объявлении: {escape_html(addr)}")
+    ph = geo.landmarks(f"{l.get('title') or ''}. {l.get('text') or ''}")
+    if ph:
+        bits.append(f"🧭 Ориентир от продавца: «{escape_html(ph[0][:80])}»")
+    if g.get("lat"):
+        exact = g.get("src") == "сайт" and not g.get("conflict")
+        how = ("метка продавца на карте сайта" if exact else
+               f"примерно (±{float(g.get('spread') or 0.6):.1f} км, по {'ориентиру' if g.get('src') == 'ориентир' else 'метро'})")
+        if g.get("conflict"):
+            how = f"метка на сайте спорит с текстом (в тексте — {g['conflict']}), ей не верю"
+        url = f"https://yandex.uz/maps/?pt={g['lon']:.5f},{g['lat']:.5f}&z=16&l=map"
+        bits.append(f'🗺 Точка: <a href="{url}">на карте</a> — {how}')
+        try:
+            mt = analyst.nearest_metro(g["lat"], g["lon"])
+            if mt:
+                bits.append(f"🚇 Ближайшее метро: {escape_html(str(mt[0]))} — ~{mt[1]:.1f} км, ~{mt[2]} мин пешком")
+        except Exception:
+            pass
+    if not g.get("lat") or g.get("src") != "сайт" or g.get("conflict"):
+        bits.append("Точного адреса нет — могу уточнить у продавца: ответьте на карточку «уточни адрес».")
+    return "\n".join(bits) or "В объявлении о месте ничего нет — могу уточнить у продавца."
 
 
 def card_followup(cfg, store, data):
@@ -5660,8 +5751,13 @@ def run():
     enabled = {name: s for name, s in cfg["sources"].items() if s.get("enabled")}
     next_run = {name: 0.0 for name in enabled}
     mode = " (разовый проход)" if once else (f" на {minutes:.0f} мин" if minutes else "")
-    log.info("Rent Radar запущен%s. Источники: %s. Лимит: $%s",
-             mode, ", ".join(enabled) or "нет", cfg["max_price_usd"])
+    log.info("Rent Radar запущен%s. Источники: %s. Лимит: $%s. Версия %s",
+             mode, ", ".join(enabled) or "нет", cfg["max_price_usd"], code_version())
+    if not once:
+        try:
+            health_flush(cfg, store, started=True)
+        except Exception as e:
+            log.info("здоровье: %s", e)
 
     load_geo()                                 # справочник ориентиров — для «где квартира» и поиска у ориентира
     sale_cfg = effective_sale_cfg(cfg, store).get("sale_search") or {}   # покупка из чата включает поиск
@@ -5813,8 +5909,102 @@ def run():
         except Exception as e:
             log.warning("финальный снимок не отправлен: %s", e)
         worker_call(cfg, "/svc/bye", timeout=10)   # воркер будет будить нас сам
+        try:
+            health_flush(cfg, store)
+        except Exception as e:
+            log.info("здоровье: %s", e)
     log.info("Готово" if once or deadline else "Остановлено")
 
 
+# ------------------------------------------------------------------ здоровье --
+# Сколько проходов, падений и предупреждений за сутки — владельцу сервиса раз в день (без звука), падение
+# прохода — сразу (не чаще раза в час). Версия кода — в логе при старте: видно, что работает свежий код.
+HEALTH = {"warn": collections.Counter(), "errors": 0}
+
+
+class _HealthCounter(logging.Handler):
+    def emit(self, record):
+        try:
+            key = re.sub(r"\d+", "#", record.getMessage().split("\n")[0])[:70]
+            HEALTH["warn"][key] += 1
+            if record.levelno >= logging.ERROR:
+                HEALTH["errors"] += 1
+        except Exception:
+            pass
+
+
+def code_version() -> str:
+    try:
+        head = (BASE_DIR / ".git" / "HEAD").read_text().strip()
+        if head.startswith("ref:"):
+            ref = BASE_DIR / ".git" / head[5:].strip()
+            if ref.exists():
+                return ref.read_text().strip()[:7]
+            packed = (BASE_DIR / ".git" / "packed-refs").read_text()
+            m = re.search(r"^([0-9a-f]{40}) " + re.escape(head[5:].strip()) + "$", packed, re.M)
+            return m.group(1)[:7] if m else "?"
+        return head[:7]
+    except Exception:
+        return "?"
+
+
+def health_flush(cfg, store, started=False, crashed=None):
+    """Счётчики прохода — в базу (за сутки по Ташкенту); новые сутки — отчёт за прошлые владельцу сервиса."""
+    day = datetime.now(TASHKENT_TZ).strftime("%Y-%m-%d")
+    h = store.get_kv("health_day") or {}
+    if h.get("day") and h["day"] != day:
+        try:
+            send_health_report(cfg, h)
+        except Exception as e:
+            log.info("отчёт о здоровье не ушёл: %s", e)
+        h = {}
+    if not h:
+        h = {"day": day, "passes": 0, "crashes": 0, "errors": 0, "warn": {}}
+    h["passes"] += int(started)
+    h["crashes"] += int(bool(crashed))
+    h["errors"] += HEALTH["errors"]
+    w = collections.Counter(h.get("warn") or {})
+    w.update(HEALTH["warn"])
+    h["warn"] = dict(w.most_common(30))
+    h["version"] = code_version()
+    HEALTH["warn"].clear()
+    HEALTH["errors"] = 0
+    store.set_kv("health_day", h)
+    return h
+
+
+def send_health_report(cfg, h):
+    top = sorted((h.get("warn") or {}).items(), key=lambda x: -x[1])[:3]
+    d = datetime.strptime(h["day"], "%Y-%m-%d").strftime("%d.%m")
+    ok = not h.get("crashes") and not h.get("errors")
+    lines = [f"🩺 <b>Ra'no за {d}</b>: {'всё работает' if ok else 'были сбои'} · проходов {h.get('passes', 0)}, "
+             f"падений {h.get('crashes', 0)}, ошибок {h.get('errors', 0)}, предупреждений "
+             f"{sum((h.get('warn') or {}).values())} · версия {h.get('version', '?')}"]
+    lines += [f"• ×{n} {escape_html(k)}" for k, n in top]
+    tg_call(cfg, "sendMessage", {"chat_id": cfg.get("admin_chat_id") or cfg["telegram_chat_id"], "parse_mode": "HTML",
+                                 "text": "\n".join(lines), "disable_notification": True, "_noTr": True})
+
+
+def main():
+    logging.getLogger("rent-radar").addHandler(_HealthCounter(level=logging.WARNING))
+    try:
+        run()
+    except Exception as e:
+        log.exception("проход упал: %s", e)
+        try:                                   # владельцу сервиса — сразу, но не чаще раза в час
+            cfg = load_config()
+            st = Store(DB_PATH)
+            health_flush(cfg, st, crashed=True)
+            last = float(st.get_kv("crash_alert_at") or 0)
+            if time.time() - last > 3600:
+                st.set_kv("crash_alert_at", time.time())
+                tg_call(cfg, "sendMessage", {"chat_id": cfg.get("admin_chat_id") or cfg["telegram_chat_id"],
+                                             "_noTr": True, "text": f"⚠️ Проход Ra'no упал (версия {code_version()}): "
+                                             f"{type(e).__name__}: {str(e)[:300]}. Перезапускаюсь сам."})
+        except Exception:
+            pass
+        raise
+
+
 if __name__ == "__main__":
-    run()
+    main()

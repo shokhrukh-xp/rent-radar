@@ -3491,7 +3491,8 @@ _qcfg = dict(cfg, telegram_chat_id="77", card_queue=True)
 with mock.patch.object(rr, "tg_call", _qtg), mock.patch.dict(cg._BIZ_STORE, {"store": _qs}), \
         mock.patch.object(rr, "remember_card", lambda *a, **k: None):
     for i in (1, 2, 3):
-        rr.send_card(_qcfg, {"key": f"uybor:{i}", "photo_urls": []}, f"карточка {i}", ref=f"L:uybor:{i}", queue=True)
+        rr.send_card(_qcfg, {"key": f"uybor:{i}", "photo_urls": [], "phones": ["901112233"]}, f"карточка {i}",
+                     ref=f"L:uybor:{i}", queue=True)
     sent_ = [pl for m, pl in _QT if m == "sendMessage"]
     assert len(sent_) == 1 and sent_[0]["text"].startswith("карточка 1")
     kb_ = json.loads(sent_[0]["reply_markup"])["inline_keyboard"]
@@ -3508,6 +3509,12 @@ with mock.patch.object(rr, "tg_call", _qtg), mock.patch.dict(cg._BIZ_STORE, {"st
     rr.card_followup(_qcfg, _qs, "L:s:uybor:2")                                       # «нравится» словами
     assert (_qs.get_kv("card_open") or {}).get("ref") == "L:uybor:3"
     assert any("Сохранила" in pl.get("text", "") for m, pl in _QT if m == "editMessageText")
+# нет контакта — вместо «Уточнить» ссылка на объявление; кнопки карточки клиенту не снимаются, прочие — снимаются
+_kb2 = rr.card_kb("L:uybor:5", 0, {"url": "https://uybor.uz/listings/5"})
+assert _kb2["inline_keyboard"][1][0]["url"].endswith("/5") and len(_kb2["inline_keyboard"][0]) == 2
+assert "reply_markup" in rr._owner_no_buttons(_qcfg, {"chat_id": "77", "reply_markup": json.dumps(_kb2)})
+assert "reply_markup" not in rr._owner_no_buttons(_qcfg, {"chat_id": "77", "reply_markup": json.dumps(
+    {"inline_keyboard": [[{"text": "x", "url": "https://a"}]]})})
 # без очереди (по просьбе клиента) — сразу и без кнопок
 _QT.clear()
 with mock.patch.object(rr, "tg_call", _qtg), mock.patch.dict(cg._BIZ_STORE, {"store": _qs}), \
@@ -3531,3 +3538,48 @@ assert "Шохрух" in cg.fill_client(cg.broker_welcome(_qcfg, _qs), _qs) and 
 Path("/tmp/test_noname.db").unlink(missing_ok=True)
 _qp.unlink(missing_ok=True)
 print("OK — карточки по одной с кнопками «Сохранить / Пропустить / Уточнить»; маклерам — от имени клиента со ссылкой")
+# здоровье: счётчики за сутки, отчёт за прошлые сутки — один раз при смене дня
+_hp = Path("/tmp/test_health.db"); _hp.unlink(missing_ok=True)
+_hs = rr.Store(_hp)
+rr.HEALTH["warn"]["[x] ошибка #"] += 3; rr.HEALTH["errors"] += 1
+_h = rr.health_flush(cfg, _hs, started=True)
+assert _h["passes"] == 1 and _h["errors"] == 1 and _h["warn"]["[x] ошибка #"] == 3
+_hs.set_kv("health_day", dict(_h, day="2000-01-01"))
+_HR = []
+with mock.patch.object(rr, "tg_call", lambda c, m, pl, **k: _HR.append(pl) or {}):
+    rr.health_flush(dict(cfg, telegram_chat_id="1"), _hs, started=True)
+assert len(_HR) == 1 and "Ra'no за 01.01" in _HR[0]["text"] and "×3" in _HR[0]["text"] and _HR[0]["disable_notification"]
+assert _hs.get_kv("health_day")["passes"] == 1 and rr.code_version()
+_hp.unlink(missing_ok=True)
+print("OK — здоровье: проходы, падения и предупреждения за сутки — отчётом раз в день; версия кода в логе")
+# «где это?» — что известно о месте и насколько верить точке
+_wp = Path("/tmp/test_where.db"); _wp.unlink(missing_ok=True)
+_ws = rr.Store(_wp)
+_ws.save({"key": "uybor:55", "source": "Uybor", "url": "u", "title": "2-комн", "text": "Ориентир: Айбек метро",
+          "phones": [], "district": "Мирабад", "district_raw": "улица Мирабад, 27/6", "lat": 41.2964, "lon": 69.2702,
+          "geo": {"lat": 41.2964, "lon": 69.2702, "src": "сайт"}}, notified=True)
+_wt = rr.where_text(cfg, _ws, "L:w:uybor:55")
+assert "улица Мирабад, 27/6" in _wt and "метка продавца на карте сайта" in _wt and "yandex" in _wt and "Айбек" in _wt
+_ws.save({"key": "tg:9", "source": "TG", "url": "u", "title": "", "text": "Сдаётся 2к, Мирабад", "phones": [],
+          "district": "Мирабад"}, notified=True)
+assert "Точного адреса нет" in rr.where_text(cfg, _ws, "L:w:tg:9")
+_wp.unlink(missing_ok=True)
+print("OK — «где это?»: адрес, ориентир, точка и насколько ей верить; нет адреса — честно и с предложением уточнить")
+# шортлист раз в сутки: снятое — сказать и убрать, цена другая — сказать и обновить
+_sp = Path("/tmp/test_slive.db"); _sp.unlink(missing_ok=True)
+_ss2 = rr.Store(_sp)
+_o_gone, _ = cg.add_site_offer(cfg, _ss2, {"key": "uybor:301", "url": "https://uybor.uz/listings/301", "rooms": 3,
+                                          "district": "Мирабад", "price_usd": 700, "site": "Uybor"})
+_o_chg, _ = cg.add_site_offer(cfg, _ss2, {"key": "joymee:302", "url": "https://joymee.uz/announcements/302", "rooms": 2,
+                                         "district": "Яккасарай", "price_usd": 800, "site": "Joymee"})
+_ans = {"https://uybor.uz/listings/301": (None, ""),
+        "https://joymee.uz/announcements/302": ({"price_value": 750, "price_currency": "USD"}, "sale")}
+_SL = []
+with mock.patch.object(rr.sale_sources, "listing_from_url", lambda c, u: _ans[u]), \
+        mock.patch.object(rr, "send_telegram", lambda c, t_, **k: _SL.append(t_) or True), \
+        mock.patch.object(_geo_t, "locate", lambda l: {}):
+    assert rr.check_shortlist(cfg, _ss2, force=True) == 2
+assert any("сняли" in x for x in _SL) and any("Подешевело" in x and "$750" in x for x in _SL)
+assert cg.get_offer(_ss2, _o_gone)["status"] == "rejected" and cg.get_offer(_ss2, _o_chg)["price_usd"] == 750
+_sp.unlink(missing_ok=True)
+print("OK — шортлист раз в сутки: снятые убираются с сообщением, изменения цены — с сообщением")
