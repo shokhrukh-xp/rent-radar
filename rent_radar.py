@@ -3113,7 +3113,8 @@ def run_search(cfg, store, settings, limit=5, days=7) -> str:
     areas = settings.get("areas") or []
     why = collections.Counter()
     shown = {r[0] for r in store.conn.execute("SELECT key FROM listings WHERE notified=1")}
-    already = 0
+    waiting = waiting_cards(_queue_store()) if cfg.get("card_queue") else set()
+    already = waits = 0
     for l in pool:
         try:
             if areas:
@@ -3132,13 +3133,27 @@ def run_search(cfg, store, settings, limit=5, days=7) -> str:
                 why["агентство или маклер" if rj.startswith("не хозяин") else "не та квартира"] += 1
                 continue
             if l.get("key") in shown:          # уже присылала — второй раз ту же карточку не шлём
-                already += 1
+                if l.get("key") in waiting:    # в очереди «по одной» — ещё не показана
+                    waits += 1
+                else:
+                    already += 1
                 continue
             ok.append(analyst.score_listing(l, store, cfg, stats, settings))
         except Exception as e:
             log.warning("оценка %s не удалась: %s", l.get("key"), e)
     ok.sort(key=lambda x: x.get("score", 0), reverse=True)
 
+    if not ok and waits:
+        qs = _queue_store()
+        n = waits + already
+        send_telegram(cfg, f"🔎 Под эти условия подходит {n} {concierge.plural(n, 'вариант', 'варианта', 'вариантов')}"
+                           + (f", {already} уже видели" if already else "")
+                           + f". Ещё {waits} не показала — присылаю по одной: сохраните или пропустите, "
+                             "и сразу придёт следующая 👇")
+        if not reshow_open_card(cfg, qs, older_s=0):
+            qs.set_kv("card_open", {})            # старая запись без самой карточки — показать следующую
+            show_next_card(cfg, qs)
+        return ""
     if not ok and already:
         fp = f"already:{already}:" + json.dumps(settings.get("max_price_usd"))
         last = store.get_kv("empty_search") or {}
@@ -3205,6 +3220,9 @@ def run_search(cfg, store, settings, limit=5, days=7) -> str:
             store.conn.execute("UPDATE listings SET notified=1 WHERE key=?", (l["key"],))
             store.conn.commit()
         time.sleep(1)
+    qs = _queue_store() if cfg.get("card_queue") else None
+    if qs is not None:                          # открытая карточка осталась выше заголовка — повторить её внизу
+        reshow_open_card(cfg, qs)
     return ""
 
 
@@ -4981,10 +4999,36 @@ def show_next_card(cfg, store):
             _count_free(cfg, store)
             store.set_kv("card_open", {"ref": it["ref"], "mid": (ids[-1] if isinstance(ids, list) else None),
                                        "ids": ids if isinstance(ids, list) else [], "text": text,
-                                       "at": time.time()})
+                                       "at": time.time(), "it": it})
             return ids
     store.set_kv("card_open", {})
     return None
+
+
+def waiting_cards(store) -> set:
+    """Ключи объявлений, которые ждут в очереди «по одной» или открыты сейчас — клиент их ещё не видел до конца."""
+    if store is None:
+        return set()
+    refs = [x.get("ref") or "" for x in (store.get_kv("card_queue") or [])]
+    refs.append((store.get_kv("card_open") or {}).get("ref") or "")
+    return {r[2:] for r in refs if r.startswith("L:")}
+
+
+def reshow_open_card(cfg, store, older_s=120) -> bool:
+    """Открытая карточка ушла вверх чата (новый поиск, разговор) — прислать её снова внизу, с теми же кнопками.
+    Старое сообщение остаётся; его кнопки по-прежнему работают (та же ссылка на вариант)."""
+    op = store.get_kv("card_open") or {}
+    it = op.get("it")
+    if not it or time.time() - float(op.get("at") or 0) < older_s:
+        return False
+    if op.get("ids"):
+        tg_call(cfg, "editMessageReplyMarkup", {"chat_id": cfg["telegram_chat_id"], "message_id": op["mid"],
+                                                "reply_markup": json.dumps({"inline_keyboard": []})}, quiet=True)
+    q = store.get_kv("card_queue") or []
+    it = dict(it, text=re.sub(r"\n\n<i>В очереди ещё \d+</i>$", "", it.get("text") or ""), at=time.time())
+    store.set_kv("card_queue", [it] + [x for x in q if x.get("ref") != it["ref"]])
+    store.set_kv("card_open", {})
+    return bool(show_next_card(cfg, store))
 
 
 def card_done(cfg, store, ref, status=""):

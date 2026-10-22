@@ -437,8 +437,12 @@ async function setUser(env, chat, status, from = {}) {
           from.username || null, lang || null, Date.now()).run();
   resetUsersCache();
 }
-const adminSay = (env, text) => env.OWNER_CHAT
-  ? tg(env, "sendMessage", { chat_id: env.OWNER_CHAT, text, parse_mode: "HTML", _noTr: true }) : null;
+const adminSay = (env, text, kb) => env.OWNER_CHAT
+  ? tg(env, "sendMessage", { chat_id: env.OWNER_CHAT, text, parse_mode: "HTML", _noTr: true,
+    ...(kb ? { reply_markup: kb } : {}) }) : null;
+/** Заявка нового человека — владельцу кнопками, без копирования команды. */
+export const approveKb = chat => ({ inline_keyboard: [[{ text: "✅ Пустить", callback_data: `adm:ok:${chat}` },
+  { text: "🚫 Отклонить", callback_data: `adm:no:${chat}` }]] });
 const who = (from = {}, chat = "") => esc([from.first_name, from.last_name].filter(Boolean).join(" ") || "без имени") +
   (from.username ? ` @${esc(from.username)}` : "") + ` · <code>${chat}</code>`;
 function esc(s) { return String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
@@ -482,8 +486,8 @@ export async function signup(env, msg) {
   if (st !== "waitlist") {
     await setUser(env, chat, "waitlist", from);
     await track(env, chat, "request");
-    await adminSay(env, invite ? `🙋 Просится в Ra'no: ${who(from, chat)}. Пустить: <code>/approve ${chat}</code>`
-      : `⏳ В лист ожидания: ${who(from, chat)} (мест ${lim}/${lim}). Пустить: <code>/approve ${chat}</code>`);
+    await adminSay(env, invite ? `🙋 Просится в Ra'no: ${who(from, chat)}`
+      : `⏳ В лист ожидания: ${who(from, chat)} (мест ${lim}/${lim})`, approveKb(chat));
   }
   return invite ? "invite" : "waitlist";
 }
@@ -556,18 +560,37 @@ export async function adminCommand(env, chat, text) {
   }
   const u = find(arg);
   if (!u) return "Не нашла такого пользователя — посмотрите <code>/users</code>.";
-  if (cmd === "/approve") {
-    await setUser(env, u.chat, "active", {});
-    await setMapMenu(env, u.chat).catch(() => null);
-    const L = u.lang === "uz" ? "uz" : u.lang === "ru" || !u.lang ? "ru" : "en";
-    const inv = String(env.INVITE_ONLY || "").toLowerCase() === "on";
-    await track(env, u.chat, "join", "approve");
-    if (inv) await welcome(env, u.chat, "uz");           // знакомство на узбекском: что умею, кнопки «что ищем», язык
-    else await tg(env, "sendMessage", { chat_id: u.chat, text: APPROVED[L], _noTr: true });
-    return `✅ Пустила: ${who({ first_name: u.name, username: u.username }, u.chat)}`;
-  }
+  if (cmd === "/approve") return approveUser(env, u);
   await setUser(env, u.chat, "removed", {});
   return `🚫 Убрала: ${who({ first_name: u.name, username: u.username }, u.chat)} — сообщения от него больше не обрабатываю.`;
+}
+
+export async function approveUser(env, u) {
+  await setUser(env, u.chat, "active", {});
+  await setMapMenu(env, u.chat).catch(() => null);
+  const L = u.lang === "uz" ? "uz" : u.lang === "ru" || !u.lang ? "ru" : "en";
+  const inv = String(env.INVITE_ONLY || "").toLowerCase() === "on";
+  await track(env, u.chat, "join", "approve");
+  if (inv) await welcome(env, u.chat, "uz");           // знакомство на узбекском: что умею, кнопки «что ищем», язык
+  else await tg(env, "sendMessage", { chat_id: u.chat, text: APPROVED[L], _noTr: true });
+  return `✅ Пустила: ${who({ first_name: u.name, username: u.username }, u.chat)}`;
+}
+/** Кнопки «Пустить / Отклонить» под заявкой — только у владельца. */
+async function adminCb(env, cb) {
+  const [, act, target] = String(cb.data).split(":");
+  const u = (await usersMap(env)).get(String(target));
+  if (!u) return tg(env, "answerCallbackQuery", { callback_query_id: cb.id, text: "Заявка не найдена", show_alert: true });
+  let line;
+  if (act === "ok") {
+    if (u.status === "active") line = `✅ Уже пущен: ${who({ first_name: u.name, username: u.username }, u.chat)}`;
+    else line = await approveUser(env, u);
+  } else {
+    await setUser(env, u.chat, "removed", {});
+    line = `🚫 Отклонила: ${who({ first_name: u.name, username: u.username }, u.chat)}`;
+  }
+  await tg(env, "answerCallbackQuery", { callback_query_id: cb.id, text: act === "ok" ? "✅ Пустила" : "🚫 Отклонила" });
+  await tg(env, "editMessageText", { chat_id: cb.message.chat.id, message_id: cb.message.message_id, text: line,
+    parse_mode: "HTML", reply_markup: { inline_keyboard: [] }, _noTr: true });
 }
 
 // ───────────────────────────── разбор варианта маклера ─────────────────────────────
@@ -1209,7 +1232,7 @@ function maybeWatch(env, ctx) {
 }
 // ───────────────────────────── бета: приглашения, знакомство, поддержка, отзывы, тарифы, метрики ─────────────────────────────
 // Кнопки, которые клиенту можно (остальные tg() снимает: управление словами)
-export const CLIENT_BTN = /^(Q:|ob:|lang:|fb:|pl:)/;
+export const CLIENT_BTN = /^(Q:|ob:|lang:|fb:|pl:|adm:)/;   // adm: — заявки, только у владельца
 const tday = (ms = Date.now()) => new Date(ms + 5 * 3600e3).toISOString().slice(0, 10);   // день по Ташкенту
 const L3 = l => (l === "uz" || l === "en") ? l : "ru";
 export const payOn = env => String(env.PAYMENTS || "").toLowerCase() === "on";
@@ -2106,6 +2129,9 @@ export async function handleUpdate(env, upd) {
   const cb = upd.callback_query;
   if (cb) {
     const chat = String(cb.message?.chat?.id ?? "");
+    if (/^adm:(ok|no):\d+$/.test(cb.data || "") && chat === String(env.OWNER_CHAT) &&
+        String(cb.from?.id ?? chat) === String(env.OWNER_CHAT))
+      return (await adminCb(env, cb), "admin");
     if (!(await isClient(env, chat))) return "skip";
     const data = cb.data || "";
     if (/^ob:(rent|buy|daily)$/.test(data)) {          // знакомство: «Снять / Купить / Посуточно»

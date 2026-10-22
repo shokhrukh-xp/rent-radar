@@ -3456,6 +3456,15 @@ with mock.patch.object(rr, "send_telegram", lambda c, t_, **k: _RS.append(t_) or
         mock.patch.object(rr, "send_listing", lambda *a, **k: _RS.append("card") or True):
     rr.run_search(dict(cfg, telegram_chat_id="1"), _rs, _rset, days=14)
 assert "card" not in _RS and "все уже присылала" in _RS[0], _RS
+# присланное в очередь «по одной», но ещё не показанное — не «уже присылала»: напомнить и показать
+_rs.set_kv("card_queue", [{"ref": "L:uybor:78", "l": {"key": "uybor:78"}, "text": "к", "at": time.time()}])
+_RS = []
+with mock.patch.object(rr, "send_telegram", lambda c, t_, **k: _RS.append(t_) or True), \
+        mock.patch.dict(cg._BIZ_STORE, {"store": _rs}), \
+        mock.patch.object(rr, "show_next_card", lambda c, s_: _RS.append("next") or ["1"]):
+    rr.run_search(dict(cfg, telegram_chat_id="1", card_queue=True), _rs, _rset, days=14)
+assert "не показала" in _RS[0] and "все уже" not in _RS[0] and _RS[-1] == "next", _RS
+_rs.set_kv("card_queue", [])
 assert rr.card_line("🏠 <b>[Uybor]</b> #1 · x\n💰 $700\n🛏 3-комн · 📍 Мирабад\n🕐 09.10") == "3-комн · Мирабад · $700"
 _fm = rr.format_message(dict(_rl2, price_value=1000.0, created_at=_old), cfg, False)
 assert "$1 000" in _fm and "1 000.0" not in _fm and "🆕 свежее" not in _fm
@@ -3519,6 +3528,16 @@ with mock.patch.object(rr, "tg_call", _qtg), mock.patch.dict(cg._BIZ_STORE, {"st
     rr.card_followup(_qcfg, _qs, "L:s:uybor:2")                                       # «нравится» словами
     assert (_qs.get_kv("card_open") or {}).get("ref") == "L:uybor:3"
     assert any("Сохранила" in pl.get("text", "") for m, pl in _QT if m == "editMessageText")
+    # открытая карточка ушла вверх — повторить внизу с кнопками, старые кнопки снять
+    assert rr.waiting_cards(_qs) == {"uybor:3"}
+    assert not rr.reshow_open_card(_qcfg, _qs)                      # только что показана — не трогаем
+    _qs.set_kv("card_open", dict(_qs.get_kv("card_open"), at=time.time() - 600))
+    _QT.clear()
+    assert rr.reshow_open_card(_qcfg, _qs)
+    assert any(m == "editMessageReplyMarkup" for m, pl in _QT)
+    assert any(m == "sendMessage" and pl.get("text", "").startswith("карточка 3") and "Q:s|L:uybor:3" in pl.get("reply_markup", "")
+               for m, pl in _QT)
+    assert (_qs.get_kv("card_open") or {}).get("ref") == "L:uybor:3" and not _qs.get_kv("card_queue")
 # нет контакта — вместо «Уточнить» ссылка на объявление; кнопки карточки клиенту не снимаются, прочие — снимаются
 _kb2 = rr.card_kb("L:uybor:5", 0, {"url": "https://uybor.uz/listings/5"})
 assert _kb2["inline_keyboard"][1][0]["url"].endswith("/5") and len(_kb2["inline_keyboard"][0]) == 2

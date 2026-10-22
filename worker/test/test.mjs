@@ -851,9 +851,21 @@ console.log("OK — место по тексту поста: улица, дом,
   assert.equal(await handleUpdate(envI, msg("/start", "7201")), "waitlist");
   assert.ok(!(await W.isClient(envI, "7201")));
   assert.ok(/по приглашению/.test(sent.filter(x => String(x.chat_id) === "7201").at(-1).text));
-  assert.ok(sent.some(x => String(x.chat_id) === OWNER && /Просится в Ra'no/.test(x.text || "") && /approve 7201/.test(x.text || "")));
+  const req = sent.find(x => String(x.chat_id) === OWNER && /Просится в Ra'no/.test(x.text || ""));
+  assert.ok(req && /7201/.test(req.text));
+  assert.deepEqual(req.reply_markup.inline_keyboard[0].map(b => b.callback_data), ["adm:ok:7201", "adm:no:7201"]);
   assert.equal(await handleUpdate(envI, msg("/about", "7201")), "about");
-  await handleUpdate(envI, msg("/approve 7201"));
+  // чужой не может нажать «Пустить»
+  const cbU = (from, chat) => ({ update_id: ++uid, callback_query: { id: "c" + uid, data: "adm:ok:7201", from: { id: +from },
+    message: { message_id: 77, chat: { id: +chat } } } });
+  assert.notEqual(await handleUpdate(envI, cbU("7201", "7201")), "admin");
+  assert.ok(!(await W.isClient(envI, "7201")));
+  sent.length = 0;
+  assert.equal(await handleUpdate(envI, cbU(OWNER, OWNER)), "admin");   // кнопка владельца — доступ открыт
+  assert.ok(await W.isClient(envI, "7201"));
+  assert.ok(sent.some(x => x.m === "editMessageText" && /Пустила/.test(x.text)));
+  assert.ok(sent.some(x => String(x.chat_id) === "7201"));               // человеку — знакомство
+  await handleUpdate(envI, msg("/approve 7201"));                       // команда тоже работает
   assert.ok(await W.isClient(envI, "7201"));
   await env.DB.prepare("DELETE FROM users").run(); W.resetUsersCache();
 }

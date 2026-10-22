@@ -239,7 +239,7 @@ var T = {
     emptyT: "Здесь будет ваше избранное", emptyB: "Сохраняйте варианты кнопкой «Сохранить» на карточке в чате — здесь их можно сравнить, увидеть на карте и записаться на просмотр.",
     emptyF: "В этом фильтре пусто", viewsEmptyT: "Просмотров пока нет", viewsEmptyB: "Откройте вариант в избранном и нажмите «Записаться на просмотр».",
     notClient: "Мини-приложение откроется, когда вы начнёте поиск с Ra'no в чате.", authErr: "Откройте приложение из чата с Ra'no — кнопкой «Меню».",
-    netErr: "Нет связи. Попробуйте ещё раз.", done: "Готово", sent: "Передала Ra'no", asked2: "Ra'no пишет продавцу",
+    netErr: "Нет связи. Попробуйте ещё раз.", done: "Готово", sent: "Передала Ra'no", searchSaved: "Сохранила ✅ Варианты пришлю в чат", needMore: "Сохранила. Чтобы начать поиск, выберите комнаты и бюджет", asked2: "Ra'no пишет продавцу",
     saving: "Сохраняю…", ra: "Ra'no", digestAns: "Продавец #{id} ответил: {t}", digestView: "Просмотр #{id} — {w}.", toViews: "К просмотрам", toCard: "Открыть",
     open: "Открыть", backToChat: "Ra'no в чате"
   },
@@ -289,7 +289,7 @@ var T = {
     emptyT: "Bu yerda saralanganlaringiz bo'ladi", emptyB: "Chatdagi kartada «Saqlash»ni bosing — bu yerda solishtirish, xaritada ko'rish va ko'rishga yozilish mumkin.",
     emptyF: "Bu filtrda bo'sh", viewsEmptyT: "Hali ko'rishlar yo'q", viewsEmptyB: "Saralangandan variantni oching va «Ko'rishga yozilish»ni bosing.",
     notClient: "Ra'no bilan chatda qidiruvni boshlaganingizda ilova ochiladi.", authErr: "Ilovani Ra'no chatidan — «Menu» tugmasi orqali oching.",
-    netErr: "Aloqa yo'q. Yana urinib ko'ring.", done: "Tayyor", sent: "Ra'noga yetkazdim", asked2: "Ra'no sotuvchiga yozyapti",
+    netErr: "Aloqa yo'q. Yana urinib ko'ring.", done: "Tayyor", sent: "Ra'noga yetkazdim", searchSaved: "Saqladim ✅ Variantlarni chatga yuboraman", needMore: "Saqladim. Qidiruv uchun xonalar va byudjetni tanlang", asked2: "Ra'no sotuvchiga yozyapti",
     saving: "Saqlayapman…", ra: "Ra'no", digestAns: "#{id} sotuvchisi javob berdi: {t}", digestView: "#{id} ko'rish — {w}.", toViews: "Ko'rishlarga", toCard: "Ochish",
     open: "Ochish", backToChat: "Ra'no chatda"
   }
@@ -726,7 +726,14 @@ document.addEventListener("click", function (e) {
   if (a === "tgl") { var kk = el.getAttribute("data-k"); S.form[kk] = !S.form[kk]; haptic("sel"); return render(); }
   if (a === "draw") { location.href = "/draw?from=app"; return; }
   if (a === "savesearch") { var f = S.form; S.data.app.owner_only = f.owner;
-    act({ a: "search", deal: f.deal, rooms: f.rooms, budget: f.budget, districts: f.districts, furniture: f.furn, kids: f.kids, pets: f.pets, owner_only: f.owner }, t("sent")); return; }
+    if (S.saving) return;
+    S.saving = true;
+    act({ a: "search", deal: f.deal, rooms: f.rooms, budget: f.budget, districts: f.districts, furniture: f.furn, kids: f.kids, pets: f.pets, owner_only: f.owner },
+      t("searchSaved")).then(function (r) {
+      // варианты приходят в чат по одной — сразу туда, чтобы не ждать их здесь
+      if (r && r.ok && r.partial) { S.saving = false; return toast(t("needMore")); }
+      setTimeout(function () { S.saving = false; if (r && r.ok && tg && tg.close) tg.close(); }, r && r.ok ? 1600 : 0);
+    }, function () { S.saving = false; }); return; }
 });
 if (tg && tg.colorScheme === "dark") document.body.classList.add("dark");
 try { tg.onEvent("themeChanged", function () { document.body.classList.toggle("dark", tg.colorScheme === "dark"); }); } catch (e) {}
