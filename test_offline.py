@@ -1737,7 +1737,7 @@ es.set_kv("anketa", {"ans": {"deal": "buy", "object": "flat", "rooms": [], "budg
 ss = rr.effective_sale_cfg(base, es)["sale_search"]
 assert ss["districts"] == ["Чиланзар"] and ss["rooms"] == []
 es.set_kv("anketa", {"ans": {"deal": "rent", "budget": "900"}})
-assert rr.effective_sale_cfg(base, es) is base
+assert rr.effective_sale_cfg(base, es)["sale_search"]["enabled"] is False        # ищет аренду — продажу выключаем
 # ранжирование: сначала маклеры нужных районов
 es.set_kv("anketa", {"ans": {"deal": "buy", "districts": [], "note": "ближе к центру"}})
 es.upsert_broker("a", "X", "Окраина", "901000001", 90, "Сергели", None, deal="sale")
@@ -3244,3 +3244,25 @@ for note_, strict_ in (("прямо в центре", True), ("рядом с ц�
     assert nr_["strict"] is strict_ and nr_["km"] == (2.6 if strict_ else 3.6), (note_, nr_)
     Path("/tmp/test_strict.db").unlink(missing_ok=True)
 print("OK — «в центре» строго: только точное место в радиусе центра; «рядом с центром» — с полосой вокруг")
+
+# ============ сменил покупку на аренду: продажу больше не ищем, первые варианты аренды — сразу из собранного ============
+rdb_ = Path("/tmp/test_switch.db"); rdb_.unlink(missing_ok=True)
+rst_ = rr.Store(rdb_)
+rst_.set_kv("anketa", {"ans": {"deal": "rent", "object": "flat", "rooms": ["2", "3"], "districts": ["9"], "budget": "700"}})
+assert rr.effective_sale_cfg(dict(cfg, sale_search={"enabled": True, "max_price_usd": 45000}), rst_)["sale_search"]["enabled"] is False
+rst_.set_kv("anketa", {})
+assert rr.effective_sale_cfg(dict(cfg, sale_search={"enabled": True}), rst_)["sale_search"]["enabled"] is True   # анкеты нет — как было
+sdb3_ = Path("/tmp/test_switch_sale.db"); sdb3_.unlink(missing_ok=True)
+rr.Store(sdb3_).set_kv("sale_pick", [{"key": "sale:uybor:1", "score": 70, "line": "x", "at": time.time()}])
+RS2 = []
+wad_ = json.dumps({"v": 3, "replace": True, "src": "chat", "ans": {"deal": "rent", "object": "flat", "rooms": ["2", "3"],
+                                                                     "districts": ["9"], "budget": "700"}})
+with mock.patch.object(rr, "SALE_DB_PATH", sdb3_), mock.patch.object(rr, "run_search", lambda c, st, se, **k: RS2.append(se) or ""), \
+        mock.patch.object(rr, "push_snapshot", lambda *a, **k: False), mock.patch.object(rr, "tg_call", lambda *a, **k: {"ok": True}), \
+        mock.patch.object(rr, "fetch_updates", lambda c, st, lp=0: ({"result": [{"update_id": 5, "message": {
+            "chat": {"id": 4242}, "web_app_data": {"data": wad_}}}]}, "wq_offset")):
+    rr.process_commands(dict(cfg, telegram_chat_id="4242"), rst_)
+assert RS2 and RS2[0].get("districts") == ["Яккасарай"], RS2
+assert rr.Store(sdb3_).get_kv("sale_pick") == []
+rdb_.unlink(missing_ok=True); sdb3_.unlink(missing_ok=True)
+print("OK — сменил покупку на аренду: продажа выключена, её подборка сброшена, первые варианты аренды — сразу")

@@ -1807,7 +1807,10 @@ def effective_sale_cfg(cfg, store):
     """Покупка из чата-интервью → поиск Uybor по тем же параметрам.
     Без районов в запросе — районы из настроек (по умолчанию центр)."""
     ans = (store.get_kv("anketa") or {}).get("ans") or {}
-    if ans.get("deal") != "buy" or ans.get("object", "flat") != "flat":
+    if ans.get("deal") and (ans.get("deal") != "buy" or ans.get("object", "flat") != "flat"):
+        # клиент ищет аренду (или не квартиру): поиск продажи выключен, а не «по настройкам по умолчанию»
+        return {**cfg, "sale_search": {**(cfg.get("sale_search") or {}), "enabled": False}}
+    if ans.get("deal") != "buy":
         return cfg
     ss = dict(cfg.get("sale_search") or {})
     b = str(ans.get("budget") or "")
@@ -2929,7 +2932,9 @@ def run_search(cfg, store, settings, limit=5, days=7) -> str:
 
     for i, l in enumerate([x for x in ok if x.get("photo_urls")][:limit], 1):   # только с фото
         l["title"] = f"#{i} · {l.get('title', '')}"
-        send_listing(cfg, settings, l, likely_makler=False)
+        if send_listing(cfg, settings, l, likely_makler=False):
+            store.conn.execute("UPDATE listings SET notified=1 WHERE key=?", (l["key"],))
+            store.conn.commit()
         time.sleep(1)
     return ""
 
@@ -3661,6 +3666,18 @@ def _process_updates(cfg: dict, store, ups: list, settings: dict) -> dict:
                 ans = (store.get_kv("anketa") or {}).get("ans") or {}
                 if ans.get("deal") == "rent":     # «ищу сама» по аренде — по параметрам из разговора
                     settings.update(concierge.rent_settings(ans, settings, cfg, store))
+                    store.set_kv("settings", settings)
+                    if sale_path().exists():      # подборка продажи от прошлого поиска — больше не к месту
+                        try:
+                            sp_ = open_sale()
+                            sp_.set_kv("sale_pick", [])
+                            sp_.conn.close()
+                        except Exception as e:
+                            log.info("подборку продажи не очистила: %s", e)
+                    try:                          # обещали «первые варианты через пару минут» — из уже собранного
+                        run_search(cfg, store, settings, days=14)
+                    except Exception as e:
+                        log.warning("первые варианты аренды не собрала: %s", e)
                 push_snapshot(cfg, store, settings, force=True)   # новый текст запроса — в ссылки маклерам
             continue
 
@@ -5257,6 +5274,9 @@ def run():
         force_flag = store.get_kv("sale_force")                # «Проверить сайты сейчас» или новые параметры
         force_sale = bool(force_flag)
         fresh = bool(store.get_kv("fresh_start"))              # после сброса — ждём новых параметров из чата
+        sale_on = bool((effective_sale_cfg(cfg, store).get("sale_search") or {}).get("enabled"))
+        if not sale_on:
+            fresh = True                                       # клиент ищет аренду — продажу не ищем и не шлём
         if sale_store is not None and not fresh and (once or now >= next_sale or force_sale):
             next_sale = now + (sale_cfg.get("uybor") or {}).get("interval_seconds", 60)
             if force_sale:
