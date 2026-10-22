@@ -3981,3 +3981,45 @@ with mock.patch.object(rr, "tg_call", _qtg), mock.patch.dict(cg._BIZ_STORE, {"st
     assert len(_docs) == 1 and "my.gov.uz" in _docs[0] and "согласие супруга" in _docs[0], _docs
 _qp.unlink(missing_ok=True)
 print("OK — качество: коды 20/50/87, один разбор фото на всех, шортлист без повторов и с ценой, ипотека и документы при покупке")
+
+# ============ приложение Ra'no: снимок для мини-приложения и действия из него ============
+import miniapp as _MA
+_ap = Path("/tmp/test_app.db"); _ap.unlink(missing_ok=True)
+_as = rr.Store(_ap)
+_AT = []
+def _atg(c, m, pl, **k):
+    _AT.append((m, dict(pl)))
+    return {"ok": True, "result": {"message_id": 1900 + len(_AT)}}
+_acfg = dict(cfg, telegram_chat_id="95", worker_url="")
+with mock.patch.object(rr, "tg_call", _atg), mock.patch.dict(cg._BIZ_STORE, {"store": _as}), \
+        mock.patch.object(_tn, "shared_store", lambda s: _as), mock.patch.object(rr, "ai_parse", lambda *a, **k: None):
+    _l = {"key": "uybor:9301", "source": "uybor", "site": "Uybor", "title": "2-комн", "text": "2-комн, Мирабад. Тел +998 90 123 45 67",
+          "district": "Мирабад", "rooms": 2, "price_value": 650, "price_currency": "USD", "price_usd": 650, "area": 58,
+          "phones": ["901234567"], "url": "https://uybor.uz/listings/9301", "photo_urls": ["https://img/1.jpg"],
+          "geo": {"lat": 41.2952, "lon": 69.2718, "src": "сайт"}, "created_at": ""}
+    _as.save(dict(_l), notified=True)
+    _oid, _ = cg.add_site_offer(_acfg, _as, dict(_l))
+    for i in range(8):                                   # рынок: похожие 2-комн в Мирабаде
+        _as.save({"key": f"uybor:93{i:02d}x", "source": "uybor", "title": "x", "text": "x", "district": "Мирабад", "rooms": 2,
+                  "price_value": 600 + i * 20, "price_currency": "USD", "price_usd": 600 + i * 20, "created_at": "", "url": f"u{i}", "phones": []}, notified=True)
+    _snap = _MA.app_snapshot(_acfg, _as, rr.default_settings())
+    _o = _snap["offers"][0]
+    assert _o["id"] == _oid and _o["kind"] == "saved" and _o["photos"] == [{"u": "https://img/1.jpg"}]
+    assert abs(_o["lat"] - 41.2952) < 1e-4 and _o["metro"]["name"] and _o["market"]["n"] >= 6
+    assert "123 45 67" not in json.dumps(_snap, ensure_ascii=False)          # телефоны в приложение не попадают
+    assert _snap["market"] and _snap["market"][0]["d"] == "Мирабад"
+    # действия: чек-лист — в карточку и заметку; работа — в настройки; «нравится» — этап
+    _st = rr.default_settings()
+    assert _MA.handle_action(_acfg, _as, _st, {"a": "check", "oid": _oid, "check": {"water": 2, "noise": 1, "zzz": 2}, "text": "напор слабый"})
+    _e = cg.get_offer(_as, _oid)["extra"]
+    assert _e["check"] == {"water": 2, "noise": 1} and any("вода" in n["text"] for n in _e["notes"])
+    assert _MA.handle_action(_acfg, _as, _st, {"a": "work", "lat": 41.3155, "lon": 69.2468, "label": "Ташкент Сити"})
+    assert (_as.get_kv("settings") or {})["work"]["label"] == "Ташкент Сити"
+    assert not _MA.handle_action(_acfg, _as, _st, {"a": "work", "lat": 55.7, "lon": 37.6})       # не Ташкент
+    assert _MA.handle_action(_acfg, _as, _st, {"a": "like", "oid": _oid})
+    assert _MA.app_snapshot(_acfg, _as, _st)["offers"][0]["kind"] == "liked"
+    assert not _MA.handle_action(_acfg, _as, _st, {"a": "like", "oid": 99999})
+    # снимок для воркера несёт раздел app
+    assert rr.ui_snapshot(_acfg, _as, _st)["app"]["offers"][0]["id"] == _oid
+_ap.unlink(missing_ok=True)
+print("OK — приложение Ra'no: снимок (фото, точка, метро, рынок, без телефонов) и действия (чек-лист, работа, этапы)")

@@ -1007,3 +1007,55 @@ console.log("OK — лимит модели: предупреждение вла
 }
 console.log("OK — номер продавца ответом на карточку — к этому объявлению");
 
+
+// ── приложение Ra'no (/app): подпись, данные из снимка Python с подписанными фото, действия — в очередь Python
+{
+  const W = await import("../src/index.js");
+  const enc = new TextEncoder();
+  const hex = b => [...new Uint8Array(b)].map(x => x.toString(16).padStart(2, "0")).join("");
+  async function signed(user, token = "T") {
+    const p = new URLSearchParams({ auth_date: String(Math.floor(Date.now() / 1000)), query_id: "q1", user: JSON.stringify(user) });
+    const dcs = [...p.entries()].sort(([a], [b]) => a < b ? -1 : 1).map(([k, v]) => `${k}=${v}`).join("\n");
+    const k1 = await crypto.subtle.importKey("raw", enc.encode("WebAppData"), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+    const sec = await crypto.subtle.sign("HMAC", k1, enc.encode(token));
+    const k2 = await crypto.subtle.importKey("raw", sec, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+    p.set("hash", hex(await crypto.subtle.sign("HMAC", k2, enc.encode(dcs))));
+    return p.toString();
+  }
+  const post = (path, body) => worker.fetch(new Request("https://w.example" + path, { method: "POST", body: JSON.stringify(body),
+    headers: { "content-type": "application/json" } }), env, { waitUntil() {} }).then(r => r.json());
+  const page = await (await worker.fetch(new Request("https://w.example/app"), env, { waitUntil() {} })).text();
+  assert.ok(/telegram-web-app\.js/.test(page) && /Избранное/.test(page) && /Saralangan/.test(page));
+  assert.equal((await post("/app/data", { initData: "hash=00" })).error, "auth");
+  assert.equal((await post("/app/data", { initData: await signed({ id: 999222 }) })).error, "not_client");
+  await worker.fetch(new Request("https://w.example/svc/snapshot", { method: "POST", headers: { "x-svc": "svc", "content-type": "application/json" },
+    body: JSON.stringify({ offers: [], app: { v: 1, offers: [{ id: 5, kind: "answer", price: 650, photos: [{ f: "FILE1" }, { u: "https://img.example/a.jpg" }] }] } }) }),
+    env, { waitUntil() {} });
+  const d = await post("/app/data", { initData: await signed({ id: +OWNER }) });
+  assert.ok(d.ok && d.app.offers[0].id === 5 && d.avatar);
+  const ph = d.app.offers[0].photos;
+  assert.ok(/\/app\/ph\?c=\d+&f=FILE1&s=[0-9a-f]{32}$/.test(ph[0].src) && ph[1].src === "https://img.example/a.jpg");
+  const bad = await worker.fetch(new Request(ph[0].src.replace(/s=[0-9a-f]+/, "s=00")), env, { waitUntil() {} });
+  assert.equal(bad.status, 403);                                                     // чужая подпись — не отдаём
+  qq = await (await svc("/svc/updates?after=0")).json();
+  const base = qq.result.length ? qq.result.at(-1).update_id : 0;
+  const me = await signed({ id: +OWNER });
+  assert.ok((await post("/app/act", { initData: me, a: "ask", oid: 5 })).ok);
+  assert.ok((await post("/app/act", { initData: me, a: "view", oid: 5, at: "2026-10-25T18:00:00+05:00" })).ok);
+  assert.equal((await post("/app/act", { initData: me, a: "view", oid: 5, at: "завтра" })).error, "bad_time");
+  assert.ok((await post("/app/act", { initData: me, a: "note", oid: 5, text: "Парковка?" })).ok);
+  assert.ok((await post("/app/act", { initData: me, a: "check", oid: 5, check: { water: 2, noise: 1, x: 9 }, text: "напор слабый" })).ok);
+  assert.ok((await post("/app/act", { initData: me, a: "search", deal: "rent", rooms: ["2", "9"], budget: 700, districts: ["2", "99"], kids: true, owner_only: false })).ok);
+  const q = (await (await svc(`/svc/updates?after=${base}`)).json()).result.map(u => u.message);
+  assert.ok(q.some(m => m._app?.a === "ask" && m._app.oid === 5));
+  assert.ok(q.some(m => m._view?.at === "2026-10-25T18:00:00+05:00"));
+  assert.ok(q.some(m => m._note?.text === "Парковка?"));
+  const chk = q.find(m => m._app?.a === "check")._app;
+  assert.ok(chk.check.water === 2 && chk.check.noise === 1 && !("x" in chk.check) && chk.text === "напор слабый");
+  const wad = q.find(m => m.web_app_data);
+  const ans = JSON.parse(wad.web_app_data.data).ans;
+  assert.deepEqual(ans.rooms, ["2"]); assert.equal(ans.budget, "700"); assert.deepEqual(ans.districts, ["2"]); assert.equal(ans.who, "family_kids");
+  assert.ok(q.some(m => m._app?.a === "owner_only" && m._app.on === false));
+  assert.equal(W.MAP_MENU.text, "Ra'no");
+}
+console.log("OK — приложение Ra'no: подпись, данные и фото по подписи, действия и параметры поиска — в очередь Python");

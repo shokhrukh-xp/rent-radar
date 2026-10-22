@@ -1,4 +1,5 @@
 import { MAP_HTML } from "./map.js";
+import { APP_HTML } from "./app.js";
 import { DRAW_HTML } from "./draw.js";
 import { aboutHtml } from "./about.js";
 /* Ra'no — «лицо» бота на Cloudflare Worker.
@@ -1627,10 +1628,103 @@ export const DRAW_HINT = {
   en: "🗺 Tap «Menu» at the bottom left → «Map». Tap «Draw» and trace the edge of the place with your finger — several " +
     "areas are fine. Then «Save»: I'll search only inside them, and only listings with an exact address.",
 };
-export const MAP_MENU = { type: "web_app", text: "Карта", web_app: { url: "" } };
+export const MAP_MENU = { type: "web_app", text: "Ra'no", web_app: { url: "" } };
+export const MENU_V = 2;                            // 2 — приложение Ra'no (/app) вместо одной «Карты» (/draw)
 export async function setMapMenu(env, chat) {
   if (!ORIGIN) return null;
-  return tg(env, "setChatMenuButton", { chat_id: +chat, menu_button: { ...MAP_MENU, web_app: { url: ORIGIN + "/draw" } } });
+  const r = await tg(env, "setChatMenuButton", { chat_id: +chat, menu_button: { ...MAP_MENU, web_app: { url: ORIGIN + "/app" } } });
+  if (r && r.ok !== false) await kvSet(env, "menu_v:" + chat, MENU_V);
+  return r;
+}
+
+// ───────────────────────────── приложение Ra'no (Mini App из кнопки «Меню») ─────────────────────────────
+// Данные — раздел app из снимка Python (ui:<чат>); действия — в очередь Python сообщением с _app/_view/_note,
+// параметры поиска — как из интервью (web_app_data). Фото из Telegram отдаём через /app/ph с подписью.
+async function photoSig(env, chat, fid) {
+  const enc = new TextEncoder();
+  const k = await crypto.subtle.importKey("raw", enc.encode(String(env.SVC_KEY || await botToken(env))),
+    { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  return hexOf(await crypto.subtle.sign("HMAC", k, enc.encode(chat + ":" + fid))).slice(0, 32);
+}
+export async function appPhoto(env, url) {
+  const c = url.searchParams.get("c") || "", f = url.searchParams.get("f") || "", sig = url.searchParams.get("s") || "";
+  if (!c || !f || sig !== await photoSig(env, c, f)) return new Response("forbidden", { status: 403 });
+  const r = await tg(env, "getFile", { file_id: f });
+  const path = r?.result?.file_path;
+  if (!path) return new Response("not found", { status: 404 });
+  const img = await fetch(`https://api.telegram.org/file/bot${await botToken(env)}/${path}`);
+  if (!img.ok) return new Response("not found", { status: 404 });
+  return new Response(img.body, { headers: { "content-type": img.headers.get("content-type") || "image/jpeg",
+    "cache-control": "private, max-age=86400" } });
+}
+const APP_ACTS = ["ask", "like", "think", "skip", "check", "work", "owner_only"];
+export async function appApi(env, path, body) {
+  const user = await checkInitData(env, body?.initData);
+  if (!user) return { ok: false, error: "auth" };
+  const chat = String(user.id);
+  if (!(await isClient(env, chat))) return { ok: false, error: "not_client" };
+  if (path === "/app/data") {
+    const ui = (await kvGet(env, uiKey(env, chat), null)) || {};
+    const app = ui.app ? JSON.parse(JSON.stringify(ui.app)) : { offers: [] };
+    for (const o of app.offers || [])
+      o.photos = await Promise.all((o.photos || []).map(async p => ({ src: p.u ? p.u :
+        `${ORIGIN}/app/ph?c=${chat}&f=${encodeURIComponent(p.f)}&s=${await photoSig(env, chat, p.f)}` })));
+    const a = (await kvGet(env, ivKey(chat), null))?.ans || {};
+    return { ok: true, app, areas: (await kvGet(env, "areas:" + chat, null)) || [], avatar: AVATAR_URL, bot: botName(env),
+      lang: a.lang || null, ans: { deal: a.deal, rooms: a.rooms, budget: a.budget, districts: a.districts,
+        furniture: a.furniture, who: a.who, pets: a.pets } };
+  }
+  const act = String(body?.a || "");
+  const oid = parseInt(body?.oid, 10) || 0;
+  const base = { message_id: 0, chat: { id: +chat, type: "private" }, from: { id: +chat }, date: Math.floor(Date.now() / 1000), text: "" };
+  await track(env, chat, "app", act).catch(() => null);
+  if (APP_ACTS.includes(act)) {
+    const x = { a: act, oid };
+    if (act === "check") {
+      x.check = {};
+      for (const [k, v] of Object.entries(body.check || {}).slice(0, 20)) if ([0, 1, 2].includes(+v)) x.check[String(k).slice(0, 12)] = +v;
+      x.text = String(body.text || "").slice(0, 300);
+    }
+    if (act === "work") Object.assign(x, { lat: +body.lat, lon: +body.lon, label: String(body.label || "").slice(0, 60) });
+    if (act === "owner_only") x.on = !!body.on;
+    await queueAndWake(env, { message: { ...base, _app: x } });
+    return { ok: true };
+  }
+  if (act === "view") {
+    const at = String(body.at || "");
+    if (!oid || !/^\d{4}-\d\d-\d\dT\d\d:\d\d(:\d\d)?\+05:00$/.test(at)) return { ok: false, error: "bad_time" };
+    await queueAndWake(env, { message: { ...base, _view: { oid, at, label: "" } } });
+    return { ok: true };
+  }
+  if (act === "note") {
+    const text = String(body.text || "").trim().slice(0, 500);
+    if (!oid || !text) return { ok: false, error: "empty" };
+    await queueAndWake(env, { message: { ...base, text, _note: { oid, text } } });
+    return { ok: true };
+  }
+  if (act === "search") {
+    const iv = (await kvGet(env, ivKey(chat), null)) || emptyIv();
+    const a = iv.ans || (iv.ans = {});
+    a.deal = body.deal === "buy" ? "buy" : "rent";
+    const rooms = (Array.isArray(body.rooms) ? body.rooms : []).map(String).filter(r => /^[1-4]$/.test(r));
+    if (rooms.length) { a.rooms = [...new Set(rooms)].sort(); delete a.rooms_any; }
+    const b = Math.round(+body.budget || 0);
+    if (b > 0 && b < 1e8) a.budget = String(b);
+    a.districts = (Array.isArray(body.districts) ? body.districts : []).map(String).filter(d => /^\d{1,2}$/.test(d) && +d < DISTRICTS.length);
+    if (a.districts.length) { delete a.districts_any; delete a.near; delete a.near_km; }
+    if (a.deal === "rent") {
+      a.furniture = body.furniture ? "yes" : "any";
+      if (body.kids) a.who = "family_kids"; else if (a.who === "family_kids") a.who = "family";
+      if (body.pets) { if (!a.pets || a.pets === "no") a.pets = "pet_other"; } else a.pets = "no";
+    }
+    a.object = a.object || "flat"; a.city = a.city || "tashkent";
+    await kvSet(env, ivKey(chat), iv);
+    if (essentialsOk(a))
+      await enqueue(env, { message: { ...base, web_app_data: { data: JSON.stringify({ v: 3, replace: true, src: "app", ans: finalAns(a) }) } } });
+    await queueAndWake(env, { message: { ...base, _app: { a: "owner_only", on: body.owner_only !== false } } });
+    return { ok: true, partial: !essentialsOk(a) };
+  }
+  return { ok: false, error: "bad_act" };
 }
 export async function drawApi(env, path, body) {
   const user = await checkInitData(env, body?.initData);
@@ -2221,6 +2315,8 @@ export async function handleUpdate(env, upd) {
   if (msg.successful_payment) { await paid(env, msg); return "paid"; }
   let client = chat === owner || await isClient(env, chat);
   if (client) await rememberWho(env, chat, msg.from).catch(() => null);
+  if (client && ORIGIN && (await kvGet(env, "menu_v:" + chat, 0)) !== MENU_V)   // кнопка «Меню» → приложение Ra'no
+    await setMapMenu(env, chat).catch(() => null);
   if (!client && /^\/(about|privacy)(@\w+)?$/i.test(String(msg.text || "").trim())) {   // кто такая Ra'no — любому
     const L0 = langOf(msg.from);
     await say(env, chat, ABOUT[L0] + `\n\n${ORIGIN || ""}/about?lang=${L0}`, { _noTr: true });
@@ -2488,6 +2584,14 @@ export default {
     if (p === "/draw" || p === "/draw/") {
       return new Response(DRAW_HTML, { headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-cache" } });
     }
+    if (p === "/app" || p === "/app/") {
+      return new Response(APP_HTML, { headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-cache" } });
+    }
+    if ((p === "/app/data" || p === "/app/act") && req.method === "POST") {
+      const body = await req.json().catch(() => null);
+      return json(await appApi(env, p, body));
+    }
+    if (p === "/app/ph") return appPhoto(env, url);
     if ((p === "/draw/load" || p === "/draw/save") && req.method === "POST") {
       const body = await req.json().catch(() => null);
       return json(await drawApi(env, p, body));

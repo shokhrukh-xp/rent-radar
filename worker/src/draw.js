@@ -128,7 +128,10 @@ $("#save").onclick = async () => {
   $("#save").disabled = false;
   if (!r.ok) return toast(L_.err, 2400);
   toast(areas.length ? L_.saved : L_.cleared);
-  setTimeout(() => { try { tg.close(); } catch (e) {} }, 900);
+  setTimeout(() => {                         // открыли из приложения Ra'no — вернуться в него, иначе закрыть
+    if (new URLSearchParams(location.search).get("from") === "app") { location.href = "/app?tab=search"; return; }
+    try { tg.close(); } catch (e) {}
+  }, 900);
 };
 api("/draw/load", {}).then(r => {
   if (r.lang) applyLang(r.lang);

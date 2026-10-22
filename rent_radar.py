@@ -39,6 +39,7 @@ from i18n import t, dist
 import geo
 import tenants
 import outreach
+import miniapp
 
 if __name__ == "__main__":
     # Запуск скриптом: модуль называется __main__, а concierge/sale_sources/followup делают `import rent_radar` —
@@ -3005,7 +3006,12 @@ def ui_snapshot(cfg, store, settings) -> dict:
             screens[name] = fn(cfg, store)
         except Exception as e:
             log.info("экран %s для снимка: %s", name, e)
-    return {"offers": offers, "offers_total": len(pool), "shortlist": shortlist, "written": written,
+    try:
+        app = miniapp.app_snapshot(cfg, store, settings)          # мини-приложение: избранное, карта, просмотры
+    except Exception as e:
+        log.info("снимок мини-приложения: %s", e)
+        app = None
+    return {"app": app, "offers": offers, "offers_total": len(pool), "shortlist": shortlist, "written": written,
             "sl": sl, "sl_empty": concierge.SL_EMPTY, "cards": cards, "texts": texts,
             "screens": screens, "ctx": ctx,
             "free": cfg.get("free_offers", 2), "deal": deal,
@@ -3981,6 +3987,10 @@ def _process_updates(cfg: dict, store, ups: list, settings: dict) -> dict:
             return
         if msg.get("_link"):                 # воркер: владелец прислал ссылку на объявление
             handle_link(cfg, store, msg)
+            return
+        if msg.get("_app"):                  # действие из мини-приложения (подпись проверил воркер)
+            if miniapp.handle_action(cfg, store, settings, msg["_app"]):
+                changed = snap = True
             return
         if msg.get("_owner_offer"):          # воркер: владелец переслал/вставил вариант
             handle_owner_offer(cfg, store, msg)
