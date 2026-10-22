@@ -2575,8 +2575,10 @@ export default {
           const d = await r.json().catch(() => ({}));
           return json({ ok: r.ok, error: d.error?.message, images: (d.predictions || []).map(x => x.bytesBase64Encoded).filter(Boolean) });
         }
+        const refs = (Array.isArray(b.refs) ? b.refs : []).slice(0, 3)       // образцы: тот же персонаж, другой вариант
+          .map(d => ({ inlineData: { mimeType: "image/png", data: String(d) } }));
         const r = await fetch(base + ":generateContent", { method: "POST", headers: hdr, body: JSON.stringify({
-          contents: [{ role: "user", parts: [{ text: String(b.prompt) }] }],
+          contents: [{ role: "user", parts: [...refs, { text: String(b.prompt) }] }],
           generationConfig: { responseModalities: ["IMAGE", "TEXT"], imageConfig: { aspectRatio: b.aspect || "1:1" } } }) });
         const d = await r.json().catch(() => ({}));
         const parts = d.candidates?.[0]?.content?.parts || [];
