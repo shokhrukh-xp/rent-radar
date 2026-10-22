@@ -15,6 +15,7 @@ WAKE_GH = "off"
 MULTI_USER = "on"
 # по приглашению: каждый новый человек — заявка владельцу («Пустить: /approve …»), сам по /start не входит
 INVITE_ONLY = "on"
+IMG_MAIN_PER_DAY = "12"     # картинки Gemini на ключе бота в сутки (дизайн, бренд); свой ключ — GEMINI_IMAGE_KEY
 USER_LIMIT = "20"            # Python работает на сервере sonar (deploy/server); GitHub Actions — только вручную
 
 [[d1_databases]]
