@@ -530,6 +530,7 @@ export function parseNum(v) {
   let t = String(v || "").toLowerCase().replace(/\u00a0/g, " ");
   const mult = /млн|mln|million|миллион/.test(t) ? 1e6 : /тыс|ming|\d\s*(k|к)(?![a-zа-яё])|thousand/.test(t) ? 1e3 : 1;
   t = t.replace(/(\d)[\s'](?=\d{3}\b)/g, "$1");             // пробелы-разделители тысяч
+  if (/(^|[^\d.])\d{1,3}(\.\d{3})+(?![\d.])/.test(t)) t = t.replace(/(\d)\.(?=\d{3}(?!\d))/g, "$1");   // «44.000$», «1.200.000»
   t = /\d,\d{3}(\D|$)/.test(t) ? t.replace(/,(?=\d{3}(\D|$))/g, "") : t.replace(",", ".");
   const m = t.match(/\d+(?:\.\d+)?/);
   return m ? +m[0] * mult : NaN;
@@ -1117,13 +1118,14 @@ export function cleanAreas(raw) {
   const out = [];
   for (const a of raw.slice(0, 6)) {
     if (!Array.isArray(a)) return null;
-    const pts = a.slice(0, 300).map(q => [Math.round(+q[0] * 1e5) / 1e5, Math.round(+q[1] * 1e5) / 1e5])
+    const pts = a.slice(0, 300).filter(q => Array.isArray(q) && q.length >= 2)
+      .map(q => [Math.round(+q[0] * 1e5) / 1e5, Math.round(+q[1] * 1e5) / 1e5])
       .filter(([la, lo]) => la > 40.9 && la < 41.7 && lo > 68.9 && lo < 69.8);
     if (pts.length >= 4) out.push(pts);
   }
   return out;
 }
-export const DRAW_ASK = /^\/(draw|area|areas|karta)(@\w+)?$|(нарис|обвест|обвед|очерт|выдел)\w*[^.!?\n]{0,40}(карт|облаc|облас|зон|участ)|(карт\w*)[^.!?\n]{0,20}(нарис|обвест|обвед|очерт)|xaritada\s+(chiz|belgila)|draw\s+(an?\s+)?(area|on the map)/i;
+export const DRAW_ASK = /^\/(draw|area|areas|karta)(@\w+)?$|(нарис|обвест|обвед|очерт)\w*[^.!?\n]{0,40}(карт(?!оч)|облаc|облас)|выдел\w*[^.!?\n]{0,30}карт(?!оч)|(карт\w*)[^.!?\n]{0,20}(нарис|обвест|обвед|очерт)|xaritada\s+(chiz|belgila)|draw\s+(an?\s+)?(area|on the map)/i;
 export const DRAW_HINT = {
   ru: "🗺 Нажмите «Меню» слева внизу → «Карта». Там нажмите «Обвести» и проведите пальцем по краю нужного места — " +
     "можно несколько областей. Потом «Сохранить»: буду искать только внутри них и только объявления с точным адресом. " +
@@ -1300,8 +1302,9 @@ export async function interviewCore(env, iv, text, ctx = null) {
   const fin = finalAns(iv.ans);
   const sig = JSON.stringify(fin);
   let ready = false;
-  if (out.ready && essentialsOk(iv.ans) && sig !== iv.sent) { iv.sent = sig; ready = true; }
-  return { reply, ready, fin, raw: out, via: out._via };
+  // iv.sent ставит тот, кто реально отправил поиск в Python (interviewTurn) — иначе готовый поиск теряется
+  if (out.ready && essentialsOk(iv.ans) && sig !== iv.sent) ready = true;
+  return { reply, ready, fin, sig, raw: out, via: out._via };
 }
 
 // Действия из разговора: модель выбрала intent — делаем сразу, а в историю пишем, что сделали
@@ -1448,6 +1451,14 @@ export async function interviewTurn(env, chat, text, card = null) {
     await say(env, chat, "🔄 С чистого листа!\n\n" + reply, { reply_markup: OWNER_KB });
     return;
   }
+  if (ready) {                                   // параметры собраны — поиск в Python при любом intent
+    iv.sent = res.sig; iv.sentAt = Date.now();
+    await kvSet(env, ivKey(chat), iv);
+    await enqueue(env, { message: { chat: { id: +chat || chat, type: "private" }, from: { id: +chat || chat },
+      date: Math.floor(Date.now() / 1000),
+      web_app_data: { data: JSON.stringify({ v: 3, replace: true, src: "chat", ans: fin }) } } });
+    if (intent !== "search") await wake(env);
+  }
   if (intent === "card") return cardAction(env, chat, res.raw || {}, card, recent, iv, text);
   const act = await chatAction(env, chat, intent, res.raw?.items, ui, iv, reply);
   if (act) return act;
@@ -1464,11 +1475,7 @@ export async function interviewTurn(env, chat, text, card = null) {
   }
   await kvSet(env, ivKey(chat), iv);
   if (ready) {
-    iv.sentAt = Date.now(); await kvSet(env, ivKey(chat), iv);
-    await enqueue(env, { message: { chat: { id: +chat || chat, type: "private" }, from: { id: +chat || chat },
-      date: Math.floor(Date.now() / 1000),
-      web_app_data: { data: JSON.stringify({ v: 3, replace: true, src: "chat", ans: fin }) } } });
-    const alive = await wake(env);
+    await wake(env);
     const lang = fin.lang || "ru";
     reply += "\n\n" + (fin.deal === "daily"
       ? { ru: "📇 Посуточно быстрее всего находят маклеры — сейчас покажу текст запроса.", uz: "📇 Kunlik ijarani maklerlar tezroq topadi — so'rov matnini hozir ko'rsataman.", en: "📇 Daily rentals are fastest via brokers — I'll show the request text now." }[lang]
@@ -1494,13 +1501,20 @@ async function startInterview(env, chat, fresh, lang = "ru") {
 export const BIZ_ASK = /(подключ\w*|привяз\w*|привяж\w*|настро\w*|ulash|ulang)[^.!?\n]{0,40}(телеграм\w*|telegram|аккаунт\w*|akkaunt)|telegram\s*(business|для\s*бизнеса|biznes)|бизнес[- ]?(режим|аккаунт)|(читать|отвечать)[^.!?\n]{0,25}маклер\w*\s+(в|из)\s+(моих|моём|моем|мой)/i;
 
 // «не хочу давать доступ», «без подключения» — работа через пересылку
-export const BIZ_NO = /без\s+(подключени[а-яё]*|доступа)|не\s+(хочу|буду|надо|нужно)\s+(давать\s+)?(подключ[а-яё]*|доступ[а-яё]*|давать\s+доступ)|(отключ[а-яё]*|выключ[а-яё]*)\s+(тебя\s+)?(от\s+)?(моего\s+)?(телеграм[а-яё]*|чат[а-яё]*)|ulamasdan|ulamayman/i;
+export const BIZ_NO = /без\s+(подключени[а-яё]*\s+(к\s+)?(телеграм|аккаунт|тебя|вас)|доступа\s+(к\s+)?(телеграм|аккаунт|чат|переписк))|не\s+(хочу|буду|надо|нужно)\s+(давать\s+)?(подключ[а-яё]*|доступ[а-яё]*|давать\s+доступ)|(отключ[а-яё]*|выключ[а-яё]*)\s+(тебя\s+)?(от\s+)?(моего\s+)?(телеграм[а-яё]*|чат[а-яё]*)|ulamasdan|ulamayman/i;
 
 export async function handleUpdate(env, upd) {
   const owner = String(env.OWNER_CHAT);
-  const last = await kvGet(env, "last_upd", 0);
-  if (upd.update_id && upd.update_id <= last) return "dup";        // повтор от Telegram
-  if (upd.update_id) await kvSet(env, "last_upd", upd.update_id);
+  // повтор от Telegram — по самому номеру, не «не больше последнего»: вебхук шлёт в несколько соединений,
+  // и фото альбома приходят не по порядку
+  if (upd.update_id) {
+    const d = await db(env);
+    const fresh = await d.prepare("INSERT INTO kv (k, v) VALUES (?, ?) ON CONFLICT(k) DO NOTHING RETURNING k")
+      .bind("upd:" + upd.update_id, String(Date.now())).first();
+    if (!fresh) return "dup";
+    if (upd.update_id % 50 === 0)
+      await d.prepare("DELETE FROM kv WHERE k LIKE 'upd:%' AND CAST(v AS INTEGER) < ?").bind(Date.now() - 2 * 864e5).run();
+  }
 
   const cb = upd.callback_query;
   if (cb) {
@@ -1693,7 +1707,8 @@ export async function handleUpdate(env, upd) {
     if (payload !== null && /^m[0-9a-z]+$/i.test(payload)) {
       const cid = String(parseInt(payload.slice(1), 36));
       if (cid && (cid === owner || (await userStatus(env, cid)) === "active")) await kvSet(env, "broker_of:" + chat, cid);
-    } else if (payload !== null || st0 === "waitlist") {
+    } else if ((payload !== null && !(payload === "" && await kvGet(env, "broker_of:" + chat, null)))
+               || st0 === "waitlist") {             // маклер нажал «Start» ещё раз — он маклер, не клиент
       const st = st0 === "waitlist" && payload === null ? "waitlist" : await signup(env, msg);
       if (st === "waitlist") {
         const k = "wl_note:" + chat;                   // не чаще раза в сутки
@@ -1753,7 +1768,10 @@ export async function handleUpdate(env, upd) {
   // «подключи к моему телеграму» — пошаговая инструкция Telegram для бизнеса (текст и проверка — в Python)
   // короткое «нет / не хочу» сразу после предложения подключить Telegram — тоже отказ от доступа
   const uiB = await kvGet(env, uiKey(env, chat), null);
-  const justOffered = uiB?.biz_offered_at && Date.now() / 1000 - uiB.biz_offered_at < 3600;
+  // «нет» — ответ на предложение, только если это первое сообщение после него (а не ответ на вопрос анкеты)
+  const offAt = uiB?.biz_offered_at || 0;
+  const justOffered = offAt && Date.now() / 1000 - offAt < 3600 && offAt > (await kvGet(env, "biz_seen:" + chat, 0));
+  if (justOffered) await kvSet(env, "biz_seen:" + chat, offAt);
   if (BIZ_NO.test(text) || (justOffered && /^(нет|не|не хочу|не надо|не буду|не стоит|пока нет|не готов[а-я]*|yo['ʻ’]?q|kerak emas|xohlamayman)[.!,)]*$/i.test(text))) {
     upd.message = { ...msg, _biz_decline: true };
     await queueAndWake(env, upd);
@@ -1907,7 +1925,7 @@ export default {
         "cache-control": "public, max-age=600", "access-control-allow-origin": "*" } });
     }
     if (p === "/tg" && req.method === "POST") {
-      if (env.TG_SECRET && req.headers.get("x-telegram-bot-api-secret-token") !== env.TG_SECRET)
+      if (!env.TG_SECRET || req.headers.get("x-telegram-bot-api-secret-token") !== env.TG_SECRET)
         return new Response("forbidden", { status: 403 });
       const upd = await req.json().catch(() => null);
       if (upd) ctx.waitUntil(handleUpdate(env, upd).catch(e => console.log("update error", e.stack || e)));

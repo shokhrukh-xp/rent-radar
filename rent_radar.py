@@ -203,7 +203,7 @@ VALID_PHONE_PREFIXES = {
 }
 
 ROOMS_RE = [
-    re.compile(r"\b([1-6])\s*[-–]?\s*(?:комн|ком\b|к\.|хона|xona|xonali)", re.I),
+    re.compile(r"\b([1-6])\s*[-–]?\s*(?:(?:х|ух|ти)\s*[-–]?\s*)?(?:комн|ком\b|к\.|хона|xona|xonali)", re.I),
     re.compile(r"\b([1-6])\s*/\s*\d{1,2}\s*/\s*\d{1,2}\b"),
 ]
 
@@ -213,20 +213,24 @@ ROOMS_RE = [
 _NUM = r"(?<![\d/.,])((?<!\w)\d{1,3}(?:[\s.,]\d{3})+|\d+)"
 PRICE_USD_RE = re.compile(_NUM + r"\s*(?:у\.?\s?е|\$|usd)", re.I)
 PRICE_UZS_RE = re.compile(_NUM + r"\s*(?:сум|so['’`]?m|sum)", re.I)
+PRICE_USD_PRE_RE = re.compile(r"(?:\$|\busd)\s?(\d{1,3}(?:[\s.,]\d{3})+|\d+)(?![\d.,]\d)", re.I)   # «$500», «Цена $75 000»
+PRICE_MLN_RE = re.compile(r"(?<![\d.,])(\d{1,4}(?:[.,]\d{1,3})?)\s*(?:млн|mln|million)\.?\s*(?:сум|so['’`]?m|sum)?", re.I)
 
 DISTRICTS = {
-    "Яккасарай": ["яккасарай", "yakkasaroy", "yakkasaray"],
-    "Мирабад": ["мирабад", "mirobod", "mirabad"],
-    "Юнусабад": ["юнусабад", "yunusobod", "yunusabad"],
-    "Чиланзар": ["чиланзар", "chilonzor", "chilanzar"],
-    "Мирзо-Улугбек": ["мирзо улугбек", "мирзо-улугбек", "mirzo ulug", "mirzo-ulug", "улугбек"],
-    "Шайхантахур": ["шайхантахур", "shayxontohur", "shayxontoxur", "shaykhantakhur", "шайхантаур"],
-    "Алмазар": ["алмазар", "olmazor", "almazar"],
+    "Яккасарай": ["яккасарай", "яккасарой", "yakkasaroy", "yakkasaray"],
+    "Мирабад": ["мирабад", "миробод", "mirobod", "mirabad"],
+    "Юнусабад": ["юнусабад", "юнусобод", "yunusobod", "yunusabad"],
+    "Чиланзар": ["чиланзар", "чилонзор", "chilonzor", "chilanzar"],
+    "Мирзо-Улугбек": ["мирзо улугбек", "мирзо-улугбек", "мирзо улуғбек", "mirzo ulug", "mirzo-ulug", "улугбек",
+                      "улуғбек"],
+    "Шайхантахур": ["шайхантахур", "шайхонтоҳур", "шайхонтохур", "shayxontohur", "shayxontoxur", "shaykhantakhur",
+                    "шайхантаур"],
+    "Алмазар": ["алмазар", "олмазор", "olmazor", "almazar"],
     "Учтепа": ["учтепа", "uchtepa"],
-    "Яшнабад": ["яшнабад", "yashnobod", "yashnabad"],
+    "Яшнабад": ["яшнабад", "яшнобод", "yashnobod", "yashnabad"],
     "Сергели": ["сергели", "sergeli"],
     "Бектемир": ["бектемир", "bektemir"],
-    "Янгихаёт": ["янгихаёт", "янгихает", "yangihayot", "янгихаят"],
+    "Янгихаёт": ["янгихаёт", "янгихает", "янгиҳаёт", "yangihayot", "янгихаят"],
 }
 
 
@@ -288,10 +292,15 @@ def as_int(v):
         return None
     if isinstance(v, int):
         return v
+    if isinstance(v, float):
+        return int(round(v)) if v == v else None        # Uybor отдаёт площадь дробью: 94.94
     try:
         return int(str(v).strip())
     except (TypeError, ValueError):
-        return None
+        try:
+            return int(round(float(str(v).strip().replace(",", "."))))
+        except (TypeError, ValueError):
+            return None
 
 
 def extract_rooms(text: str):
@@ -310,25 +319,35 @@ def _num(s: str):
 def extract_price_from_text(text: str, max_usd: int = 20000):
     """Возвращает (value, currency) или (None, None).
     max_usd: для аренды цена выше $20 000 — ошибка; для продажи (варианты маклеров) — норма."""
-    m = PRICE_USD_RE.search(text or "")
-    if m:
-        v = _num(m.group(1))
-        if v and 30 <= v <= max_usd:
-            return v, "USD"
+    for rx in (PRICE_USD_RE, PRICE_USD_PRE_RE):
+        m = rx.search(text or "")
+        if m:
+            v = _num(m.group(1))
+            if v and 30 <= v <= max_usd:
+                return v, "USD"
     m = PRICE_UZS_RE.search(text or "")
     if m:
         v = _num(m.group(1))
         if v and v >= 300000:
             return v, "UZS"
+    m = PRICE_MLN_RE.search(text or "")
+    if m and not re.search(r"\$|у\.?\s?е|usd|долл", (text or "")[m.start():m.end() + 6], re.I):
+        v = float(m.group(1).replace(",", ".")) * 1e6
+        if v >= 300000:
+            return round(v), "UZS"
     return None, None
 
 
 def extract_district(text: str):
-    low = (text or "").lower()
+    """Первый по тексту названный район (не первый по списку: «Юнусабад…, 5 мин до Мирабадского рынка» — Юнусабад)."""
+    low = re.sub(r"['’ʻ`‘]", "", (text or "").lower())
+    best = None
     for name, variants in DISTRICTS.items():
-        if any(v in low for v in variants):
-            return name
-    return None
+        for v in variants:
+            i = low.find(v.replace("'", ""))
+            if i >= 0 and (best is None or i < best[0]):
+                best = (i, name)
+    return best[1] if best else None
 
 
 def canon_district(*candidates):
@@ -963,7 +982,8 @@ class Store:
             "floor", "floors_total", "furnished", "house_type", "commission",
             "seller_ads", "premium", "seller_kind", "listed_since", "new_building", "repair",
             "site", "seller_hint", "mortgage", "mortgage_src", "price_note", "score", "why", "alts", "repair_photo",
-            "geo", "text_place", "near_km", "geo_tried", "rt_detail")
+            "geo", "text_place", "near_km", "geo_tried", "rt_detail",
+            "offplan", "price_listed_usd", "district_site", "district_by", "complex", "down_payment_only")
 
     def pack(self, listing: dict) -> str:
         d = {k: listing.get(k) for k in self.KEEP}
@@ -1016,8 +1036,10 @@ class Store:
         return self.conn.execute(
             "SELECT cnt FROM seller_counts WHERE seller_id=?", (seller_id,)).fetchone()[0]
 
-    def find_dup(self, listing: dict, cfg: dict):
-        """Возвращает key оригинала или None."""
+    def find_dup(self, listing: dict, cfg: dict, phone_shown_only=True):
+        """Возвращает key оригинала или None.
+        По телефону — только уже присланное с теми же комнатами: у маклера с одним номером десятки разных
+        квартир, а перевыкладку непосланного (например, подешевевшую до бюджета) надо разобрать заново."""
         d = cfg["dedup"]
         now = datetime.now(timezone.utc)
 
@@ -1025,11 +1047,14 @@ class Store:
         if listing["phones"]:
             since = (now - timedelta(days=d["phone_days"])).isoformat()
             qmarks = ",".join("?" * len(listing["phones"]))
-            row = self.conn.execute(
-                f"SELECT key FROM phones WHERE phone IN ({qmarks}) AND first_seen > ?",
-                (*listing["phones"], since)).fetchone()
-            if row:
-                return row[0]
+            for key, notified, rooms in self.conn.execute(
+                    f"SELECT p.key, l.notified, l.rooms FROM phones p LEFT JOIN listings l ON l.key = p.key "
+                    f"WHERE p.phone IN ({qmarks}) AND p.first_seen > ?", (*listing["phones"], since)):
+                if phone_shown_only and not notified:
+                    continue
+                if listing.get("rooms") and rooms and listing["rooms"] != rooms:
+                    continue
+                return key
 
         # 2) нечёткое совпадение текста (+ близкая цена, те же комнаты)
         norm = normalize_text(listing["text"])
@@ -1495,6 +1520,36 @@ def status_text(cfg: dict, settings: dict, store) -> str:
 
 # ------------------------------------------------------- команды и кнопки ---
 
+def after_new_anketa(cfg, store, settings):
+    """Новые параметры поиска (мини-апп, /start p…, разговор): аренда — фильтры радара по ним,
+    подборка продажи от прошлого поиска сброшена, первые варианты — сразу из уже собранного."""
+    ans = (store.get_kv("anketa") or {}).get("ans") or {}
+    if ans.get("deal") != "rent":
+        return False
+    settings.update(concierge.rent_settings(ans, settings, cfg, store))
+    store.set_kv("settings", settings)
+    if sale_path().exists():
+        try:
+            sp_ = open_sale()
+            sp_.set_kv("sale_pick", [])
+            sp_.set_kv("last_pick", [])
+            sp_.conn.close()
+        except Exception as e:
+            log.info("подборку продажи не очистила: %s", e)
+    try:
+        run_search(cfg, store, settings, days=14)
+    except Exception as e:
+        log.warning("первые варианты аренды не собрала: %s", e)
+    return True
+
+
+def sale_on(cfg, store) -> bool:
+    try:
+        return bool((effective_sale_cfg(cfg, store).get("sale_search") or {}).get("enabled"))
+    except Exception:
+        return False
+
+
 def handle_command(text: str, settings: dict, store, cfg: dict):
     """Возвращает (ответ, view_или_None). view — какой экран показать кнопками."""
     txt_ = (text or "").strip()
@@ -1512,6 +1567,8 @@ def handle_command(text: str, settings: dict, store, cfg: dict):
                 cfg, store, json.dumps({"v": 2, "ans": ans}, ensure_ascii=False)):
             concierge.send_app_button(
                 cfg, store, "Не получилось прочитать параметры — опишите поиск словами, я соберу заново.")
+        else:
+            after_new_anketa(cfg, store, settings)
         return "", None
     if cmd == "/start":
         # Первое касание: тёплое знакомство, одно понятное действие, честное
@@ -1811,6 +1868,8 @@ def effective_sale_cfg(cfg, store):
         # клиент ищет аренду (или не квартиру): поиск продажи выключен, а не «по настройкам по умолчанию»
         return {**cfg, "sale_search": {**(cfg.get("sale_search") or {}), "enabled": False}}
     if ans.get("deal") != "buy":
+        if cfg.get("tenant"):                   # новый пользователь без параметров — не искать по настройкам владельца
+            return {**cfg, "sale_search": {**(cfg.get("sale_search") or {}), "enabled": False}}
         return cfg
     ss = dict(cfg.get("sale_search") or {})
     b = str(ans.get("budget") or "")
@@ -2166,6 +2225,8 @@ def rent_search_on(store) -> bool:
     if store.get_kv("fresh_start"):
         return False
     ans = (store.get_kv("anketa") or {}).get("ans") or {}
+    if not ans.get("deal") and getattr(store, "tenant", False):   # пользователь ещё не сказал, что ищет
+        return False
     return ans.get("deal", "rent") == "rent"
 
 
@@ -2292,6 +2353,10 @@ def send_broker_batch(cfg, store, settings, n=OUTREACH_BATCH) -> str:
               + more]
     day["n"] += len(pick)
     store.set_kv("outreach_day", day)
+    st_ = store.get_kv("search_start") or {}
+    if st_ and not st_.get("offered"):            # маклеров уже дали — «давайте подключим маклеров?» не нужно
+        st_["offered"] = datetime.now(timezone.utc).isoformat()
+        store.set_kv("search_start", st_)
     msg = "\n".join(lines)
     opt = {"chat_id": cfg["telegram_chat_id"], "parse_mode": "HTML", "disable_web_page_preview": True}
     # В ссылках целиком вписан запрос (на двух языках) — пять таких в одном сообщении Telegram не пропускает
@@ -2304,7 +2369,10 @@ def send_broker_batch(cfg, store, settings, n=OUTREACH_BATCH) -> str:
         part = ([lines[0], lines[1], ""] if i == 0 else []) + [item]
         if i == len(items) - 1 and tail:
             part += ["", tail]
-        tg_call(cfg, "sendMessage", {**opt, "text": "\n".join(part)})
+        if tg_call(cfg, "sendMessage", {**opt, "text": "\n".join(part)}) is None and "wa.me" in item:
+            # две длинные ссылки (Telegram и WhatsApp) в одном сообщении — тоже бывает слишком; без WhatsApp
+            part = [re.sub(r' · <a href="https://wa\.me[^"]*">WhatsApp</a>', "", x) for x in part]
+            tg_call(cfg, "sendMessage", {**opt, "text": "\n".join(part)})
     return ""
 
 
@@ -2680,7 +2748,7 @@ def send_similar(cfg, sst, l) -> int:
     return send_site_cards(cfg, sst, [o["key"] for o in found[:5]], title="Похожий вариант")
 
 
-def search_like(cfg, store, l) -> str:
+def search_like(cfg, store, l, settings=None) -> str:
     """«🎯 Искать такие»: условия поиска — по этому объявлению (комнаты, район, цена +10%)."""
     ans = dict((concierge.get_anketa(store).get("ans") or {}))
     rent = not str(l.get("key") or "").startswith("sale:")
@@ -2694,7 +2762,11 @@ def search_like(cfg, store, l) -> str:
         ans["budget"] = str(int(round(l["price_usd"] * 1.1, -1 if rent else -3)))
     concierge.apply_webapp_data(cfg, store, json.dumps({"v": 3, "replace": True, "src": "link", "ans": ans}))
     if rent:                                   # фильтры радара аренды — по тем же условиям
-        store.set_kv("settings", concierge.rent_settings(ans, store.get_kv("settings") or default_settings(), cfg, store))
+        base = settings if settings is not None else {**default_settings(), **(store.get_kv("settings") or {})}
+        new = concierge.rent_settings(ans, base, cfg, store)
+        if settings is not None:               # тот же словарь сохранит и _process_updates — не затрём
+            settings.update(new)
+        store.set_kv("settings", new)
     bits = [f'{l["rooms"]}-комн' if l.get("rooms") else "", l.get("district") or "",
             f'до ${_money(int(ans["budget"]))}' if ans.get("budget") else ""]
     send_telegram(cfg, "🎯 <b>Ищу такие же</b>: " + escape_html(" · ".join(b for b in bits if b))
@@ -2715,7 +2787,7 @@ def chat_context(cfg, store) -> dict:
         ctx["site_search"] = sale_criteria_text(ss).split("\n")[0] if ss.get("enabled") else "выключен"
     except Exception:
         pass
-    if sale_path().exists():
+    if sale_path().exists() and sale_on(cfg, store):        # аренда — подборок продажи нет
         sst = open_sale()
         try:
             day = sale_sources.day_stats(sst)
@@ -2732,7 +2804,7 @@ def chat_context(cfg, store) -> dict:
                         for i, r in enumerate(rows[:10], 1)]
     q = lambda sql: store.conn.execute(sql).fetchone()[0]
     ctx["broker_offers_new"] = q("SELECT COUNT(*) FROM broker_offers WHERE status IN ('new','later')")
-    ctx["brokers_written"] = q("SELECT COUNT(*) FROM brokers WHERE status='contacted'")
+    ctx["brokers_written"] = q("SELECT COUNT(*) FROM brokers WHERE status IN ('contacted', 'offered')")
     return ctx
 
 
@@ -2789,7 +2861,7 @@ def rano_screen(cfg, store) -> dict:
 def via_screen(cfg, store) -> dict:
     """«📇 Через маклеров»: запрос маклерам, их варианты, ожидание ответов."""
     q = lambda sql, *a: store.conn.execute(sql, a).fetchone()[0]
-    written = q("SELECT COUNT(*) FROM brokers WHERE status='contacted'")
+    written = q("SELECT COUNT(*) FROM brokers WHERE status IN ('contacted', 'offered')")
     got = q("SELECT COUNT(*) FROM broker_offers WHERE broker_chat NOT LIKE 'site:%' AND status != 'message'")
     pool = q("SELECT COUNT(*) FROM broker_offers WHERE status IN ('new','later')")
     sl = q("SELECT COUNT(*) FROM broker_offers WHERE status IN ('shortlist','asked')")
@@ -2827,7 +2899,7 @@ def ui_snapshot(cfg, store, settings) -> dict:
               for i, o in enumerate(pool[:12])]
     shortlist = len(concierge.offers_by_status(store, "shortlist")) + \
         len(concierge.offers_by_status(store, "asked"))
-    written = store.conn.execute("SELECT COUNT(*) FROM brokers WHERE status='contacted'").fetchone()[0]
+    written = store.conn.execute("SELECT COUNT(*) FROM brokers WHERE status IN ('contacted', 'offered')").fetchone()[0]
     deal = request_deal(store)
     text = store.get_kv("request_text") or outreach_text(cfg, settings)
     ranked = ranked_brokers(store, deal)
@@ -2991,6 +3063,8 @@ def handle_callback(data: str, settings: dict, store, cfg: dict, message_id=None
     if d.startswith("o:"):
         toast, _ = concierge.handle_offer_cb(d, cfg, store, message_id)
         return toast, None
+    if d in ("R:last", "R:pick") and not sale_on(cfg, store):
+        return t("Сейчас ищу аренду — подборки продажи нет"), None
     if d == "R:last":                          # «покажи подборку ещё раз»
         if not sale_path().exists():
             return "Подборок ещё не было", None
@@ -3024,7 +3098,7 @@ def handle_callback(data: str, settings: dict, store, cfg: dict, message_id=None
                 return "", None
         finally:
             sst.conn.close()
-        return search_like(cfg, store, l), None
+        return search_like(cfg, store, l, settings), None
     if d.startswith("L:a:"):                   # из чата: «уточни» по объявлению — в шортлист и спросить
         key = d[4:]
         l = _listing_any(store, key)
@@ -3211,6 +3285,12 @@ def intake_offer(cfg, store, group, chat_key, name, text, photos, media_group=No
     now = time.time()
     frag = next((int(k) for k, v in pend.items()
                  if v.get("group") == group and now - v.get("at", 0) < 180), None)
+    if frag and media_group:                 # текст, потом альбом с фото — это один вариант
+        row = store.conn.execute("SELECT media_group, photos FROM broker_offers WHERE oid=?", (frag,)).fetchone()
+        if row and not row[0] and row[1] in (None, "", "[]"):
+            store.conn.execute("UPDATE broker_offers SET media_group=? WHERE oid=?", (media_group, frag))
+            store.conn.commit()
+            media_group = None
     if frag and not media_group:
         concierge.merge_into_offer(store, cfg, frag, text, photos)
         pend[str(frag)]["at"] = now
@@ -3242,6 +3322,12 @@ def handle_business_update(cfg, store, upd) -> bool:
                 "enabled": bool(bc.get("is_enabled")), "can_reply": can_reply, "at": time.time()}
         store.set_kv("biz_conn", conn)
         a = cfg.get("assistant_name", "Ra'no")
+        if prev.get("enabled") and prev.get("can_reply") and not (conn["enabled"] and can_reply):
+            try:                                   # «присылайте сюда» больше неправда — запрос со ссылкой на бота
+                store.set_kv("request_text", concierge.compose_request(cfg, store))
+                push_snapshot(cfg, store, {**default_settings(), **(store.get_kv("settings") or {})}, force=True)
+            except Exception as e:
+                log.info("[бизнес] запрос не пересобрала: %s", e)
         if not conn["enabled"]:
             send_telegram(cfg, t("🔌 {a} отключена от вашего Telegram — ответы маклеров в ваших чатах больше не вижу. "
                                  "Подключить снова: напишите «подключить телеграм».", a=a))
@@ -3339,6 +3425,10 @@ def biz_chat_fallback(store, ch: dict, m: dict) -> str:
     return "username"
 
 
+GREETING_RE = re.compile(r"\W*(?:здравствуйте|здрасте|привет|добрый\s+(?:день|вечер)|доброе\s+утро|салом|салам|"
+                         r"assalomu\s+alaykum|assalom|hello|hi|/?start)\W*", re.I)
+
+
 def handle_broker_message(cfg, store, msg, key=None, quiet=False):
     """Маклер пишет боту напрямую — сохраняем вариант и показываем владельцу.
     key/quiet — маклер пишет в чат клиента (Telegram для бизнеса): ключ biz:<чат>, сами ему не отвечаем —
@@ -3357,9 +3447,18 @@ def handle_broker_message(cfg, store, msg, key=None, quiet=False):
         i18n.broker_lang(store, k, text)            # на каком языке пишет маклер — на том и ответим
         if not photos and concierge.handle_viewing_reply(cfg, store, k, text):   # ответ про время просмотра
             return
-        asked = (store.get_kv("biz_asked") or {}).get(k) or {}
-        if asked.get("oid") and time.time() - asked.get("at", 0) < 72 * 3600:
+        all_asked = store.get_kv("biz_asked") or {}
+        asked = all_asked.get(k) or {}
+        now_ = time.time()
+        ans_at = asked.get("answered_at")
+        if (asked.get("oid") and now_ - asked.get("at", 0) < 72 * 3600
+                and (not ans_at or now_ - ans_at < 1800)           # ответ — одним заходом, не через сутки
+                and not concierge.looks_like_new_offer(store, cfg, int(asked["oid"]), text)):
             # ответ на наши уточнения: дописываем в тот же вариант и покажем обновлённую карточку
+            if not ans_at:
+                asked["answered_at"] = now_
+                all_asked[k] = asked
+                store.set_kv("biz_asked", all_asked)
             concierge.merge_into_offer(store, cfg, int(asked["oid"]), text, photos)
             pend = store.get_kv("pending_offers") or {}
             pend[str(asked["oid"])] = {"at": time.time(), "group": f"chat:{k}", "update": True}
@@ -3380,6 +3479,15 @@ def handle_broker_message(cfg, store, msg, key=None, quiet=False):
     # ответ на «можно посмотреть …?» — клиенту (раньше приветствий: «Да, можно» — короткий ответ)
     if not photos and not text.startswith("/") and concierge.handle_viewing_reply(cfg, store, chat_id, text):
         return
+    # ответ на «уточните детали» — к своему варианту (раньше приветствий: «Да, актуален» — короткий ответ)
+    if not photos and text and not text.startswith("/"):
+        asked = concierge.pending_answer(store, chat_id)
+        if asked and not GREETING_RE.fullmatch(text) and not concierge.looks_like_new_offer(store, cfg, asked, text):
+            concierge.attach_answer(cfg, store, asked, text)
+            if not msg.get("_acked"):
+                tg_call(cfg, "sendMessage", {"chat_id": chat_id,
+                                             "text": "Rahmat, передала клиенту! 🙌 / Mijozga yetkazdim!"})
+            return
     # /start, «здравствуйте» — это не вариант: знакомим и показываем, что ищем
     if not photos and (text.startswith("/") or (len(text) < 25 and not re.search(r"\d", text))):
         last = store.get_kv(f"welcomed:{chat_id}") or 0
@@ -3388,16 +3496,6 @@ def handle_broker_message(cfg, store, msg, key=None, quiet=False):
                                          "text": concierge.broker_welcome(cfg, store)})
             store.set_kv(f"welcomed:{chat_id}", time.time())
         return
-
-    # ответ на «уточните детали» — к своему варианту
-    if not photos:
-        asked = concierge.pending_answer(store, chat_id)
-        if asked:
-            concierge.attach_answer(cfg, store, asked, text)
-            if not msg.get("_acked"):
-                tg_call(cfg, "sendMessage", {"chat_id": chat_id,
-                                             "text": "Rahmat, передала клиенту! 🙌 / Mijozga yetkazdim!"})
-            return
 
     try:
         oid, is_new = intake_offer(cfg, store, f"chat:{chat_id}", chat_id, name, text, photos,
@@ -3569,15 +3667,23 @@ def process_commands(cfg: dict, store, long_poll: int = 0) -> dict:
     for upd in ups:
         groups.setdefault(tenants.route(upd), []).append(upd)
     owner = str(cfg["telegram_chat_id"])
-    for chat, group in groups.items():
-        t_ = tenants.get(chat)
-        if t_ is None or t_.owner or chat == owner:
-            with tenants.ctx(tenants.REG["owner"] or tenants.Tenant(owner, cfg, owner=True, store=store)):
-                settings = _process_updates(cfg, store, group, settings)
-        else:
-            with tenants.ctx(t_):
-                _process_updates(t_.cfg, t_.store, group, t_.settings())
-    store.set_kv(offset_key, offset)
+    try:
+        for chat, group in groups.items():
+            t_ = tenants.get(chat)
+            try:
+                if t_ is None or t_.owner or chat == owner:
+                    with tenants.ctx(tenants.REG["owner"] or tenants.Tenant(owner, cfg, owner=True, store=store)):
+                        settings = _process_updates(cfg, store, group, settings)
+                else:
+                    with tenants.ctx(t_):
+                        _process_updates(t_.cfg, t_.store, group, t_.settings())
+            except Exception as e:                 # чужая ошибка не держит очередь остальных
+                log.exception("[пользователи] %s: обновления не разобрала: %s", chat, e)
+    finally:
+        store.set_kv(offset_key, offset)       # иначе те же обновления придут снова и ответы задвоятся
+        if not tenants.in_ctx():               # вне чужого контекста — работаем от имени владельца:
+            concierge._BIZ_STORE["store"] = store   # ctx вернул прежнее (None) и прежний язык
+            sync_lang(store)
     return settings
 
 
@@ -3587,24 +3693,25 @@ def _process_updates(cfg: dict, store, ups: list, settings: dict) -> dict:
     snap = False                                  # шортлист/карточки поменялись — воркеру сразу
     concierge._BIZ_STORE["store"] = store          # подключён ли Telegram для бизнеса — для отправки маклерам
     sync_lang(store)                                # язык клиента — для карточек и подсказок
-    for upd in ups:
+    def _one(upd):
+        nonlocal changed, snap
         if any(upd.get(x) for x in ("business_connection", "business_message", "edited_business_message",
                                      "deleted_business_messages")):
             try:
                 handle_business_update(cfg, store, upd)
             except Exception as e:
                 log.warning("[бизнес] не разобрала обновление: %s", e)
-            continue
+            return
 
         cb = upd.get("callback_query")
         if cb:
             msg = cb.get("message") or {}
             if str((msg.get("chat") or {}).get("id") or "") != str(cfg["telegram_chat_id"]):
-                continue
+                return
             if cb.get("_worker_done"):          # воркер уже ответил и показал следующее — сохраняем
                 apply_worker_done(cb.get("data") or "", cfg, store)
                 changed = True
-                continue
+                return
             toast, view = handle_callback(cb.get("data") or "", settings, store, cfg,
                                           msg.get("message_id"))
             snap = snap or (cb.get("data") or "")[:2] in ("o:", "s:", "t:")
@@ -3615,20 +3722,20 @@ def _process_updates(cfg: dict, store, ups: list, settings: dict) -> dict:
                 render_view(cfg, settings, view, msg.get("message_id"))
             changed = True
             log.info("Кнопка: %s → %s", (cb.get("data") or "")[:30], toast[:40])
-            continue
+            return
 
         msg = upd.get("message") or upd.get("edited_message") or {}
         chat = msg.get("chat") or {}
         if msg.get("_channel"):              # прислали канал — владелец или маклер
             handle_channel_suggestion(cfg, store, msg)
-            continue
+            return
         if str(chat.get("id") or "") != str(cfg["telegram_chat_id"]):
             handle_broker_message(cfg, store, msg)   # это маклер прислал вариант
-            continue
+            return
 
         if msg.get("_biz_guide"):            # «подключи к моему телеграму» — пошаговая инструкция
             send_telegram(cfg, concierge.biz_guide(cfg, store))
-            continue
+            return
         if msg.get("_biz_decline"):          # «не хочу давать доступ» — работаем через пересылку
             store.set_kv("broker_mode", "manual")
             store.set_kv("biz_offered_at", 0)
@@ -3641,7 +3748,7 @@ def _process_updates(cfg: dict, store, ups: list, settings: dict) -> dict:
                 if bt_:
                     send_telegram(cfg, bt_)
             push_snapshot(cfg, store, settings, force=True)
-            continue
+            return
         if "_areas" in msg:                  # обвёл на карте (воркер проверил подпись Telegram)
             areas = [a for a in (msg.get("_areas") or []) if isinstance(a, list) and len(a) >= 4][:6]
             settings["areas"] = areas
@@ -3660,14 +3767,14 @@ def _process_updates(cfg: dict, store, ups: list, settings: dict) -> dict:
             else:
                 send_telegram(cfg, t("🗺 Области убрала — ищу как раньше, по вашим условиям."))
             push_snapshot(cfg, store, settings, force=True)
-            continue
+            return
         if msg.get("_link"):                 # воркер: владелец прислал ссылку на объявление
             handle_link(cfg, store, msg)
-            continue
+            return
         if msg.get("_owner_offer"):          # воркер: владелец переслал/вставил вариант
             handle_owner_offer(cfg, store, msg)
             changed = True
-            continue
+            return
         for tag in ("_view", "_note"):       # объявление с сайта (ответ на карточку) — сначала в шортлист
             v = msg.get(tag) or {}
             if v.get("key") and not v.get("oid"):
@@ -3680,35 +3787,21 @@ def _process_updates(cfg: dict, store, ups: list, settings: dict) -> dict:
                                      v.get("notime"), msg.get("text") or ""):
                 concierge.arrange_viewing(cfg, store, int(v.get("oid") or 0))   # договориться с маклером
             changed = snap = True
-            continue
+            return
         if msg.get("_note"):                 # заметка к варианту — воркер уже подтвердил
             concierge.add_note(store, int(msg["_note"].get("oid") or 0),
                                msg["_note"].get("text") or msg.get("text") or "")
             changed = snap = True
-            continue
+            return
 
         wad = msg.get("web_app_data") or {}
         if wad.get("data"):
             if concierge.apply_webapp_data(cfg, store, wad["data"]):
                 log.info("параметры получены из мини-аппа")
                 changed = True
-                ans = (store.get_kv("anketa") or {}).get("ans") or {}
-                if ans.get("deal") == "rent":     # «ищу сама» по аренде — по параметрам из разговора
-                    settings.update(concierge.rent_settings(ans, settings, cfg, store))
-                    store.set_kv("settings", settings)
-                    if sale_path().exists():      # подборка продажи от прошлого поиска — больше не к месту
-                        try:
-                            sp_ = open_sale()
-                            sp_.set_kv("sale_pick", [])
-                            sp_.conn.close()
-                        except Exception as e:
-                            log.info("подборку продажи не очистила: %s", e)
-                    try:                          # обещали «первые варианты через пару минут» — из уже собранного
-                        run_search(cfg, store, settings, days=14)
-                    except Exception as e:
-                        log.warning("первые варианты аренды не собрала: %s", e)
+                after_new_anketa(cfg, store, settings)
                 push_snapshot(cfg, store, settings, force=True)   # новый текст запроса — в ссылки маклерам
-            continue
+            return
 
         text = (msg.get("text") or "").strip()
         if store.get_kv("awaiting_text") and text and not text.startswith("/"):
@@ -3718,9 +3811,9 @@ def _process_updates(cfg: dict, store, ups: list, settings: dict) -> dict:
             tg_call(cfg, "sendMessage", {"chat_id": cfg["telegram_chat_id"],
                                          "text": "✅ Текст запроса сохранён. Скажите «напиши маклерам» — подберу маклеров с этим текстом."})
             changed = True
-            continue
+            return
         if not text:
-            continue
+            return
         reply, view = handle_command(text, settings, store, cfg)
         if reply:
             send_telegram(cfg, reply)
@@ -3729,6 +3822,11 @@ def _process_updates(cfg: dict, store, ups: list, settings: dict) -> dict:
         if reply or view:
             changed = True
             log.info("Команда: %s", text[:50])
+    for upd in ups:
+        try:
+            _one(upd)
+        except Exception as e:            # одно «сломанное» обновление не должно ронять бота для всех
+            log.exception("обновление %s не разобрала: %s", upd.get("update_id"), e)
     if changed:
         store.set_kv("settings", settings)
     if snap:
@@ -4666,7 +4764,7 @@ def _same_sale(a: dict, b: dict, cfg: dict) -> bool:
 def find_sale_dup(l: dict, store, cfg: dict):
     """find_dup для продажи: у агентств не сравниваем телефоны, и разная площадь — не дубль."""
     probe = dict(l, phones=[]) if l.get("seller_kind") == "agency" else l
-    key = store.find_dup(probe, cfg)
+    key = store.find_dup(probe, cfg, phone_shown_only=False)
     if not key:
         return None
     row = store.conn.execute("SELECT data, notified FROM listings WHERE key=?", (key,)).fetchone()
@@ -4720,6 +4818,10 @@ def run_sale_search(cfg: dict, store, settings: dict, force: bool = False) -> in
     if criteria_changed:
         store.conn.execute("DELETE FROM phones WHERE key IN "
                            "(SELECT key FROM listings WHERE notified=0)")
+        try:
+            store.conn.execute("DELETE FROM photo_hash WHERE key IN (SELECT key FROM listings WHERE notified=0)")
+        except sqlite3.Error:
+            pass
         store.conn.execute("DELETE FROM listings WHERE notified=0")
         store.conn.commit()
         store.set_kv("sale_pick", [])
@@ -4795,8 +4897,8 @@ def run_sale_search(cfg: dict, store, settings: dict, force: bool = False) -> in
         if pump():                                 # условия поменялись — остальное разберём по новым
             break
         dup = find_sale_dup(l, store, cfg) or sale_sources.structural_dup(store, l) or sale_sources.photo_dup(store, l)
-        if dup:
-            act = sale_sources.attach_dup(cfg, store, l, dup, ss)
+        act = sale_sources.attach_dup(cfg, store, l, dup, ss) if dup else None
+        if act:
             sent += act == "cheaper"
             queued += act == "queued"
             continue
@@ -5017,7 +5119,12 @@ def _rent_listings(cfg, store, settings, name, listings, first_run, market, harv
     fresh = 0
     warm = not store.get_kv(f"src_warm:{name}")     # новый источник: текущее — запомнить молча
     for l in listings:
+      n0 = _PUMP["n"]
       pump()                                    # клиент пишет — отвечаем, не дожидаясь конца прохода
+      if _PUMP["n"] != n0:                      # разобрали сообщения — «пауза», смена условий действуют сразу
+          rent_on = rent_search_on(store)
+          settings = {**default_settings(), **(store.get_kv("settings") or {})}
+          eff = effective_cfg(cfg, settings)
       # одно битое объявление не должно ронять весь радар
       try:
         if store.known(l["key"]):
@@ -5135,9 +5242,12 @@ def source_health(cfg, store, sale_store, now=None) -> list:
     if now - float(store.get_kv("health_at") or 0) < 3600:
         return []
     store.set_kv("health_at", now)
-    rows = {f"аренда · {k}": v for k, v in (store.get_kv("rent_src_health") or {}).items()}
+    on = {k for k, x in (cfg.get("sources") or {}).items() if x.get("enabled")} if cfg.get("sources") else None
+    rows = {f"аренда · {k}": v for k, v in (store.get_kv("rent_src_health") or {}).items()
+            if on is None or k in on}                  # выключенные источники — не тревожим
     if sale_store is not None:
-        rows.update({f"продажа · {k}": v for k, v in (sale_store.get_kv("sale_src_stats") or {}).items()})
+        rows.update({f"продажа · {k}": v for k, v in (sale_store.get_kv("sale_src_stats") or {}).items()
+                     if k in sale_sources.SOURCES})
     sent = store.get_kv("health_alerts") or {}
     down = []
     for name, v in rows.items():
@@ -5176,11 +5286,15 @@ def pump(force: bool = False) -> bool:
     _PUMP["last"], _PUMP["busy"] = now, True
     cfg, store, sale_store = ctx
     try:
-        before = (store.get_kv("sale_force"), store.get_kv("fresh_start"))
+        cur = (concierge._BIZ_STORE.get("store") if tenants.in_ctx() else None) or store   # чей сейчас проход
+        before = (cur.get_kv("sale_force"), cur.get_kv("fresh_start"))
         process_commands(cfg, store, long_poll=0)
-        flush_pending_offer(cfg, store, sale_store)
+        owner_t = tenants.REG["owner"] or tenants.Tenant(str(cfg.get("telegram_chat_id") or ""), cfg,
+                                                         owner=True, store=store)
+        with tenants.ctx(owner_t):                 # варианты владельца — на его языке и с его базами
+            flush_pending_offer(cfg, store, sale_store)
         _PUMP["n"] += 1
-        after = (store.get_kv("sale_force"), store.get_kv("fresh_start"))
+        after = (cur.get_kv("sale_force"), cur.get_kv("fresh_start"))
         return after != before and any(after)
     except Exception as e:
         log.warning("не обработала сообщения посреди прохода: %s", e)
@@ -5271,6 +5385,14 @@ def run():
         eff = effective_cfg(cfg, settings)
         market = analyst.market_stats(store)
         rent_on = rent_search_on(store)
+        if not rent_on:                        # владелец покупает, а кто-то из пользователей ищет аренду — не реже
+            for t_ in tenants.others():
+                try:
+                    if rent_search_on(t_.store):
+                        rent_on = True
+                        break
+                except Exception:
+                    continue
         for name, scfg in enabled.items():
             if not once and now < next_run[name]:
                 continue
@@ -5316,6 +5438,14 @@ def run():
         sale_on = bool((effective_sale_cfg(cfg, store).get("sale_search") or {}).get("enabled"))
         if not sale_on:
             fresh = True                                       # клиент ищет аренду — продажу не ищем и не шлём
+        elif sale_store is None and not once:                  # переключился на покупку посреди работы
+            sale_cfg = effective_sale_cfg(cfg, store).get("sale_search") or {}
+            if (sale_cfg.get("uybor") or {}).get("enabled", True):
+                sale_store = Store(SALE_DB_PATH)
+                sale_store.prune()
+                _PUMP["ctx"] = (cfg, store, sale_store)
+                tenants.refresh(cfg, store, sale_store, force=False)
+                log.info("Покупка включена: %s", sale_criteria_text(sale_cfg).replace("\n", " "))
         if sale_store is not None and not fresh and (once or now >= next_sale or force_sale):
             next_sale = now + (sale_cfg.get("uybor") or {}).get("interval_seconds", 60)
             if force_sale:

@@ -17,7 +17,7 @@ from pathlib import Path
 
 log = logging.getLogger("rent-radar")
 
-REG = {"multi": False, "at": 0.0, "t": {}, "owner": None}
+REG = {"multi": False, "at": 0.0, "t": {}, "owner": None, "depth": 0}
 REFRESH_EVERY = 60
 BROKER_SYNC_EVERY = 12 * 3600
 BROKER_COLS = "bid, source, name, phone, ads, districts, min_price, max_price, first_seen, deals, tg"
@@ -49,6 +49,7 @@ class Tenant:
             rr = _rr()
             self._store = rr.Store(self.dir / "radar.db")
             if not self.owner:
+                self._store.tenant = True           # без анкеты — ничего не ищем (rent_search_on)
                 sync_brokers(self._store, rr.DB_PATH)
         return self._store
 
@@ -139,16 +140,22 @@ def ctx(t):
     import concierge
     import i18n
     saved = (dict(rr.CUR), i18n.LANG, concierge._BIZ_STORE.get("store"))
+    REG["depth"] += 1
     try:
         rr.CUR.update(sale=None if t.owner else t.sale_path, shared=None if t.owner else rr.SALE_DB_PATH)
         concierge._BIZ_STORE["store"] = t.store
         rr.sync_lang(t.store)
         yield t
     finally:
+        REG["depth"] -= 1
         rr.CUR.clear()
         rr.CUR.update(saved[0])
         i18n.LANG = saved[1]
         concierge._BIZ_STORE["store"] = saved[2]
+
+
+def in_ctx() -> bool:
+    return REG["depth"] > 0
 
 
 def _biz_owner(conn_id):

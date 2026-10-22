@@ -59,6 +59,8 @@ def ai(cfg, text: str, lang: str = None, post=None) -> str:
         post = rent_radar.worker_post
     r = post(cfg, "/svc/translate", {"text": text, "lang": lang}, timeout=40)
     out = (r or {}).get("text") or text
+    if out == text:                    # перевод не удался (воркер не ответил) — не запоминаем, попробуем снова
+        return out
     if len(_CACHE) > 500:
         _CACHE.clear()
     _CACHE[k] = out
@@ -89,6 +91,8 @@ def broker_lang(store, key, text=None) -> str:
     langs = store.get_kv("broker_lang") or {}
     if text and len(text.strip()) >= 3:
         lang = detect_lang(text)
+        if lang == "ru" and len(re.findall(r"[а-яё]", text, re.I)) < 10 and langs.get(str(key)):
+            return langs[str(key)]         # «Ok!», номер телефона — не повод переходить на русский
         if langs.get(str(key)) != lang:
             langs[str(key)] = lang
             store.set_kv("broker_lang", langs)

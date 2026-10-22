@@ -107,14 +107,16 @@ function end(e) {
 }
 el.addEventListener("touchstart", start, { passive: false }); el.addEventListener("touchmove", move, { passive: false });
 el.addEventListener("touchend", end); el.addEventListener("mousedown", start); el.addEventListener("mousemove", e => { if (e.buttons) move(e); });
-el.addEventListener("mouseup", end);
+el.addEventListener("mouseup", end); el.addEventListener("mouseleave", end); el.addEventListener("touchcancel", end);
 $("#draw").onclick = () => setDrawing(!drawing);
 $("#undo").onclick = () => { areas.pop(); redraw(); };
 $("#clear").onclick = () => { areas = []; redraw(); };
 const initData = (tg && tg.initData) || "";
 async function api(path, body) {
-  const r = await fetch(path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ initData, ...body }) });
-  return r.json().catch(() => ({}));
+  try {
+    const r = await fetch(path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ initData, ...body }) });
+    return await r.json().catch(() => ({}));
+  } catch (e) { return {}; }                 // нет сети — покажем «не получилось», кнопка снова доступна
 }
 $("#save").onclick = async () => {
   $("#save").disabled = true;

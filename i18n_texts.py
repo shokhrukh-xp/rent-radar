@@ -367,6 +367,8 @@ MORE = [
      "🔎 Saytlar va kanallar: yangi e'lonlar {a}, mos keldi {b}, yubordim {c}",
      "🔎 Sites and channels: {a} new listings, {b} matching, {c} sent"),
     ("🔎 С сайтов прислала: {n}", "🔎 Saytlardan yubordim: {n}", "🔎 Sent from sites: {n}"),
+    ("Сейчас ищу аренду — подборки продажи нет", "Hozir ijara qidiryapman — sotuv tanlovi yo'q",
+     "I'm searching rentals now — there's no sale shortlist"),
     ("📅 <b>Завтра просмотры</b>", "📅 <b>Ertaga ko'rishlar</b>", "📅 <b>Viewings tomorrow</b>"),
     ("Разберите {n} {w} — ответьте на карточки своими словами: «нравится», «потом» или «не то», а дальше я сама.",
      "{n} ta variantni ko'rib chiqing — kartochkalarga o'z so'zlaringiz bilan javob bering: «yoqdi», «keyin» yoki "

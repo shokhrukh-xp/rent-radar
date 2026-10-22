@@ -153,8 +153,8 @@ def digest_data(store, sale_store, now):
     loc = now.astimezone(TZ)
     tomorrow = (loc + timedelta(days=1)).date()
     d = {
-        "contacted_today": q("SELECT COUNT(*) FROM brokers WHERE status='contacted' AND last_contact>=?", day),
-        "contacted_total": q("SELECT COUNT(*) FROM brokers WHERE status='contacted'"),
+        "contacted_today": q("SELECT COUNT(*) FROM brokers WHERE status IN ('contacted', 'offered') AND last_contact>=?", day),
+        "contacted_total": q("SELECT COUNT(*) FROM brokers WHERE status IN ('contacted', 'offered')"),
         "offers_today": q("SELECT COUNT(*) FROM broker_offers WHERE created_at>=? "
                           "AND status NOT IN ('message') AND broker_chat NOT LIKE 'site:%'", day),
         "pending": q("SELECT COUNT(*) FROM broker_offers WHERE status IN ('new','later')"),
@@ -249,7 +249,7 @@ def broker_offer(cfg, store, sale_store, now):
     if not st.get("at") or st.get("offered"):
         return False
     start = datetime.fromisoformat(st["at"])
-    if store.conn.execute("SELECT COUNT(*) FROM brokers WHERE status='contacted' AND last_contact>=?",
+    if store.conn.execute("SELECT COUNT(*) FROM brokers WHERE status IN ('contacted', 'offered') AND last_contact>=?",
                           (st["at"],)).fetchone()[0]:
         return False                           # уже сам пишет маклерам — не навязываем
     age_h = (now - start).total_seconds() / 3600

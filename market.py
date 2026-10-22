@@ -20,7 +20,7 @@ import math
 import re
 import statistics
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import requests
 
@@ -184,6 +184,9 @@ def assumptions(cfg: dict) -> dict:
     out = dict(DEFAULT_ASSUMPTIONS)
     out.update(over)
     return out
+
+
+RENT_STALE_DAYS = 21
 
 
 def _now() -> str:
@@ -354,6 +357,9 @@ def scan(store, cfg: dict, district_ids=None) -> dict:
     if complete:
         conn.execute("UPDATE market SET removed_at=? WHERE op='sale' AND removed_at IS NULL "
                      "AND last_seen < ?", (started, started))
+    # аренду смотрим только первыми страницами районов — полного среза нет; не виденное 3 недели — снято
+    conn.execute("UPDATE market SET removed_at=? WHERE op='rent' AND removed_at IS NULL AND last_seen < ?",
+                 (started, (datetime.now(timezone.utc) - timedelta(days=RENT_STALE_DAYS)).isoformat()))
 
     for did in district_ids or []:
         for page in range(1, a["rent_pages_per_district"] + 1):
@@ -407,7 +413,8 @@ def _median(xs):
 
 _AP = "['ʻ’`]?"
 MORTGAGE_NO_RE = re.compile(
-    r"без\s+ипотек|не\s+(?:под|для)\s+ипотек|(?:в\s+)?ипотек\w*\s*(?:[:\-–—]\s*)?(?:нет\b|❌|не\s+(?:да|подход|возмож|рассматр|офор|работ|прод|бер|прин))"
+    r"без\s+ипотек|не\s+(?:под|для)\s+ипотек|(?:не|нельзя)\s+(?:[\w-]+\s+){0,2}?(?:в|под|на|для)\s+ипотек"
+    r"|не\s+(?:рассматр|оформл|прод|да[её]м|бер[её]м|принима)\w*\s+(?:[\w-]+\s+){0,1}?ипотек|(?:в\s+)?ипотек\w*\s*(?:[:\-–—]\s*)?(?:нет\b|❌|не\s+(?:да|подход|возмож|рассматр|офор|работ|прод|бер|прин))"
     r"|ипотек\w*\s+(?:не\s+)?(?:исключ|невозмож)|только\s+(?:за\s+)?налич|наличный\s+расч[её]т\s+только"
     rf"|ipoteka\w*\s*(?:yo{_AP}q|emas|berilmaydi|mumkin\s+emas|❌)|ipotekaga\s+(?:berilmaydi|to{_AP}g{_AP}ri\s+kelmaydi|chiqmaydi|o{_AP}tmaydi)"
     r"|ипотекага\s+(?:берилмайди|тўғри\s+келмайди|ўтмайди)|ипотека\s+йўқ|faqat\s+naqd|фақат\s+нақд", re.I)
@@ -494,7 +501,8 @@ def _band(xs):
     v = sorted(xs)
     if len(v) < 5:
         return {}
-    return {"p20": v[int(len(v) * VERDICT_Q)], "p80": v[min(len(v) - 1, int(len(v) * (1 - VERDICT_Q)))]}
+    k = int(len(v) * VERDICT_Q)                  # симметрично: столько же значений ниже p20, сколько выше p80
+    return {"p20": v[k], "p80": v[len(v) - 1 - k]}
 
 
 def comparables(store, l: dict, min_n: int = 6, repair=None):
@@ -642,6 +650,8 @@ def analyze(store, l: dict, cfg: dict) -> dict:
     if cls == "none" and looks_new(l.get("new_building"), l.get("text")):
         cls = "box"                                # в новостройке «без ремонта» — это коробка/черновая, а не
         out["repair_as_box"] = True                # старый ремонт под замену: сравниваем с коробками
+        if claimed == "none":                      # и заявленное — тоже коробка, иначе «на фото хуже» на ровном месте
+            claimed = "box"
     out["repair"], out["repair_src"], out["repair_claimed"] = cls, rsrc, claimed
     signs = [t.strip() for t in str((l.get("repair_photo") or {}).get("signs") or "").split(",") if t.strip()]
     out["repair_signs"] = ", ".join(t for t in signs[:3] if len(t) <= 45) if rsrc == "фото" else ""

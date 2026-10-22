@@ -52,12 +52,12 @@ def _listing(**kw):
 
 def _num(s):
     try:
-        return float(str(s).replace(",", ".").replace(" ", ""))
+        return float(re.sub(r"\s", "", str(s)).replace(",", "."))
     except (TypeError, ValueError):
         return None
 
 
-ROOMS_RE = re.compile(r"(\d+)\s*-?\s*(?:комн|xona)", re.I)
+ROOMS_RE = re.compile(r"(\d+)\s*-?\s*(?:х|ух|ти)?\s*-?\s*(?:комн|xona)", re.I)
 AREA_RE = re.compile(r"(\d{2,3}(?:[.,]\d+)?)\s*(?:м²|м2|кв\.?\s*м|m²|m2)", re.I)
 FLOOR_RE = re.compile(r"(\d{1,2})\s*/\s*(\d{1,2})")
 
@@ -288,11 +288,13 @@ def fetch_tg_sale(ss, cfg, store):
         if not rr._sale_post(l.get("text")):
             continue
         txt = l.get("text") or ""
-        if l.get("price_value") is None:
-            pv, pc = rr.extract_price_from_text(txt, max_usd=3_000_000)
-            l["price_value"], l["price_currency"] = pv, pc
+        # fetch_telegram разбирает цену с пределами аренды (до $20 000) — у продажи разбираем заново
+        pv, pc = rr.extract_price_from_text(txt, max_usd=3_000_000)
+        l["price_value"], l["price_currency"] = pv, pc
         a = AREA_RE.search(txt)
-        fl = re.search(r"(\d{1,2})\s*/\s*(\d{1,2})\s*(?:эт|qavat|этаж)?", txt)
+        fl = re.search(r"(\d{1,2})\s*/\s*(\d{1,2})\s*-?\s*(?:эт|qavat|этаж)", txt)
+        if fl and int(fl.group(1)) > int(fl.group(2)):
+            fl = None
         out.append(_listing(**{**l, "key": "sale:" + l["key"], "site": "Telegram",
                                "area": rr.sane(_num(a.group(1)), 10, 500) if a else None,
                                "floor": rr.sane(rr.as_int(fl.group(1)), 1, 60) if fl else None,
@@ -387,11 +389,11 @@ FINAL_RE = re.compile(r"(?:oxirida|охирида|в конце|последн\w
 def text_district(text):
     """Район, прямо названный в тексте («Uy Olmazor tumani», «в Алмазарском районе»); несколько разных — None."""
     rr = _rr()
-    low = (text or "").lower()
+    low = re.sub(r"['’ʻ`‘]", "", (text or "").lower())
     hits = set()
     for name, variants in rr.DISTRICTS.items():
         for v in variants:
-            if re.search(re.escape(v) + r"\w{0,6}\s*" + _TUMAN, low):
+            if re.search(re.escape(v.replace("'", "")) + r"\w{0,6}\s*" + _TUMAN, low):
                 hits.add(name)
     return hits.pop() if len(hits) == 1 else None
 
@@ -466,11 +468,12 @@ def normalize(l, cfg):
             l["price_note"] = (f"${_sp(p)} — продавцу за договор, ещё ~{_sp(rest / 1e6)} млн сум застройщику"
                                + (f" ({' и '.join(parts)})" if parts else ""))
             return l
-    if p and l.get("area") and 250 <= p <= 4000 and p * l["area"] >= 10000:
+    down = bool(DOWN_RE.search(text))
+    if p and not down and l.get("area") and 250 <= p <= 4000 and p * l["area"] >= 10000:
         l["price_value"], l["price_currency"] = round(p * l["area"]), "USD"
         l["price_note"] = f"цена указана за м² (${p:,.0f}) — пересчитала на площадь".replace(",", " ")
         return l
-    if p and DOWN_RE.search(text):
+    if p and down:
         bigger = [v for v in _usd_amounts(text) if v > p * 1.3]
         if bigger:
             full = max(bigger)
@@ -508,7 +511,8 @@ def fetch_due(ss, cfg, store, force=False):
             stats[name] = {"at": now, "n": len(got), "err": "", "ok_at": now}
         except Exception as e:
             nxt[name] = now + min(3600, every * 2)
-            stats[name] = {**stats.get(name, {}), "at": now, "err": str(e)[:120]}
+            prev = stats.get(name, {})          # ok_at — с последнего успеха (или с первой ошибки), не с этой
+            stats[name] = {**prev, "at": now, "err": str(e)[:120], "ok_at": prev.get("ok_at") or now}
             rr.log.warning("[продажа] %s: %s", name, e)
     store.set_kv("sale_src_next", nxt)
     store.set_kv("sale_src_stats", stats)
@@ -1078,16 +1082,15 @@ def attach_dup(cfg, store, l, dup, ss=None):
     """Нашлась уже известная квартира у другого продавца.
     Дороже или так же — тихо дописываем к ней «👥 ещё у N». Заметно дешевле — новая
     становится главной: в подборке заменяет прежнюю, а если прежнюю уже присылали —
-    коротко сообщаем «та же квартира дешевле». Возвращает "alt" | "queued" | "cheaper"."""
+    коротко сообщаем «та же квартира дешевле». Возвращает "alt" | "queued" | "cheaper" | None (не дубль)."""
     rr = _rr()
     row = store.conn.execute("SELECT data, notified FROM listings WHERE key=?", (dup,)).fetchone()
     try:
         o = json.loads(row[0]) if row and row[0] else {}
     except ValueError:
         o = {}
-    if not o:
-        store.save(l, notified=False, dup_of=dup)
-        return "alt"
+    if not o:                     # прежней записи уже нет (удалили при смене условий) — это не дубль
+        return None
     q = store.get_kv("sale_pick") or []
     queued = any(x["key"] == dup for x in q)
     lp, op = l.get("price_usd") or 0, o.get("price_usd") or 0
@@ -1152,7 +1155,8 @@ def day_stats(store, add=None):
 
 _BLOCK_NAMED = re.compile(
     r"(?:юнусабад|юнусобод|yunusobod|yunusabad|чиланзар|чилонзор|chilonzor|chilanzar|сергели|sergeli|"
-    r"куйлюк|қўйлиқ|qo'?yliq|кушбеги|qo'?shbegi)\w*\s*[-–]?\s*(\d{1,2})(?!\d|/|[.,]\d)", re.I)
+    r"куйлюк|қўйлиқ|qo'?yliq|кушбеги|qo'?shbegi)\w*\s*[-–]?\s*(\d{1,2})(?!\d|/|[.,]\d)"
+    r"(?!\s*[-–]?\s*(?:х|ух|ти)?\s*[-–]?\s*(?:комн|ком\b|к\.|xona|хона|эт|qavat|соток|сот\b|м2|м²|кв\.?\s*м))", re.I)
 _BLOCK_WORD = re.compile(r"(?<![\d/])(\d{1,2})\s*[-–]?\s*(?:й\s*|ый\s*)?(?:квартал|kvartal|kvartl|kvrtal|кв-л|массив|massiv)", re.I)
 
 
@@ -1265,8 +1269,12 @@ def photo_dup(store, l):
     if not hs:
         return None
     _ensure_phash_table(store)
-    rows = store.conn.execute("SELECT key, h, rooms, area FROM photo_hash WHERE key != ?", (l["key"],)).fetchall()
-    for key, h, rooms, area in rows:
+    queued = {x["key"] for x in (store.get_kv("sale_pick") or [])}
+    rows = store.conn.execute("SELECT p.key, p.h, p.rooms, p.area, l.notified FROM photo_hash p "
+                              "LEFT JOIN listings l ON l.key = p.key WHERE p.key != ?", (l["key"],)).fetchall()
+    for key, h, rooms, area, notified in rows:
+        if not notified and key not in queued:     # удалённое, отсеянное или не показанное — не дубль
+            continue
         h += 1 << 63
         if rooms and l.get("rooms") and rooms != l["rooms"]:
             continue
@@ -1282,9 +1290,10 @@ def structural_dup(store, l, days=45):
     if not (l.get("area") and l.get("price_usd")):
         return None
     queued = {x["key"] for x in (store.get_kv("sale_pick") or [])}
+    since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
     rows = store.conn.execute(
-        "SELECT key, data, notified FROM listings WHERE price_usd BETWEEN ? AND ? AND key != ?",
-        (l["price_usd"] * 0.88, l["price_usd"] * 1.14, l["key"])).fetchall()
+        "SELECT key, data, notified FROM listings WHERE price_usd BETWEEN ? AND ? AND key != ? AND first_seen > ?",
+        (l["price_usd"] * 0.88, l["price_usd"] * 1.14, l["key"], since)).fetchall()
     for key, data, notified in rows:
         if not notified and key not in queued:      # отсеянное раньше — не «уже показанное»
             continue

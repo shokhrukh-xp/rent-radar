@@ -412,6 +412,7 @@ def _b36(n) -> str:
     except (TypeError, ValueError):
         return ""
     digits, out = "0123456789abcdefghijklmnopqrstuvwxyz", ""
+    n = abs(n)
     while True:
         n, r = divmod(n, 36)
         out = digits[r] + out
@@ -527,7 +528,7 @@ def compose_request(cfg, store, username=None, lang=None):
             movein = ({"now": "darhol kirishga tayyorman",
                        "month": "bir oy ichida kiraman",
                        "flex": "muddat bo'yicha moslashuvchanman"} if uz else
-                      {"now": "готов заехать сразу",
+                      {"now": "могу заехать сразу",
                        "month": "заезд в течение месяца",
                        "flex": "по срокам гибко"}).get(ans.get("movein"))
             if movein:
@@ -715,6 +716,12 @@ def save_offer(store, cfg, chat_id, name, text, photos, media_group=None):
             new_text = old_text or text
             store.conn.execute("UPDATE broker_offers SET photos=?, text=? WHERE oid=?",
                                (json.dumps(ph[:8]), new_text, oid))
+            if text and not old_text:          # подпись альбома пришла не с первым фото — разбираем её
+                p = parse_offer(text, cfg)
+                store.conn.execute("UPDATE broker_offers SET district=?, rooms=?, area=?, price_usd=?, price_raw=?, "
+                                   "floor=?, floors_total=? WHERE oid=?",
+                                   (p["district"], p["rooms"], p["area"], p["price_usd"], p["price_raw"],
+                                    p["floor"], p["floors_total"], oid))
             store.conn.commit()
             return oid, False
 
@@ -745,6 +752,25 @@ def merge_into_offer(store, cfg, oid, text, photos):
     store.conn.execute("UPDATE broker_offers SET " + ", ".join(f"{k}=?" for k in sets)
                        + " WHERE oid=?", (*sets.values(), oid))
     store.conn.commit()
+
+
+NEW_OFFER_RE = re.compile(r"(?:ещ[её]|другой|новый|следующий)\s+(?:один\s+)?вариант|yana\s+(?:bir\s+)?variant|"
+                          r"boshqa\s+variant|ещ[её]\s+(?:есть\s+)?квартир", re.I)
+
+
+def looks_like_new_offer(store, cfg, oid, text) -> bool:
+    """Маклер в ответ на уточнение прислал уже другую квартиру («Ещё вариант: 3-комн…», другие комнаты/цена)."""
+    if not text:
+        return False
+    if NEW_OFFER_RE.search(text):
+        return True
+    o = get_offer(store, oid) or {}
+    p = parse_offer(text, cfg)
+    if p.get("rooms") and o.get("rooms") and p["rooms"] != o["rooms"]:
+        return True
+    if p.get("price_usd") and o.get("price_usd") and abs(p["price_usd"] - o["price_usd"]) / o["price_usd"] > 0.3:
+        return True
+    return False
 
 
 def pending_answer(store, chat_id, hours=72):
@@ -1067,7 +1093,7 @@ def show_offers(cfg, store, batch=None):
     total = len(pool)
     if not total:
         sl = len(offers_by_status(store, "shortlist")) + len(offers_by_status(store, "asked"))
-        written = store.conn.execute("SELECT COUNT(*) FROM brokers WHERE status='contacted'").fetchone()[0]
+        written = store.conn.execute("SELECT COUNT(*) FROM brokers WHERE status IN ('contacted', 'offered')").fetchone()[0]
         rows = []
         if sl:
             rows.append([{"text": f"📋 Шортлист ({sl})", "callback_data": "s:show"}])
@@ -1201,6 +1227,8 @@ def broker_send(cfg, store, broker_chat, text):
     rr = _rr()
     c = str(broker_chat or "")
     import i18n
+    if c.startswith("biz:"):
+        text = _biz_voice(text, cfg)               # сначала — от первого лица (правила по-русски), потом перевод
     if i18n.broker_lang(store, c) == "uz" and i18n.has_russian(text):
         text = i18n.ai(cfg, text, "uz")
     if c.startswith("biz:"):
@@ -1208,14 +1236,17 @@ def broker_send(cfg, store, broker_chat, text):
         if not (conn.get("id") and conn.get("enabled")):
             return None
         return rr.tg_call(cfg, "sendMessage", {"business_connection_id": conn["id"], "chat_id": int(c[4:]),
-                                               "text": _biz_voice(text, cfg)}, quiet=True)
+                                               "text": text}, quiet=True)
     return rr.tg_call(cfg, "sendMessage", {"chat_id": broker_chat, "text": text})
 
 
 def handle_triage_cb(data, cfg, store):
     rr = _rr()
-    _, kind, sid = data.split(":", 2)
-    oid = int(sid.partition(":")[0])
+    try:
+        _, kind, sid = data.split(":", 2)
+        oid = int(sid.partition(":")[0])
+    except ValueError:
+        return "Кнопка устарела", True
     o = get_offer(store, oid)
     if not o:
         return "Вариант не найден", True
@@ -1533,6 +1564,24 @@ VIEW_OK_RE = re.compile(r"\b(да|давайте|хорошо|можно|ок|ok
                         r"mayli|bo['ʻ’]?ladi|kelishdik|xo['ʻ’]?p|kuting|keling)\b", re.I)
 
 
+VIEW_COUNTER_RE = re.compile(r"\bлучше\b|\bно\b|\bтолько\b|\bа\s+(?:можно|если)|\bfaqat\b|\blekin\b|\byaxshisi\b|"
+                             r"\bboshqa\s+vaqt|\bдругое\s+время|\bперенес", re.I)
+_TIME_RE = re.compile(r"\b(\d{1,2})[:.](\d{2})\b|\b(?:в|к|после|до|с|soat)\s+(\d{1,2})\b(?![:.]\d)", re.I)
+
+
+def viewing_counter(text, at_iso=None) -> bool:
+    """Маклер предлагает другое время: «Можно в 19:00?», «лучше в воскресенье», «да, но только после 20»."""
+    if VIEW_COUNTER_RE.search(text or ""):
+        return True
+    asked = _when(at_iso) if at_iso else None
+    for m in _TIME_RE.finditer(text or ""):
+        h = int(m.group(1) or m.group(3))
+        mi = int(m.group(2) or 0)
+        if not asked or h % 12 != asked.hour % 12 or (m.group(2) and mi != asked.minute):
+            return True
+    return False
+
+
 def arrange_viewing(cfg, store, oid) -> str:
     """Клиент сказал, когда удобно смотреть, — Ra'no сама договаривается с маклером. Ответ маклера
     (handle_viewing_reply) — клиенту: подтвердил или предлагает другое время. Писать маклеру нельзя —
@@ -1542,18 +1591,25 @@ def arrange_viewing(cfg, store, oid) -> str:
     v = (o or {}).get("extra", {}).get("viewing") or {}
     if not o or not v.get("at"):
         return ""
-    when = v.get("label") or _when(v["at"]).strftime("%d.%m в %H:%M")
+    label = re.sub(r"\s*\(время уточнить\)", "", v.get("label") or "").strip()   # пометка для клиента, не маклеру
+    when = label or _when(v["at"]).strftime("%d.%m в %H:%M")
     if v.get("notime"):
-        when = (v.get("label") or "в этот день") + " — в какое время удобно"
+        when = (label or "в этот день") + " — в какое время удобно"
     tag = _offer_tag(o)
     biz = str(o.get("broker_chat") or "").startswith("biz:")
     import i18n
     uzb = (i18n.broker_lang(store, o["broker_chat"]) if can_message_broker(o) else
            i18n.detect_lang(o.get("text") or "")) == "uz"
     if uzb:                                    # маклер пишет по-узбекски — и просим по-узбекски
-        when_uz = v.get("label") or _when(v["at"]).strftime("%d.%m soat %H:%M")
-        text = (f"Assalomu alaykum! Variant bo'yicha{f' ({tag})' if tag else ''} — kvartirani {when_uz} ko'rsak "
-                "bo'ladimi? Noqulay bo'lsa — qachon mumkinligini ayting.")
+        d_ = _when(v.get("at"))                # дата по-узбекски, не русская подпись «сб, 25 октября»
+        when_uz = (f"{d_.day}-{MON_UZ[d_.month - 1]}" + ("" if v.get("notime") else f" soat {d_:%H:%M}")) if d_ \
+            else "shu kuni"
+        tag_uz = ", ".join(x for x in [f"{o['rooms']} xonali" if o.get("rooms") else "",
+                                       DISTRICT_UZ.get(o.get("district") or "", o.get("district") or ""),
+                                       fmt_money(o["price_usd"]) if o.get("price_usd") else ""] if x)
+        text = (f"Assalomu alaykum! Variant bo'yicha{f' ({tag_uz})' if tag_uz else ''} — kvartirani {when_uz} "
+                + ("ko'rsak bo'ladimi? Qaysi vaqtda qulay?" if v.get("notime") else
+                   "ko'rsak bo'ladimi? Noqulay bo'lsa — qachon mumkinligini ayting."))
     elif biz or is_site_offer(o) or not can_message_broker(o):
         text = (f"Здравствуйте! По варианту{f' ({tag})' if tag else ''} — можно посмотреть квартиру {when}? "
                 "Если неудобно — подскажите, когда можно.")
@@ -1588,13 +1644,15 @@ def handle_viewing_reply(cfg, store, broker_key, text) -> bool:
     oid = int(w["oid"])
     o = get_offer(store, oid)
     v = (o or {}).get("extra", {}).get("viewing") or {}
-    ok = bool(VIEW_OK_RE.search(text)) and not re.search(r"\bнет\b|не\s+(получится|могу|удобно)|yo['ʻ’]?q", text, re.I)
+    ok = (bool(VIEW_OK_RE.search(text)) and not re.search(r"\bнет\b|не\s+(получится|могу|удобно)|yo['ʻ’]?q", text, re.I)
+          and not viewing_counter(text, None if v.get("notime") else v.get("at")))    # предлагает другое время
     if ok and v:
         _set_extra(store, oid, viewing={**v, "confirmed": True})
     import i18n
     head = (f"📅 Маклер ответил про просмотр варианта #{oid}:\n"
             f"«{rr.escape_html(i18n.quote_for_client(cfg, text.strip()[:500]))}»\n\n")
-    tail = (f"✅ Договорились: {rr.escape_html(v.get('label') or '')}. Напомню за 2 часа." if ok else
+    tail = ((f"✅ Договорились: {rr.escape_html(v.get('label') or '')}. Напомню за 2 часа." if not v.get("notime") else
+             "✅ Маклер согласен. Осталось время — скажите, во сколько удобно, я передам.") if ok else
             "Если предлагает другое время — скажите, подходит ли или на когда перенести, я передам.")
     rr.send_telegram(cfg, head + tail)
     return True
@@ -1767,8 +1825,8 @@ def biz_followup_text(o, deal="rent", uz=False):
     if not o.get("area"):
         items.append("Maydoni" if uz else "Площадь")
     if not o.get("price_usd"):
-        items.append(("Narxi va kelishsa bo'ladimi" if deal == "buy" else "Oylik narxi") if uz else
-                     ("Цена и есть ли торг" if deal == "buy" else "Цена в месяц"))
+        items.append({"buy": "Narxi va kelishsa bo'ladimi", "daily": "Bir kunlik narxi"}.get(deal, "Oylik narxi") if uz
+                     else {"buy": "Цена и есть ли торг", "daily": "Цена за сутки"}.get(deal, "Цена в месяц"))
     if deal == "buy" and not ex.get("documents"):
         items.append("Hujjatlari (kadastr) joyidami, ipotekaga beriladimi" if uz else
                      "Документы (кадастр) в порядке? Можно ли в ипотеку")
@@ -1788,7 +1846,7 @@ def manual_auto_ask(cfg, store, oid) -> bool:
     if not o or can_message_broker(o) or is_site_offer(o) or (o.get("extra") or {}).get("auto_asked"):
         return False
     ans = get_anketa(store).get("ans") or {}
-    deal = "buy" if ans.get("deal") in ("buy", "sale") else "rent"
+    deal = "buy" if ans.get("deal") in ("buy", "sale") else "daily" if ans.get("deal") == "daily" else "rent"
     import i18n
     q = biz_followup_text(o, deal, i18n.detect_lang(o.get("text") or "") == "uz")
     if not q:
@@ -1812,7 +1870,7 @@ def biz_auto_ask(cfg, store, oid) -> bool:
     if (o.get("extra") or {}).get("auto_asked"):
         return False
     ans = get_anketa(store).get("ans") or {}
-    deal = "buy" if ans.get("deal") in ("buy", "sale") else "rent"
+    deal = "buy" if ans.get("deal") in ("buy", "sale") else "daily" if ans.get("deal") == "daily" else "rent"
     import i18n
     text = biz_followup_text(o, deal, i18n.broker_lang(store, o["broker_chat"]) == "uz")
     if not text:
@@ -1830,7 +1888,8 @@ def details_question(o, cfg=None, deal="rent"):
     cfg = cfg or {}
     a = cfg.get("assistant_name", "Ra'no")
     q = [f"Здравствуйте! Это {a} 👋, ИИ-ассистент по поиску жилья.",
-         "По вашему объявлению о продаже" if is_site_offer(o) else "По варианту, который вы присылали"]
+         ("По вашему объявлению о продаже" if ((o.get("extra") or {}).get("deal") or deal) in ("buy", "sale")
+          else "По вашему объявлению об аренде") if is_site_offer(o) else "По варианту, который вы присылали"]
     tag = []
     if o["rooms"]:
         tag.append(f"{o['rooms']}-комн")
@@ -1855,7 +1914,7 @@ def details_question(o, cfg=None, deal="rent"):
                   "Размер комиссии?", "Когда можно посмотреть?"]
     else:
         if not o["price_usd"]:
-            items.append("Какая цена в месяц?")
+            items.append("Какая цена за сутки?" if deal == "daily" else "Какая цена в месяц?")
         items += ["Размер депозита и комиссии?", "Когда можно посмотреть?"]
     q += [f"{i}. {t}" for i, t in enumerate(items, 1)]
     return "\n".join(q)
@@ -1886,6 +1945,8 @@ def request_details(cfg, store, oids=None):
                 "UPDATE broker_offers SET status='asked', asked_at=? WHERE oid=?",
                 (datetime.now(timezone.utc).isoformat(), oid))
             sent += 1
+        else:                                # не ушло (окно чата закрыто, отключили доступ) — текст клиенту
+            manual.append(o)
     store.conn.commit()
     if sent:
         rr.send_telegram(cfg, f"📨 Спросила маклеров по {sent} {plural(sent, 'варианту', 'вариантам', 'вариантам')}.\n"

@@ -750,3 +750,44 @@ console.log("OK — много пользователей: Start — клиен�
   assert.ok(!W.DRAW_ASK.test("покажи карту цен") && !W.DRAW_ASK.test("2 комнаты рядом с метро"));
 }
 console.log("OK — «обвести на карте»: подпись Telegram, только клиент, области в очередь Python, подсказка словами");
+
+// ── проверка кода: маклер жмёт Start ещё раз, апдейты не по порядку, вебхук без секрета, готовый поиск при другом intent
+{
+  const W = await import("../src/index.js");
+  W.resetUsersCache();
+  const envM = { ...env, MULTI_USER: "on", USER_LIMIT: "5", WAKE_GH: "off" };
+  await handleUpdate(envM, msg("/start", "7101"));                               // клиент
+  assert.ok(await W.isClient(envM, "7101"));
+  await handleUpdate(envM, msg("/start m" + (7101).toString(36), "8101"));      // маклер клиента 7101
+  await handleUpdate(envM, msg("/start", "8101"));                               // нажал Start ещё раз
+  assert.ok(!(await W.isClient(envM, "8101")), "маклер не должен стать клиентом");
+  await env.DB.prepare("DELETE FROM users").run(); W.resetUsersCache();
+  // апдейты не по порядку: 999 после 1000 — не дубль; повтор 1000 — дубль
+  const u1 = { update_id: 900000, message: { message_id: 1, chat: { id: 555001 }, from: { id: 555001 }, text: "x" } };
+  assert.notEqual(await handleUpdate(env, u1), "dup");
+  assert.notEqual(await handleUpdate(env, { ...u1, update_id: 899999 }), "dup");
+  assert.equal(await handleUpdate(env, u1), "dup");
+  // без TG_SECRET вебхук закрыт
+  const r = await worker.fetch(new Request("https://w.example/tg", { method: "POST", body: JSON.stringify(msg("/users")) }),
+    { ...env, TG_SECRET: "" }, { waitUntil() {} });
+  assert.equal(r.status, 403);
+  // повреждённые точки области — без исключения
+  assert.deepEqual(W.cleanAreas([[null, [41.3, 69.2], [41.31, 69.21], [41.32, 69.2], [41.3, 69.22]]]).length, 1);
+  // «44.000$» — 44 тысячи, не 44
+  assert.equal(parseNum("44.000"), 44000); assert.equal(parseNum("52.5"), 52.5);
+  assert.ok(!W.DRAW_ASK.test("Ищу выделенный участок") && !W.DRAW_ASK.test("выдели главное из карточки"));
+  assert.ok(!W.BIZ_NO.test("дом можно без подключения газа"));
+}
+{
+  // параметры собраны, а модель выбрала «ищи сама» — поиск всё равно уходит в Python
+  const C = "308687648";
+  await env.DB.prepare("DELETE FROM kv WHERE k LIKE 'iv:%'").run();
+  qq = await (await svc("/svc/updates?after=0")).json();
+  const base = qq.result.length ? qq.result.at(-1).update_id : 0;
+  geminiQueue.push({ reply: "Ищу!", ready: true, intent: "search_now",
+    set: { deal: "rent", object: "flat", city: "tashkent", rooms: ["2"], districts: ["Мирабад"], budget: 700 } });
+  await handleUpdate(env, msg("ищи сама: аренда 2к Мирабад до 700", C));
+  const q5 = await (await svc(`/svc/updates?after=${base}`)).json();
+  assert.ok(q5.result.some(u => u.message?.web_app_data), JSON.stringify(q5.result.map(u => Object.keys(u.message || {}))));
+}
+console.log("OK — проверка кода: маклер остаётся маклером, апдейты не по порядку, вебхук закрыт без секрета, готовый поиск не теряется");

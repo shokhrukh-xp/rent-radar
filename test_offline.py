@@ -3305,3 +3305,107 @@ for areas_, word_ in (([sq_, tri_], "областей — 2"), ([], "Облас�
 assert ast_.get_kv("sale_force")
 adb_.unlink(missing_ok=True)
 print("OK — «обвести на карте»: только внутри областей и с точным адресом, район не важен; сохранение и сброс из чата")
+
+# ============ проверка всего кода: найденные ошибки — каждая с проверкой ============
+import i18n as _i18n_r, tenants as _tn_r, concierge as _cg_r, sale_sources as _ss_r, market as _mk_r
+# источники: цена Realting с неразрывным пробелом, рассрочка не «цена за м²», комнаты, районы, цены
+assert _ss_r._num("165\xa0002") == 165002
+_dn = _ss_r.normalize({"title": "", "text": "Продаю 2-комн, П/В 3 000$", "price_value": 3000, "price_currency": "USD",
+                       "area": 60}, cfg)
+assert _dn["price_value"] == 3000 and "за м²" not in (_dn.get("price_note") or "")
+assert rr.extract_rooms("квартира 2-х комнатная") == 2 and rr.extract_rooms("3х комнатную") == 3
+assert rr.as_int(94.94) == 95 and rr.as_int("54.5") == 54 and rr.as_int(54.0) == 54
+assert rr.canon_district("Юнусобод тумани") == "Юнусабад" and _ss_r.text_district("Чилонзор тумани") == "Чиланзар"
+assert _ss_r.text_district("Mirzo Ulug'bek tumani") == "Мирзо-Улугбек"
+assert rr.extract_district("Юнусабад 4 квартал, 5 мин до Мирабадского рынка") == "Юнусабад"
+assert rr.extract_price_from_text("$500 2 комн") == (500, "USD")
+assert rr.extract_price_from_text("Цена $75 000", 3_000_000) == (75000, "USD")
+assert rr.extract_price_from_text("850 млн сум", 3_000_000) == (850_000_000, "UZS")
+assert _ss_r.block_no({"title": "Юнусабад 3-комнатная", "text": ""}) is None
+assert _ss_r.block_no({"title": "Сергели 5 этаж", "text": ""}) is None and _ss_r.block_no({"title": "Юнусабад-14"}) == 14
+# поля продажи переживают сохранение в базу (карточки подборки собираются из базы)
+_kp = Path("/tmp/test_keep.db"); _kp.unlink(missing_ok=True)
+_ks = rr.Store(_kp)
+_kl = {"key": "sale:x:1", "source": "s", "url": "u", "title": "t", "text": "", "phones": [], "price_listed_usd": 30000,
+       "offplan": {"resale": True}, "district_site": "Мирабад", "district_by": "точка", "complex": "Bashkent"}
+_ks.save(_kl, notified=True)
+_kd = json.loads(_ks.conn.execute("SELECT data FROM listings WHERE key='sale:x:1'").fetchone()[0])
+assert _kd["price_listed_usd"] == 30000 and _kd["offplan"] == {"resale": True} and _kd["complex"] == "Bashkent"
+# дубль по телефону — только с уже присланным и с теми же комнатами
+_r1 = {"key": "olx:1", "source": "s", "url": "u", "title": "t", "text": "x", "phones": ["901112233"], "rooms": 2}
+_ks.save(_r1, notified=False); _ks.conn.execute("INSERT INTO phones VALUES('901112233', 'olx:1', ?)",
+                                                 (datetime.now(timezone.utc).isoformat(),)); _ks.conn.commit()
+assert _ks.find_dup(dict(_r1, key="olx:2"), cfg) is None                 # прежнее не присылали — разберём заново
+_ks.conn.execute("UPDATE listings SET notified=1 WHERE key='olx:1'"); _ks.conn.commit()
+assert _ks.find_dup(dict(_r1, key="olx:2"), cfg) == "olx:1"
+assert _ks.find_dup(dict(_r1, key="olx:3", rooms=3), cfg) is None        # у маклера с этим номером другая квартира
+_kp.unlink(missing_ok=True)
+# место: «48 м.» и «кв. Мукимий» — не метро и не площадь; больница/Макро — не ориентир; Яккасарай — район
+assert _geo_t.METRO_RE.search("48 м. Юнусабад") is None and _geo_t.METRO_RE.search("60 кв.м. Чиланзар") is None
+assert "mukimiy" in _geo_t.grams("Чиланзар 6 кв. Мукимий") and "4 kvartal" in _geo_t.grams("Юнусабад 4 кв метро Шахристан")
+assert _geo_t.generic_place("Больница") and _geo_t.generic_place("Макро")
+assert _geo_t.skel("Яккасарай") in _geo_t.DISTRICT_WORDS and _geo_t.skel("Янгихаёт") in _geo_t.DISTRICT_WORDS
+_pf = _geo_t.point_for("Юнусабад")
+assert not _pf or _pf.get("src") != "метро"                              # район, а не станция «Юнусабад»
+# рынок: «не даём в ипотеку» — нет; разброс симметричный
+for _mt in ("Не даём в ипотеку", "Нельзя в ипотеку", "Не подходит под ипотеку", "не рассматриваем ипотеку"):
+    assert _mk_r.mortgage_status({"text": _mt})[0] == "no", _mt
+assert _mk_r.mortgage_status({"text": "Можно в ипотеку"})[0] == "yes"
+assert _mk_r._band(list(range(15))) == {"p20": 3, "p80": 11}
+# языки: «Ok!» не переключает узбекского маклера на русский; неудачный перевод не запоминается
+_ls = rr.Store(Path("/tmp/test_lang.db"))
+assert _i18n_r.broker_lang(_ls, "b1", "Assalomu alaykum, 2 xonali kvartira bor") == "uz"
+assert _i18n_r.broker_lang(_ls, "b1", "Ok!") == "uz" and _i18n_r.broker_lang(_ls, "b1") == "uz"
+_tc = []
+_i18n_r._CACHE.clear()
+_i18n_r.ai(dict(cfg, worker_url="https://w"), "Привет, как дела у вас сегодня?", "uz", post=lambda *a, **k: _tc.append(1) or None)
+_i18n_r.ai(dict(cfg, worker_url="https://w"), "Привет, как дела у вас сегодня?", "uz", post=lambda *a, **k: _tc.append(1) or {"text": "Salom"})
+assert len(_tc) == 2
+Path("/tmp/test_lang.db").unlink(missing_ok=True)
+# маклеры: встречное время — не «договорились»; другая квартира в ответе — новый вариант; отрицательный id
+_at = "2026-10-25T18:00:00+05:00"
+assert _cg_r.viewing_counter("Можно в 19:00?", _at) and _cg_r.viewing_counter("Давайте лучше в воскресенье", _at)
+assert not _cg_r.viewing_counter("Да, жду в 18:00", _at) and not _cg_r.viewing_counter("Хорошо, можно", _at)
+assert _cg_r._b36(-100) == _cg_r._b36(100)
+# новый пользователь без анкеты — ничего не ищем по настройкам владельца
+_tp = Path("/tmp/test_tenant_new.db"); _tp.unlink(missing_ok=True)
+_ts = rr.Store(_tp); _ts.tenant = True
+assert not rr.effective_sale_cfg(dict(cfg, tenant="7001"), _ts)["sale_search"]["enabled"]
+assert not rr.rent_search_on(_ts)
+_ts.set_kv("anketa", {"ans": {"deal": "rent"}})
+assert rr.rent_search_on(_ts)
+_tp.unlink(missing_ok=True)
+# одно «сломанное» обновление не роняет бота и не повторяется: остальные разобраны, номер сохранён
+_cp = Path("/tmp/test_crash.db"); _cp.unlink(missing_ok=True)
+_cs = rr.Store(_cp)
+_ups = {"result": [{"update_id": 5, "callback_query": {"id": "c", "data": "t:1", "message": {"chat": {"id": 4243}}}},
+                   {"update_id": 6, "message": {"chat": {"id": 4243}, "text": "/boom"}},
+                   {"update_id": 7, "message": {"chat": {"id": 4243}, "text": "/help"}}]}
+_seen = []
+_orig_hc = rr.handle_command
+def _hc(text, *a, **k):
+    if text == "/boom":
+        raise RuntimeError("boom")
+    _seen.append(text)
+    return "ok", None
+with mock.patch.object(rr, "fetch_updates", lambda c, st, lp=0: (_ups, "wq_offset")), \
+        mock.patch.object(rr, "handle_command", _hc), mock.patch.object(rr, "tg_call", lambda *a, **k: {}), \
+        mock.patch.object(rr, "send_telegram", lambda *a, **k: True), mock.patch.object(rr, "push_snapshot", lambda *a, **k: False):
+    rr.process_commands(dict(cfg, telegram_chat_id="4243"), _cs)
+assert _seen == ["/help"] and _cs.get_kv("wq_offset") == 7
+_cp.unlink(missing_ok=True)
+print("OK — проверка кода: цены и районы источников, дубли, место, ипотека, языки маклеров, время просмотра, "
+      "новые пользователи, сбой одного обновления")
+# текст, потом альбом — один вариант; другая квартира в ответе на уточнение — не склеиваем; аренда — без подборки продажи
+_ap = Path("/tmp/test_album.db"); _ap.unlink(missing_ok=True)
+_as = rr.Store(_ap)
+_o1, _ = rr.intake_offer(cfg, _as, "chat:1", "1", "M", "2-комн Мирабад 600$", [])
+_o2, _ = rr.intake_offer(cfg, _as, "chat:1", "1", "M", "", ["f1"], media_group="g1")
+_o3, _ = rr.intake_offer(cfg, _as, "chat:1", "1", "M", "", ["f2"], media_group="g1")
+assert _o1 == _o2 == _o3 and cg.get_offer(_as, _o1)["photos"] == ["f1", "f2"]
+assert cg.looks_like_new_offer(_as, cfg, _o1, "Ещё вариант: 3-комн Юнусабад 900$, 80 м2")
+assert not cg.looks_like_new_offer(_as, cfg, _o1, "Да, актуален, 5 этаж из 9")
+_as.set_kv("anketa", {"ans": {"deal": "rent"}})
+assert "аренду" in rr.handle_callback("R:pick", {}, _as, cfg)[0] and "аренду" in rr.handle_callback("R:last", {}, _as, cfg)[0]
+_ap.unlink(missing_ok=True)
+print("OK — маклеры: текст и альбом — один вариант, новая квартира в ответе — отдельно; у аренды нет подборки продажи")

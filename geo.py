@@ -61,7 +61,7 @@ LANDMARK_RE = re.compile(
 NEAR_RE = re.compile(r"(?:рядом с|возле|напротив|около|недалеко от|yonida|yaqinida)\s+([^\n.,;!?]{3,50})", re.I)
 # «Buyuk ipak yo'li metrosidan», «Ойбек метроси ёнида» — по-узбекски у слова «метро» бывают окончания
 METRO_AFTER_RE = re.compile(r"((?:[A-Za-zА-Яа-яЁёЎўҚқҒғҲҳʻ'’\-]+\s+){1,3}?)(?:метро|metro)\w*\b", re.I)
-METRO_RE = re.compile(r"(?:метро|м\.|ст\.?\s*м\.?|metro|бекат)\s*[«\"“]?([A-Za-zА-Яа-яЁёЎўҚқҒғҲҳʻ'’\- ]{3,30})", re.I)
+METRO_RE = re.compile(r"(?:метро|(?<!\d)(?<!\d\s)(?<!кв)(?<!кв\.)(?<!кв\.\s)(?<!кв\s)м\.|ст\.?\s*м\.?|metro|бекат)\s*[«\"“]?([A-Za-zА-Яа-яЁёЎўҚқҒғҲҳʻ'’\- ]{3,30})", re.I)
 
 
 NUM_JUNK = {"arientir", "arientiri", "maljal", "muljal", "mulijal", "etaj", "etajni", "etaji", "kvm", "kv m",
@@ -89,7 +89,14 @@ def skel(s: str) -> str:
     return " ".join(s.split())
 
 
-AREA_RE = re.compile(r"\d+(?:[.,]\d+)?\s*(?:кв\.?\s*м\.?|м\s*[²2]|kv\.?\s*m\.?|m\s*[²2]|кв\.\s*метр\w*|sotix|сотих|сотки)", re.I)
+# наборы слов сравниваются с выводом skel — приводим их к той же записи («yakkasaray» → «yakasaray»)
+STOP = {skel(w) for w in STOP} | {"mahalya", "praspekt"}
+DISTRICT_WORDS = {skel(w) for w in DISTRICT_WORDS} | {"yangihaet", "yangihayat"}
+NUM_JUNK = {skel(w) for w in NUM_JUNK}
+
+
+AREA_RE = re.compile(r"\d+(?:[.,]\d+)?\s*(?:кв\.?\s*м(?![а-яёa-z])\.?|м\s*[²2]|kv\.?\s*m(?![а-яёa-z])\.?|m\s*[²2]|"
+                     r"кв\.\s*метр\w*|sotix|сотих|сотки)", re.I)
 
 
 def grams(phrase: str) -> set:
@@ -419,7 +426,7 @@ def point_for(query: str, store=None, requests_mod=None):
     r = resolve_phrase(q, scope)
     if r and (grams(q) - {g for g in grams(q) if g in DISTRICT_WORDS}):
         return {"lat": r[0], "lon": r[1], "label": q[:40], "src": "ориентир"}
-    if mt and sq.startswith(skel(mt[0])[:5]):
+    if mt and sq.startswith(skel(mt[0])[:5]) and not set(sq.split()) & DISTRICT_WORDS:   # «Юнусабад» — район, не станция
         return {"lat": mt[1], "lon": mt[2], "label": f"м. {mt[0]}", "src": "метро"}
     if store is not None and requests_mod is not None:
         cache = store.get_kv("geo_osm") or {}
@@ -516,6 +523,7 @@ GENERIC_PLACE = {"mechet", "masjid", "shkala", "shkali", "detsad", "sad", "bazar
                  "bolnitsa", "palikliniki", "paliklinika", "park", "astanavka", "metra", "makro", "karzinka",
                  "supermarket", "apteka", "bank", "kafe", "restaran", "mektab", "bagcha", "dakan", "hakimiyat",
                  "mebelniy", "mebel", "tsentr", "markaz"}
+GENERIC_PLACE = {skel(w) for w in GENERIC_PLACE} | {"bolnitsa", "balnitsa", "makra"}
 
 
 def generic_place(name: str) -> bool:
@@ -827,11 +835,12 @@ def resolve_text(text: str, district=None):
     best = None
     gs = grams(text or "")
     if district:                                 # «16 квартал» в Юнусабаде = «Юнусабад-16» в справочнике
-        dw = skel(district).replace(" ", "")
+        dt = skel(district).split()
+        dws = {"".join(dt), dt[-1]} if dt else set()      # «Мирзо-Улугбек»: в справочнике «ulugbek 5»
         for g in list(gs):
             m = re.fullmatch(r"(\d{1,2}) kvartal|kvartal (\d{1,2})", g)
             if m:
-                gs.add(f"{dw} {m.group(1) or m.group(2)}")
+                gs |= {f"{dw} {m.group(1) or m.group(2)}" for dw in dws}
     for g in gs:
         if " " not in g and len(g) < 6:
             continue
