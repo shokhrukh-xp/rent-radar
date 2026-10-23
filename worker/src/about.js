@@ -1,4 +1,4 @@
-import { MARK_HOUSE, MARK_TAIL, WORD, APOS, LOGO_W } from "./brand.js";
+import { WORD, WEDGE, LOGO_VIEWBOX } from "./brand.js";
 // Ra'no · «Кому служит Ra'no»: публичная страница — что делает помощник, чего не делает, кто платит.
 // Для клиентов, маклеров и для проверки регулятором. Открывается по адресу воркера /about (и /about?lang=uz, /about?lang=en).
 
@@ -60,10 +60,9 @@ const EN = {
   h: ["What she does", "What she doesn't do", "Who pays", "Brokers and realtors", "Your data"], open: "Open Ra'no in Telegram",
 };
 const esc = s => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;");
-/** Знак и надпись Ra'no; цвета — из переменных страницы (светлая и тёмная тема). */
-export const logoSvg = (h = 44) => `<svg class="logo" viewBox="26 22 ${LOGO_W - 26} 168" height="${h}" role="img" aria-label="Ra'no">` +
-  `<g fill="none" stroke-width="22" stroke-linecap="round" stroke-linejoin="round"><path stroke="var(--g)" d="${MARK_HOUSE}"/>` +
-  `<path stroke="var(--a)" d="${MARK_TAIL}"/></g><path fill="var(--g)" d="${WORD}"/><path fill="var(--a)" d="${APOS}"/></svg>`;
+/** Надпись Ra'no (клин-апостроф); цвета — из переменных страницы (светлая и тёмная тема). */
+export const logoSvg = (h = 32) => `<svg class="logo" viewBox="${LOGO_VIEWBOX}" height="${h}" role="img" aria-label="Ra'no">` +
+  `<path fill="var(--logo)" d="${WORD}"/><path fill="var(--a)" d="${WEDGE}"/></svg>`;
 export function aboutHtml(lang = "uz", bot = "rano_smart_bot") {
   const T = lang === "uz" ? UZ : lang === "en" ? EN : RU;
   const ul = xs => "<ul>" + xs.map(x => `<li>${esc(x)}</li>`).join("") + "</ul>";
@@ -71,9 +70,9 @@ export function aboutHtml(lang = "uz", bot = "rano_smart_bot") {
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(T.title)}</title>
 <link rel="icon" href="/favicon.svg" type="image/svg+xml"><link rel="icon" href="/favicon.ico" sizes="48x48">
 <link rel="apple-touch-icon" href="https://raw.githubusercontent.com/shokhrukh-xp/rent-radar/main/docs/brand/rano_icon_180.png">
-<meta name="theme-color" content="#0E6B53">
-<style>:root{--bg:#F6F1E7;--ink:#111A17;--muted:#4F5C57;--accent:#0E6B53;--line:#E3DCCD;--g:#0E6B53;--a:#E8945A}
-@media (prefers-color-scheme:dark){:root{--bg:#0E1412;--ink:#EAF0ED;--muted:#9AA8A2;--accent:#3FB58A;--line:#27322E;--g:#3FB58A;--a:#F0A877;--btn-ink:#0E1412}}
+<meta name="theme-color" content="#0F4C3C">
+<style>:root{--bg:#F4EDDD;--ink:#111A17;--muted:#4F5C57;--accent:#0F4C3C;--line:#E2D9C6;--logo:#0F4C3C;--a:#F2A065}
+@media (prefers-color-scheme:dark){:root{--bg:#0E1412;--ink:#EAF0ED;--muted:#9AA8A2;--accent:#3FB58A;--line:#27322E;--logo:#F4EDDD;--a:#F2A065;--btn-ink:#0E1412}}
 body{margin:0;background:var(--bg);color:var(--ink);font:17px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
 main{max-width:720px;margin:0 auto;padding:28px 18px 48px}h1{font-size:26px;line-height:1.25;margin:0 0 12px}
 h2{font-size:18px;margin:28px 0 8px;color:var(--accent)}p,li{color:var(--ink)}ul{padding-left:20px}li{margin:6px 0}
@@ -82,7 +81,7 @@ a.btn{display:inline-block;margin-top:18px;background:var(--accent);color:var(--
 .lang{font-size:14px}.lang a{color:var(--muted)}
 .top{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin:0 0 26px}
 .logo{display:block;width:auto}</style></head><body><main>
-<div class="top">${logoSvg(44)}<div class="lang"><a href="?lang=uz">O'zbekcha</a> · <a href="?lang=ru">Русский</a> · <a href="?lang=en">English</a></div></div>
+<div class="top">${logoSvg(30)}<div class="lang"><a href="?lang=uz">O'zbekcha</a> · <a href="?lang=ru">Русский</a> · <a href="?lang=en">English</a></div></div>
 <h1>${esc(T.title)}</h1><p class="tag">${esc(T.tag)}</p><p class="lead">${esc(T.lead)}</p>
 <h2>${T.h[0]}</h2>${ul(T.does)}<h2>${T.h[1]}</h2>${ul(T.doesnt)}<h2>${T.h[2]}</h2><p>${esc(T.money)}</p>
 <h2>${T.h[3]}</h2><p>${esc(T.law)}</p><h2>${T.h[4]}</h2><p>${esc(T.data)}</p>

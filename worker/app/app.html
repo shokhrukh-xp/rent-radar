@@ -624,10 +624,8 @@ function shareText(o, all) {
   var c = commute(o);
   return [facts(o), place(o) + " — " + priceMain(o) + " " + per(o), (o.market ? (Math.abs(o.market.delta) < 4 ? t("marketEq") : t("market", { d: (o.market.delta > 0 ? "+" : "−") + Math.abs(o.market.delta) })) : "") + (c ? (o.market ? " · " : "") + c.min + " " + t("min") + " " + t("toWork") : ""), t("shareAsk")].filter(Boolean).join("\n");
 }
-// знак Ra'no «дом-сообщение» (docs/brand/make_mark.py)
-var MARK = '<svg viewBox="26 22 148 168" width="56" height="64" aria-hidden="true" style="display:block;margin:0 auto 10px"><g fill="none" stroke-width="22" stroke-linecap="round" stroke-linejoin="round">' +
-  '<path stroke="var(--g)" d="M158 102 V94 Q158 85 151 79 L108 43 Q100 37 92 43 L49 79 Q42 85 42 94 V134 Q42 150 58 150 H84 V174"/>' +
-  '<path stroke="#E8945A" d="M84 174 C116 170 156 156 158 126"/></g></svg>';
+// знак Ra'no — иконка R' (docs/brand/make_mark.py; воркер отдаёт её как /favicon.svg)
+var MARK = '<img src="/favicon.svg" width="56" height="56" alt="" style="display:block;margin:0 auto 12px;border-radius:14px">';
 function render() {
   var app = document.getElementById("app");
   if (S.err) { app.innerHTML = '<div class="empty" style="margin-top:26vh">' + MARK + '<b>Ra\'no</b><span>' + esc(S.err) + "</span></div>"; return; }
