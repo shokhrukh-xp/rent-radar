@@ -3293,6 +3293,15 @@ assert rr.passes_user_filters({"geo": {"lat": 41.31, "lon": 69.28, "src": "са�
 assert rr.passes_user_filters({"geo": {"lat": 41.31, "lon": 69.28, "src": "сайт"}, "district": "Чиланзар", "rooms": 2},
                               {"areas": [sq_], "districts": [], "rooms_min": 2, "rooms_max": 3})   # районов нет — только область
 assert 5 < _geo_t.area_km2(sq_) < 8 and _geo_t.area_km2([]) == 0                   # ~2.2 × 3.3 км
+# район по настоящим границам (OSM), а не по соседним объявлениям
+assert _geo_t.poly_district(41.3046, 69.3101) == "Яшнабад" and _geo_t.poly_district(41.2953, 69.2615) == "Яккасарай"
+assert _geo_t.poly_district(41.40, 69.60) is None
+_lb = {"lat": 41.2953, "lon": 69.2615, "district": "Мирабад", "title": "", "text": "квартира"}
+_geo_t.locate(_lb)
+assert _lb["district"] == "Яккасарай" and _lb["district_site"] == "Мирабад" and _lb["district_by"] == "точка"
+assert "по метке на карте (на сайте — Мирабад)" in rr.loc_tag(_lb)
+assert "примерно, по ориентиру «Makro»" in rr.loc_tag({"geo": {"src": "ориентир", "label": "Makro", "spread": 0.6}})
+assert "точного адреса нет" in rr.loc_tag({"geo": {"src": "район"}})
 assert not rr.passes_user_filters({"geo": {"lat": 41.25, "lon": 69.28, "src": "сайт"}, "district": "Яккасарай", "rooms": 2},
                                   {"areas": [sq_], "districts": ["Яккасарай"]})
 # покупка: области вместо ориентира и районов; условия поиска — «внутри областей»

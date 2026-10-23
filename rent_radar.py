@@ -1146,6 +1146,21 @@ def fmt_phone(p: str) -> str:
     return f"+998 {d[:2]} {d[2:5]}-{d[5:7]}-{d[7:9]}"
 
 
+def loc_tag(l: dict) -> str:
+    """Насколько точно место: по метке на сайте, примерно по ориентиру, или известен только район."""
+    g = l.get("geo") or {}
+    fixed = (f" (на сайте — {escape_html(l['district_site'])})"
+             if l.get("district_by") == "точка" and l.get("district_site") else "")
+    if g.get("src") == "сайт" and not g.get("conflict") and float(g.get("spread") or 0) <= 1.0:
+        return " · по метке на карте" + fixed
+    if g.get("conflict"):
+        return " · метка на карте не совпадает с текстом — место примерное"
+    if g.get("src") in ("ориентир", "метро"):
+        lab = (g.get("label") or "").strip()
+        return " · примерно" + (f", по ориентиру «{escape_html(lab)}»" if lab else "")
+    return " · точного адреса нет"
+
+
 def format_message(l: dict, cfg: dict, likely_makler: bool) -> str:
     """Карточка аренды: сначала главное (что за квартира, цена, где), потом продавец и факты. Без «оценок из 10»
     и советов — факты: дешевле/дороже похожих, сколько объявлений у продавца, далеко ли метро."""
@@ -1173,11 +1188,17 @@ def format_message(l: dict, cfg: dict, likely_makler: bool) -> str:
             lines.append(f"💰 {num_} сум/мес" + (f" (~${usd:.0f})" if usd else ""))
         else:
             lines.append(f"💰 {num_} (валюта не указана)")
+    try:
+        if not l.get("geo"):
+            geo.locate(l)                      # точка и район по точке — до строки «📍», чтобы показать честно
+    except Exception:
+        pass
     place = l.get("district") or l.get("district_raw")
     if place:
         extra = l.get("district_raw") if l.get("district_raw") and l.get("district_raw") != place and \
             len(str(l.get("district_raw"))) <= 60 else ""
-        lines.append(f'📍 {escape_html(str(place))}' + (f", {escape_html(str(extra))}" if extra else ""))
+        lines.append(f'📍 {escape_html(str(place))}' + (f", {escape_html(str(extra))}" if extra else "")
+                     + loc_tag(l))
     else:
         lines.append("📍 район не указан")
     if l.get("seller") or l.get("is_business") is not None:

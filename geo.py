@@ -292,8 +292,62 @@ def ensure(store, max_age=1800):
     return GAZ
 
 
+_POLY = {"d": None}
+BORDER_KM = 0.15                                 # ближе к границе района — метке продавца не хватает точности
+
+
+def _polys():
+    """Границы районов Ташкента (OpenStreetMap, geo_districts.json рядом с кодом): {район: [[кольцо, дырки…], …]}."""
+    if _POLY["d"] is None:
+        import json, os
+        try:
+            with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "geo_districts.json"), encoding="utf-8") as f:
+                _POLY["d"] = json.load(f).get("districts") or {}
+        except (OSError, ValueError) as e:
+            log.info("границы районов не загрузились: %s", e)
+            _POLY["d"] = {}
+    return _POLY["d"]
+
+
+def _in_ring(lat, lon, ring):                    # кольцо — [[lon, lat], …] как в GeoJSON
+    ins = False
+    for i in range(len(ring)):
+        x1, y1 = ring[i]
+        x2, y2 = ring[(i + 1) % len(ring)]
+        if (y1 > lat) != (y2 > lat) and lon < x1 + (lat - y1) * (x2 - x1) / ((y2 - y1) or 1e-12):
+            ins = not ins
+    return ins
+
+
+def poly_district(lat, lon):
+    """Район по настоящим границам (OSM). None — точка вне известных границ (Янгихаёт, новые массивы)."""
+    for name, parts in _polys().items():
+        for p in parts:
+            if p and _in_ring(lat, lon, p[0]) and not any(_in_ring(lat, lon, h) for h in p[1:]):
+                return name
+    return None
+
+
+def km_to_district(lat, lon, name) -> float:
+    """До границы района, км (по отрезкам контура)."""
+    best = 99.0
+    kx, ky = 111.32 * math.cos(math.radians(lat)), 110.57
+    for p in _polys().get(name) or []:
+        r = p[0] if p else []
+        for i in range(len(r)):
+            (x1, y1), (x2, y2) = r[i], r[(i + 1) % len(r)]
+            ax, ay = (x2 - x1) * kx, (y2 - y1) * ky
+            bx, by = (lon - x1) * kx, (lat - y1) * ky
+            t = max(0.0, min(1.0, (ax * bx + ay * by) / ((ax * ax + ay * ay) or 1e-12)))
+            best = min(best, math.hypot(bx - t * ax, by - t * ay))
+    return best
+
+
 def district_at(lat, lon, radius=0.8):
-    """Чей это район: большинство объявлений среза в радиусе."""
+    """Чей это район: по границам OSM; вне их — большинство объявлений среза в радиусе."""
+    d = poly_district(lat, lon)
+    if d:
+        return d
     near = [d for la, lo, d, *_ in GAZ["pts"] if d and abs(la - lat) < 0.02 and km(lat, lon, la, lo) <= radius]
     if len(near) < 3:
         return None
@@ -358,8 +412,8 @@ def locate(l: dict) -> dict:
     def ok(la, lo):
         if not in_city(la, lo):
             return False
-        dd = district_at(la, lo) if GAZ["pts"] else None
-        return not (d and dd and dd != d)
+        dd = district_at(la, lo)
+        return not (d and dd and dd != d and not (d in _polys() and km_to_district(la, lo, d) <= 0.5))
 
     la, lo = l.get("lat"), l.get("lon")
     try:
@@ -369,7 +423,7 @@ def locate(l: dict) -> dict:
     if la is not None and in_city(la, lo):
         # координаты сайта точнее поля «район»: у Uybor район выведен по id и бывает чужим
         # (Куйлюк с пометкой «Мирабад»). Точка в другом районе — исправляем район, а не выбрасываем точку.
-        dd = district_at(la, lo) if GAZ["pts"] else None
+        dd = district_at(la, lo)
         said = text_districts(text)
         g = {"lat": la, "lon": lo, "src": "сайт", "label": label}
         if dd and len(said) == 1 and dd not in said and not _near_district(la, lo, next(iter(said))):
@@ -380,7 +434,8 @@ def locate(l: dict) -> dict:
                 l.setdefault("district_site", d)
                 l["district_by"] = "текст"
                 l["district"] = d = g["conflict"]
-        elif d and dd and dd != d:
+        elif d and dd and dd != d and not (d in _polys() and km_to_district(la, lo, d) <= BORDER_KM):
+            # точка в другом районе — район по точке; у самой границы (метка ±100–200 м) верим продавцу
             l.setdefault("district_site", d)
             l["district_by"] = "точка"
             l["district"] = d = dd
