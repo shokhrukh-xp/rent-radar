@@ -3275,7 +3275,7 @@ assert rr.Store(sdb3_).get_kv("sale_pick") == []
 rdb_.unlink(missing_ok=True); sdb3_.unlink(missing_ok=True)
 print("OK — сменил покупку на аренду: продажа выключена, её подборка сброшена, первые варианты аренды — сразу")
 
-# ============ «обвести на карте»: ищем только внутри областей, район не важен, без точки — нет ============
+# ============ «обвести на карте»: только внутри областей и в выбранных районах, без точки — нет ============
 sq_ = [[41.32, 69.26], [41.32, 69.30], [41.30, 69.30], [41.30, 69.26]]
 assert _geo_t.in_poly(41.31, 69.28, sq_) and not _geo_t.in_poly(41.33, 69.28, sq_)
 tri_ = [[41.36, 69.20], [41.36, 69.24], [41.34, 69.22], [41.35, 69.21]]
@@ -3285,8 +3285,14 @@ assert "вне нарисованной области" in _geo_t.area_reject({"
 assert "точный адрес не указан" in _geo_t.area_reject({"geo": {"src": "район"}, "district": "Мирабад"}, [sq_])
 assert "примерное" in _geo_t.area_reject({"geo": {"lat": 41.31, "lon": 69.28, "src": "ориентир", "spread": 1.6}}, [sq_])
 # аренда: области из настроек
-assert rr.passes_user_filters({"geo": {"lat": 41.31, "lon": 69.28, "src": "сайт"}, "district": "Чиланзар", "rooms": 2},
+# районы выбраны вместе с областью — нужны оба условия (бета: Карина обвела полгорода, а ждала свои районы)
+assert not rr.passes_user_filters({"geo": {"lat": 41.31, "lon": 69.28, "src": "сайт"}, "district": "Чиланзар", "rooms": 2},
+                                  {"areas": [sq_], "districts": ["Яккасарай"], "rooms_min": 2, "rooms_max": 3})
+assert rr.passes_user_filters({"geo": {"lat": 41.31, "lon": 69.28, "src": "сайт"}, "district": "Яккасарай", "rooms": 2},
                               {"areas": [sq_], "districts": ["Яккасарай"], "rooms_min": 2, "rooms_max": 3})
+assert rr.passes_user_filters({"geo": {"lat": 41.31, "lon": 69.28, "src": "сайт"}, "district": "Чиланзар", "rooms": 2},
+                              {"areas": [sq_], "districts": [], "rooms_min": 2, "rooms_max": 3})   # районов нет — только область
+assert 5 < _geo_t.area_km2(sq_) < 8 and _geo_t.area_km2([]) == 0                   # ~2.2 × 3.3 км
 assert not rr.passes_user_filters({"geo": {"lat": 41.25, "lon": 69.28, "src": "сайт"}, "district": "Яккасарай", "rooms": 2},
                                   {"areas": [sq_], "districts": ["Яккасарай"]})
 # покупка: области вместо ориентира и районов; условия поиска — «внутри областей»
@@ -3301,6 +3307,9 @@ assert ssa_["areas"] == [sq_] and ssa_["near"] is None and ssa_["districts"] == 
 assert "внутри областей, обведённых на карте (1)" in rr.sale_criteria_text(ssa_)
 assert "вне нарисованной области" in SS.recheck({"price_usd": 50000, "geo": {"lat": 41.25, "lon": 69.28, "src": "сайт"}},
                                                  ssa_, ast_, cfg)
+assert "не из выбранных" in SS.recheck({"price_usd": 50000, "district": "Чиланзар",
+                                         "geo": {"lat": 41.31, "lon": 69.28, "src": "сайт"}},
+                                        dict(ssa_, area_districts=["Мирабад"]), ast_, cfg)
 # сохранение с карты: настройки, пересмотр, подтверждение в чате; пустой список — области убраны
 AM = []
 upd_a = lambda areas: {"result": [{"update_id": 9, "message": {"chat": {"id": 4242}, "text": "", "_areas": areas}}]}
@@ -3312,7 +3321,7 @@ for areas_, word_ in (([sq_, tri_], "областей — 2"), ([], "Облас�
     assert (ast_.get_kv("settings") or {}).get("areas") == areas_ and word_ in AM[-1], AM[-1]
 assert ast_.get_kv("sale_force")
 adb_.unlink(missing_ok=True)
-print("OK — «обвести на карте»: только внутри областей и с точным адресом, район не важен; сохранение и сброс из чата")
+print("OK — «обвести на карте»: внутри областей, с точным адресом и в выбранных районах; сохранение и сброс из чата")
 
 # ============ проверка всего кода: найденные ошибки — каждая с проверкой ============
 import i18n as _i18n_r, tenants as _tn_r, concierge as _cg_r, sale_sources as _ss_r, market as _mk_r

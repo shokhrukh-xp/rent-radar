@@ -1952,8 +1952,9 @@ def effective_sale_cfg(cfg, store):
     city = ans.get("city_other") if ans.get("city") == "other" and ans.get("city_other") else "Ташкент"
     ss["near"] = near_point(cfg, store, near_txt, ans.get("near_km"), city=city) if near_txt else None
     areas = (store.get_kv("settings") or {}).get("areas") or []
-    if areas:                                   # обвёл на карте — области вместо районов и ориентира
+    if areas:                                   # обвёл на карте — области вместо ориентира; выбранные районы — тоже
         ss["near"], ss["areas"] = None, areas
+        ss["area_districts"] = ds or []
         try:
             sst = open_sale()
             geo.ensure(sst)
@@ -3128,7 +3129,7 @@ def run_search(cfg, store, settings, limit=5, days=7) -> str:
                 why["цена"] += 1
                 continue
             if not passes_user_filters(l, settings):
-                why["комнаты" if areas else "комнаты или район"] += 1
+                why["комнаты" if areas and not settings.get("districts") else "комнаты или район"] += 1
                 continue
             rj = relevance_reject(l, cfg, settings, store)
             if rj:
@@ -4023,9 +4024,15 @@ def _process_updates(cfg: dict, store, ups: list, settings: dict) -> dict:
             if cfg.get("card_queue") and _queue_store() is not None:
                 recheck_open_card(cfg, _queue_store())
             if areas:
-                send_telegram(cfg, t("🗺 <b>Сохранила: областей — {n}.</b> Ищу только внутри них и только объявления "
-                                     "с точным адресом — районы и ориентиры больше не важны. Поменять или убрать — "
-                                     "«Меню» → «Карта».", n=len(areas)))
+                want = settings.get("districts") or []
+                sq = sum(geo.area_km2(a) for a in areas)
+                txt = t("🗺 <b>Сохранила: областей — {n}.</b> Ищу только внутри них и только объявления с точным адресом",
+                        n=len(areas))
+                txt += (t(" — и только в выбранных районах: {d}.", d=", ".join(want)) if want else ".")
+                if sq >= 35:
+                    txt += t("\nОбласть большая — около {k} км², это почти весь центр. Чтобы точнее, обведите поменьше.",
+                             k=round(sq))
+                send_telegram(cfg, txt + t(" Поменять или убрать — «Меню» → «Карта»."))
                 if rent_search_on(store):
                     try:
                         run_search(cfg, store, settings, days=14)
@@ -4161,13 +4168,15 @@ def passes_user_filters(l: dict, settings: dict) -> bool:
         return False                         # «мало фото» — клиент сам попросил строже
     if settings.get("repair_min") and poor_repair(l):
         return False                         # «ремонт не тот» — без черновой и «требует ремонта»
-    if settings.get("areas"):                # обвёл на карте — только внутри, район не важен
+    if settings.get("areas"):                # обвёл на карте — внутри области И в выбранных районах (если выбраны)
         try:
             if not l.get("geo"):
                 geo.locate(l)
         except Exception:
             pass
-        return not geo.area_reject(l, settings["areas"])
+        if geo.area_reject(l, settings["areas"]):
+            return False
+        return geo.district_ok(l, settings.get("districts"))
     near = settings.get("near") or {}
     if near.get("lat") is not None:          # аренда у ориентира — по радиусу
         try:
@@ -4296,6 +4305,8 @@ def sale_reject(l: dict, ss: dict, store, cfg) -> tuple:
             except Exception as e:
                 log.info("[место] %s: %s", l.get("key"), e)
         far = geo.area_reject(l, ss["areas"]) if ss.get("areas") else geo.too_far(l, near)
+        if not far and ss.get("areas") and not geo.district_ok(l, ss.get("area_districts")):
+            return f"район {l.get('district')} — внутри области, но не из выбранных", False
         if far:
             if not (geo.loc_unsure(l, ss.get("areas"), near) and can_ask_seller("L:" + (l.get("key") or ""), l)):
                 return far, False

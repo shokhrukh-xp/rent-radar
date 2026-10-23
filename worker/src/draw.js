@@ -46,14 +46,17 @@ const tg = window.Telegram && Telegram.WebApp;
 try { tg.ready(); tg.expand(); tg.disableVerticalSwipes && tg.disableVerticalSwipes(); } catch (e) {}
 const T = {
   ru: { draw: "✏️ Обвести", drawing: "Ведите пальцем…", save: "✅ Сохранить", saved: "Сохранила — ищу внутри областей",
+        big: k => "Большая область — около " + k + " км², почти весь центр. Обведите поменьше, где хотите жить. Ищу внутри неё и в выбранных районах",
         cleared: "Области убраны — ищу как раньше", err: "Не получилось сохранить — попробуйте ещё раз", n: n => "Областей: " + n,
         title: "Где искать квартиру", sub: "Нажмите «Обвести» и проведите пальцем по краю нужного места. Можно несколько областей. Ищу только внутри — и только объявления с точным адресом.",
         small: "Слишком маленькая область — обведите крупнее" },
   uz: { draw: "✏️ Chizish", drawing: "Barmog'ingiz bilan chizing…", save: "✅ Saqlash", saved: "Saqlandi — faqat shu joylarda qidiraman",
+        big: k => "Katta hudud — taxminan " + k + " km², deyarli butun markaz. Kichikroq chizing. Uning ichida va tanlangan tumanlarda qidiraman",
         cleared: "Hududlar olib tashlandi — avvalgidek qidiraman", err: "Saqlanmadi — yana urinib ko'ring", n: n => "Hududlar: " + n,
         title: "Qayerdan qidiramiz", sub: "«Chizish»ni bosing va kerakli joy chegarasi bo'ylab barmog'ingizni yurgizing. Bir nechta hudud mumkin. Faqat ichidan, aniq manzilli e'lonlarni qidiraman.",
         small: "Hudud juda kichik — kattaroq chizing" },
   en: { draw: "✏️ Draw", drawing: "Trace with your finger…", save: "✅ Save", saved: "Saved — searching inside the areas",
+        big: k => "Large area — about " + k + " km², almost the whole centre. Draw a smaller one. I search inside it and in your chosen districts",
         cleared: "Areas removed — searching as before", err: "Couldn't save — please try again", n: n => "Areas: " + n,
         title: "Where to search", sub: "Tap «Draw» and trace the edge of the place with your finger. Several areas are fine. I search only inside — and only listings with an exact address.",
         small: "Area too small — draw a bigger one" },
@@ -71,6 +74,12 @@ L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 18,
 const style = { color: "#2f6fde", weight: 3, fillColor: "#2f6fde", fillOpacity: 0.18 };
 let areas = [];                    // [[ [lat, lon], ... ], ...]
 const layers = [];
+function areaKm2(a) {
+  const lat0 = a.reduce((s, p) => s + p[0], 0) / a.length, kx = 111.32 * Math.cos(lat0 * Math.PI / 180), ky = 110.57;
+  let s = 0;
+  for (let i = 0; i < a.length; i++) { const p = a[i], q = a[(i + 1) % a.length]; s += p[1] * kx * q[0] * ky - q[1] * kx * p[0] * ky; }
+  return Math.abs(s) / 2;
+}
 function toast(msg, ms = 1600) { const t = $("#toast"); t.textContent = msg; t.style.display = "block"; setTimeout(() => t.style.display = "none", ms); }
 function redraw() {
   layers.splice(0).forEach(l => map.removeLayer(l));
@@ -106,7 +115,11 @@ function end(e) {
   if (a.length > 300) { const k = Math.ceil(a.length / 300); a = a.filter((_, i) => i % k === 0); }
   const b = L.latLngBounds(a);
   if (a.length < 4 || map.distance(b.getNorthWest(), b.getSouthEast()) < 200) { toast(L_.small); }
-  else { areas.push(a); redraw(); tg && tg.HapticFeedback && tg.HapticFeedback.impactOccurred("light"); }
+  else {
+    areas.push(a); redraw(); tg && tg.HapticFeedback && tg.HapticFeedback.impactOccurred("light");
+    const km2 = areaKm2(a);                    // обвели полгорода — предупредить, что так поиск почти не сужается
+    if (km2 >= 35) toast(L_.big(Math.round(km2)), 3800);
+  }
   setDrawing(false);
 }
 el.addEventListener("touchstart", start, { passive: false }); el.addEventListener("touchmove", move, { passive: false });

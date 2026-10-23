@@ -808,6 +808,8 @@ def loc_from_answer(cfg, store, o, text) -> str:
     except Exception as e:
         rr.log.info("[место] из ответа продавца: %s", e)
     reason = geo.area_reject(l, areas) if areas else geo.too_far(l, near)
+    if not reason and areas and not geo.district_ok(l, st.get("districts")):
+        reason = f"район {l.get('district')} — внутри области, но не из выбранных"
     label = ((l.get("geo") or {}).get("label") or "").strip()
     if not reason:
         return "📍 " + (f"{rr.escape_html(label)} — " if label else "") + "внутри вашей области ✅"

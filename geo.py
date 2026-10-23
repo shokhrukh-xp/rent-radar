@@ -578,6 +578,26 @@ def area_reject(l: dict, areas) -> str:
     return ""
 
 
+def district_ok(l: dict, wanted) -> bool:
+    """Районы выбраны вместе с областью — нужны оба условия. Район — по точке (locate() поправляет поле сайта,
+    если метка в другом районе); неизвестный район при точке внутри области не отсекаем."""
+    if not wanted:
+        return True
+    d = l.get("district")
+    return not d or d in wanted
+
+
+def area_km2(poly) -> float:
+    """Площадь нарисованной области, км² (для Ташкента плоская проекция точна)."""
+    if len(poly or []) < 3:
+        return 0.0
+    lat0 = sum(p[0] for p in poly) / len(poly)
+    kx, ky = 111.32 * math.cos(math.radians(lat0)), 110.57
+    pts = [(p[1] * kx, p[0] * ky) for p in poly]
+    return abs(sum(pts[i][0] * pts[(i + 1) % len(pts)][1] - pts[(i + 1) % len(pts)][0] * pts[i][1]
+                   for i in range(len(pts)))) / 2
+
+
 def areas_districts(areas, margin_km=2.0) -> list:
     """Районы, которые спрашивать у сайтов: где есть объявления внутри областей или рядом с ними
     (сайты путают районы — с запасом). Отсев всё равно по точке."""
