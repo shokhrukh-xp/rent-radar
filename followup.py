@@ -286,7 +286,10 @@ def run(cfg, store, sale_store=None, now=None, force=False):
                      ("morning", lambda: morning_note(cfg, store, now)),
                      ("digest", lambda: evening_digest(cfg, store, sale_store, now)),
                      ("brokers", lambda: broker_offer(cfg, store, sale_store, now)),
-                     ("shortlist", lambda: _rr().check_shortlist(cfg, store))):
+                     ("shortlist", lambda: _rr().check_shortlist(cfg, store)),
+                     # открытая карточка ждёт с прошлых условий и больше не подходит — заменить (днём)
+                     ("open_card", lambda: cfg.get("card_queue") and 9 <= now.astimezone(TZ).hour < 22
+                      and _rr().recheck_open_card(cfg, store))):
         try:
             out[name] = fn()
         except Exception as e:                  # напоминания не должны ронять радар
