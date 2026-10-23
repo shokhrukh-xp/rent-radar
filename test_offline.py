@@ -3538,6 +3538,22 @@ with mock.patch.object(rr, "tg_call", _qtg), mock.patch.dict(cg._BIZ_STORE, {"st
     assert any(m == "sendMessage" and pl.get("text", "").startswith("карточка 3") and "Q:s|L:uybor:3" in pl.get("reply_markup", "")
                for m, pl in _QT)
     assert (_qs.get_kv("card_open") or {}).get("ref") == "L:uybor:3" and not _qs.get_kv("card_queue")
+    # клиент сменил условия, пока карточки ждали: неподходящие из очереди не показываем, открытую — снимаем
+    _qs.save({"key": "uybor:31", "source": "Uybor", "url": "u", "title": "1-комн", "text": "1-комн", "rooms": 1, "price_value": 500,
+              "price_currency": "USD", "photo_urls": [], "phones": []}, notified=True)
+    _qs.save({"key": "uybor:32", "source": "Uybor", "url": "u", "title": "2-комн", "text": "2-комн", "rooms": 2, "price_value": 600,
+              "price_currency": "USD", "photo_urls": [], "phones": []}, notified=True)
+    _qs.save({"key": "uybor:3", "source": "Uybor", "url": "u", "title": "1-комн", "text": "1-комн", "rooms": 1, "price_value": 500,
+              "price_currency": "USD", "photo_urls": [], "phones": []}, notified=True)
+    _qs.set_kv("card_queue", [{"ref": "L:uybor:31", "l": {"key": "uybor:31"}, "text": "карточка 31", "at": time.time()},
+                              {"ref": "L:uybor:32", "l": {"key": "uybor:32"}, "text": "карточка 32", "at": time.time()}])
+    _qs.set_kv("settings", {**rr.default_settings(), "rooms_min": 2, "rooms_max": 3})
+    _QT.clear()
+    assert rr.recheck_open_card(_qcfg, _qs)                          # открытая #3 — 1-комн, больше не подходит
+    assert any(m == "editMessageText" and "Не подходит под новые условия" in pl["text"] for m, pl in _QT)
+    assert (_qs.get_kv("card_open") or {}).get("ref") == "L:uybor:32"   # 1-комн из очереди пропущена
+    assert not rr.recheck_open_card(_qcfg, _qs)                      # 2-комн подходит — не трогаем
+    _qs.set_kv("settings", {}); _qs.set_kv("card_open", {}); _qs.set_kv("card_queue", [])
 # нет контакта — вместо «Уточнить» ссылка на объявление; кнопки карточки клиенту не снимаются, прочие — снимаются
 _kb2 = rr.card_kb("L:uybor:5", 0, {"url": "https://uybor.uz/listings/5"})
 assert _kb2["inline_keyboard"][1][0]["url"].endswith("/5") and len(_kb2["inline_keyboard"][0]) == 2

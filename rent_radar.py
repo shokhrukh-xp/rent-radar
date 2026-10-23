@@ -1586,6 +1586,8 @@ def after_new_anketa(cfg, store, settings):
         return False
     settings.update(concierge.rent_settings(ans, settings, cfg, store))
     store.set_kv("settings", settings)
+    if cfg.get("card_queue") and _queue_store() is not None:
+        recheck_open_card(cfg, _queue_store())           # открытая карточка под старые условия — убрать
     if sale_path().exists():
         try:
             sp_ = open_sale()
@@ -4018,6 +4020,8 @@ def _process_updates(cfg: dict, store, ups: list, settings: dict) -> dict:
             store.set_kv("settings", settings)
             store.set_kv("sale_force", True)          # пересмотреть отсеянное по новым границам
             changed = True
+            if cfg.get("card_queue") and _queue_store() is not None:
+                recheck_open_card(cfg, _queue_store())
             if areas:
                 send_telegram(cfg, t("🗺 <b>Сохранила: областей — {n}.</b> Ищу только внутри них и только объявления "
                                      "с точным адресом — районы и ориентиры больше не важны. Поменять или убрать — "
@@ -4965,6 +4969,43 @@ def _count_free(cfg, store):
     store.set_kv("free_cards", fc)
 
 
+def card_fits_now(cfg, store, it) -> bool:
+    """Карточка ждала в очереди, а клиент тем временем поменял условия (обвёл область, бюджет, комнаты) —
+    подходит ли она ещё. Только аренда из базы радара; остальное не трогаем."""
+    ref = str(it.get("ref") or "")
+    if it.get("kind") == "loc" or not ref.startswith("L:") or ref.startswith("L:sale:"):
+        return True
+    try:
+        row = store.conn.execute("SELECT data FROM listings WHERE key=?", (ref[2:],)).fetchone()
+    except Exception:
+        return True
+    if not row:
+        return True
+    l = {**json.loads(row[0] or "{}"), **{k: v for k, v in (it.get("l") or {}).items() if v is not None}}
+    st = {**default_settings(), **(store.get_kv("settings") or {})}
+    try:
+        return passes_filters(l, effective_cfg(cfg, st), max_age=60) and passes_user_filters(l, st)
+    except Exception as e:
+        log.info("[очередь] проверка %s: %s", ref, e)
+        return True
+
+
+def recheck_open_card(cfg, store) -> bool:
+    """После смены условий: открытая карточка больше не подходит — снять с неё кнопки, пометить и показать следующую."""
+    op = store.get_kv("card_open") or {}
+    if not op.get("ref") or card_fits_now(cfg, store, op.get("it") or {"ref": op["ref"]}):
+        return False
+    if op.get("mid"):
+        tg_call(cfg, "editMessageText", {"chat_id": cfg["telegram_chat_id"], "message_id": op["mid"],
+                                         "text": (op.get("text") or "")[:3900] + "\n\n<i>Не подходит под новые условия — убрала.</i>",
+                                         "parse_mode": "HTML", "disable_web_page_preview": True,
+                                         "reply_markup": json.dumps({"inline_keyboard": []})}, quiet=True)
+    log.info("[очередь] открытая карточка не подходит под новые условия: %s", op["ref"])
+    store.set_kv("card_open", {})
+    show_next_card(cfg, store)
+    return True
+
+
 def show_next_card(cfg, store):
     """Следующая карточка из очереди: фото (с картой) альбомом, под ними текст с кнопками."""
     q = store.get_kv("card_queue") or []
@@ -4973,6 +5014,9 @@ def show_next_card(cfg, store):
     while q:
         it = q.pop(0)
         store.set_kv("card_queue", q)
+        if not card_fits_now(cfg, store, it):           # условия поменялись, пока ждала
+            log.info("[очередь] не подходит под новые условия: %s", it["ref"])
+            continue
         left = len(q)
         text = it["text"]
         if time.time() - float(it.get("at") or 0) > 1800:     # долго ждала в очереди — жива ли, та же ли цена
