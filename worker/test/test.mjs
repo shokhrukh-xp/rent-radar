@@ -818,6 +818,19 @@ console.log("OK — проверка кода: маклер остаётся м�
   const ack = sent.filter(x => String(x.chat_id) === "9901").at(-1);
   assert.ok(ack.parse_mode === "HTML" && /для своего клиента: <a href="https:\/\/t\.me\/shokh">Шохрух<\/a>/.test(ack.text), ack.text);
 }
+{
+  // «что не так?» после пропусков: причина — в статистику, нажатие — Python
+  sent.length = 0;
+  const rq = await handleUpdate(env, { update_id: ++uid, callback_query: { id: "kq", data: "Q:k|price", from: { id: +OWNER },
+    message: { message_id: 56, chat: { id: +OWNER } } } });
+  assert.equal(rq, "card");
+  assert.ok(sent.some(x => x.m === "answerCallbackQuery" && /Учту/.test(x.text || "")));
+  const ev = await env.DB.prepare("SELECT meta FROM events WHERE ev='skip_reason' ORDER BY at DESC LIMIT 1").first();
+  assert.equal(ev.meta, "price");
+  await env.DB.prepare("INSERT INTO events (chat, ev, at, meta) VALUES ('777', 'skip_reason', ?, 'repair')").bind(Date.now()).run();
+  const { statsText: _st } = await import("../src/index.js");
+  assert.ok(/Почему пропускают: ремонт 1/.test(await _st(env)));
+}
 console.log("OK — карточки по одной: кнопки «Сохранить / Пропустить / Уточнить»; маклерам — имя клиента ссылкой");
 
 // ── «кому служит Ra'no»: страница /about и команда; «удали мои данные» — владельцу сервиса

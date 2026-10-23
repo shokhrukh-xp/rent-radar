@@ -3554,6 +3554,36 @@ with mock.patch.object(rr, "tg_call", _qtg), mock.patch.dict(cg._BIZ_STORE, {"st
     assert (_qs.get_kv("card_open") or {}).get("ref") == "L:uybor:32"   # 1-комн из очереди пропущена
     assert not rr.recheck_open_card(_qcfg, _qs)                      # 2-комн подходит — не трогаем
     _qs.set_kv("settings", {}); _qs.set_kv("card_open", {}); _qs.set_kv("card_queue", [])
+    # 3 пропуска подряд — вопрос «что не так?» вместо следующей карточки; ответ правит поиск
+    _qs.set_kv("skip_streak", {})
+    for i in range(41, 47):
+        _qs.save({"key": f"uybor:{i}", "source": "Uybor", "url": "u", "title": "2-комн", "text": "2-комн, евроремонт",
+                  "rooms": 2, "price_value": 900 - i * 5, "price_currency": "USD", "photo_urls": ["p"] * (2 if i == 45 else 6),
+                  "phones": []}, notified=True)
+        rr.send_card(_qcfg, {"key": f"uybor:{i}", "photo_urls": ["p"] * (2 if i == 45 else 6), "price_usd": 900 - i * 5}, f"карточка {i}",
+                     ref=f"L:uybor:{i}", queue=True)
+    _st = rr.default_settings()
+    with mock.patch.object(rr, "_listing_any", lambda st, k: None):
+        for i in (41, 42):
+            rr.card_action(_qcfg, _qs, _st, f"Q:n|L:uybor:{i}", 200)
+        _QT.clear()
+        rr.card_action(_qcfg, _qs, _st, "Q:n|L:uybor:43", 200)
+    _ask = [pl for m, pl in _QT if m == "sendMessage" and "что не так" in pl.get("text", "")]
+    assert _ask and "Q:k|price" in _ask[0]["reply_markup"] and "Q:k|next" in _ask[0]["reply_markup"], _QT
+    assert not (_qs.get_kv("card_open") or {}).get("ref")              # следующая — после ответа
+    _QT.clear()
+    assert rr.card_action(_qcfg, _qs, _st, "Q:k|photos", 300) == "📷 Учла"
+    assert _st.get("min_photos") == 5 and (_qs.get_kv("settings") or {}).get("min_photos") == 5
+    assert any(m == "editMessageText" and "5 фото" in pl["text"] and "undo_photos" in pl["reply_markup"] for m, pl in _QT)
+    assert (_qs.get_kv("card_open") or {}).get("ref") == "L:uybor:44"   # 45 — мало фото, но до неё ещё не дошли
+    rr.card_action(_qcfg, _qs, _st, "Q:n|L:uybor:44", 201)
+    assert (_qs.get_kv("card_open") or {}).get("ref") == "L:uybor:46"   # 45 с двумя фото — пропущена фильтром
+    rr.card_action(_qcfg, _qs, _st, "Q:k|undo_photos", 301)
+    assert "min_photos" not in (_qs.get_kv("settings") or {}) and "min_photos" not in _st
+    assert rr.poor_repair({"repair": "chernovaya"}) and rr.poor_repair({"text": "квартира требует ремонта"})
+    assert not rr.poor_repair({"repair": "evro", "text": "евроремонт"})
+    assert not rr.passes_user_filters({"rooms": 2, "text": "черновая отделка"}, {**rr.default_settings(), "repair_min": True})
+    _qs.set_kv("settings", {}); _qs.set_kv("card_open", {}); _qs.set_kv("card_queue", []); _qs.set_kv("skip_streak", {})
 # нет контакта — вместо «Уточнить» ссылка на объявление; кнопки карточки клиенту не снимаются, прочие — снимаются
 _kb2 = rr.card_kb("L:uybor:5", 0, {"url": "https://uybor.uz/listings/5"})
 assert _kb2["inline_keyboard"][1][0]["url"].endswith("/5") and len(_kb2["inline_keyboard"][0]) == 2

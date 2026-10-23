@@ -567,4 +567,11 @@ MORE = [
     ("Полный отчёт о рынке", "Bozor haqida to'liq hisobot", "Full market report"),
     ("🗺 Карта цен: дорогие и недорогие части районов", "🗺 Narxlar xaritasi: tumanlarning qimmat va arzon qismlari",
      "🗺 Price map: pricier and cheaper parts of districts"),
+    ("💸 Дорого", "💸 Qimmat", "💸 Too pricey"),
+    ("📍 Не тот район", "📍 Tuman mos emas", "📍 Wrong area"),
+    ("🛠 Ремонт", "🛠 Ta'mir", "🛠 Renovation"),
+    ("📷 Мало фото", "📷 Rasm kam", "📷 Few photos"),
+    ("✍️ Другое", "✍️ Boshqa", "✍️ Other"),
+    ("▶️ Просто дальше", "▶️ Shunchaki keyingisi", "▶️ Just next"),
+    ("↩️ Отменить", "↩️ Bekor qilish", "↩️ Undo"),
 ]

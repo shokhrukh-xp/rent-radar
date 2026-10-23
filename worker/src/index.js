@@ -1593,6 +1593,7 @@ export async function statsText(env, now = Date.now()) {
     `🗓 За 7 дн.: активных ${active7.size}, карточек ${cards7}, 💾 ${saves7}, ✍️ ${asks7}, ⏭ ${skips7} — интерес ${pct(saves7 + asks7, cards7)}`,
     `⭐ Оценка: ${avg} (${ratings.length}) · поиски: ${fmt(dist("status"), { found: "нашли", search: "ищут", stop: "бросили" })}`,
     `💰 Заплатили бы (тыс. сум): ${fmt(dist("wtp"), { 0: "не стали бы" })} · тарифы нажимали: ${fmt(dist("plan_tap"))}`,
+    `⏭ Почему пропускают: ${fmt(dist("skip_reason"), { price: "дорого", area: "район", repair: "ремонт", photos: "мало фото", other: "другое", next: "без причины" })}`,
     `🆘 Обращений за 7 дн.: ${cnt("support", wk) + cnt("feedback", wk)}`,
     `🤖 Модель за 7 дн.: ${tot.c} вызовов, ≈ $${usd.toFixed(2)} (≈ $${perUser.toFixed(3)} на клиента в день)` +
       (cnt("ai_limit", wk) ? `, упёрлись в лимит: ${cnt("ai_limit", wk)}` : ""),
@@ -2173,6 +2174,14 @@ export async function handleUpdate(env, upd) {
       upd.callback_query = { ...cb, _worker_done: true };
       await queueAndWake(env, upd);
       return "outreach";
+    }
+    if (/^Q:k\|\w+$/.test(data)) {               // «что не так?» после пропусков подряд — поиск поправит Python
+      const why = data.slice(4);
+      if (!why.startsWith("undo")) await track(env, chat, "skip_reason", why);
+      await tg(env, "answerCallbackQuery", { callback_query_id: cb.id, text: why.startsWith("undo") ? "↩️" : "👌 Учту" });
+      upd.callback_query = { ...cb, _toast_done: true };
+      await queueAndWake(env, upd);
+      return "card";
     }
     if (/^Q:[snal]\|/.test(data)) {            // карточка из очереди: ответ сразу, дальше — Python (и следующая)
       await track(env, chat, { s: "save", n: "skip", a: "ask", l: "loc_ask" }[data[2]]);

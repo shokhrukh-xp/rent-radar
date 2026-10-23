@@ -4157,6 +4157,10 @@ def passes_user_filters(l: dict, settings: dict) -> bool:
     if rmin is not None and rooms is not None:
         if not rmin <= rooms <= (rmax if rmax is not None else rmin):
             return False
+    if settings.get("min_photos") and len(l.get("photo_urls") or []) < int(settings["min_photos"]):
+        return False                         # «мало фото» — клиент сам попросил строже
+    if settings.get("repair_min") and poor_repair(l):
+        return False                         # «ремонт не тот» — без черновой и «требует ремонта»
     if settings.get("areas"):                # обвёл на карте — только внутри, район не важен
         try:
             if not l.get("geo"):
@@ -4182,6 +4186,17 @@ def passes_user_filters(l: dict, settings: dict) -> bool:
         elif d not in settings["districts"]:
             return False
     return True
+
+
+POOR_REPAIR_RE = re.compile(r"черновая|без ремонта|требует ремонта|под ремонт|старый ремонт|косметический ремонт нужен|"
+                            r"ta'mir talab|ta'mirsiz|qora suvoq|remont kerak", re.I)
+
+
+def poor_repair(l) -> bool:
+    """Ремонт явно слабый: так указано на сайте (Uybor: черновая / требует ремонта) или в тексте объявления."""
+    if str(l.get("repair") or "").lower() in ("chernovaya", "kapital"):
+        return True
+    return bool(POOR_REPAIR_RE.search(f'{l.get("title", "")} {l.get("text", "")}'))
 
 
 # ------------------------------------------------ покупка от собственника ----
@@ -4961,6 +4976,14 @@ def free_limit_hit(cfg, store, q) -> bool:
     return True
 
 
+def free_cards_left(cfg, store) -> bool:
+    """Без побочных действий: можно ли сегодня показать ещё карточку (тариф или бесплатные не кончились)."""
+    if tenants.paid(str(cfg.get("telegram_chat_id") or "")):
+        return True
+    fc = store.get_kv("free_cards") or {}
+    return fc.get("d") != datetime.now(TASHKENT_TZ).strftime("%Y-%m-%d") or int(fc.get("n") or 0) < FREE_CARDS_PER_DAY
+
+
 def _count_free(cfg, store):
     if tenants.paid(str(cfg.get("telegram_chat_id") or "")):
         return
@@ -5175,9 +5198,90 @@ def card_followup(cfg, store, data):
     return card_done(cfg, store, ref, st)
 
 
+SKIP_ASK_AFTER = 3                      # пропустил подряд столько карточек — спросить, что не так
+SKIP_REASONS = (("price", "💸 Дорого"), ("area", "📍 Не тот район"), ("repair", "🛠 Ремонт"), ("photos", "📷 Мало фото"),
+                ("other", "✍️ Другое"), ("next", "▶️ Просто дальше"))
+
+
+def skip_question(cfg, store):
+    """Вместо следующей карточки — вопрос одной строкой: почему пропускаете. Ответ поправит поиск."""
+    rows, row = [], []
+    for k, label in SKIP_REASONS:
+        row.append({"text": t(label), "callback_data": f"Q:k|{k}"})
+        if len(row) == 2:
+            rows.append(row); row = []
+    left = len(store.get_kv("card_queue") or [])
+    return tg_call(cfg, "sendMessage", {"chat_id": cfg["telegram_chat_id"], "parse_mode": "HTML",
+                                        "text": f"Пропустили {SKIP_ASK_AFTER} подряд — что не так? Поправлю поиск."
+                                                + (f"\n<i>В очереди ещё {left}</i>" if left else ""),
+                                        "reply_markup": json.dumps({"inline_keyboard": rows}, ensure_ascii=False)})
+
+
+def skip_reason(cfg, store, settings, reason, message_id=None) -> str:
+    """Ответ на «что не так?»: поправить поиск, сказать что поменялось и как вернуть, показать следующую."""
+    st = {**default_settings(), **(store.get_kv("settings") or {})}
+    undo = None
+    if reason == "price":                    # бюджет не трогаем — сначала самые выгодные из подходящих
+        q = store.get_kv("card_queue") or []
+        q.sort(key=lambda it: (it.get("l") or {}).get("price_usd") or 1e9)
+        store.set_kv("card_queue", q)
+        lim = st.get("max_price_usd")
+        msg = ("💸 Поняла: дальше — сначала самые недорогие." + (f" Бюджет оставила до ${_money(lim)}; хотите ниже — "
+               f"напишите, например, «бюджет до {_money(round(lim * 0.85 / 50) * 50)}»." if lim else ""))
+    elif reason == "area":
+        msg = ("📍 Показываю только внутри вашей области. Поменять её — «Меню» → «Карта»." if st.get("areas") else
+               "📍 Обведите на карте, где искать: «Меню» → «Карта». Или напишите районы, например, «только Мирабад».")
+    elif reason == "repair":
+        st["repair_min"] = True
+        undo = "Q:k|undo_repair"
+        msg = "🛠 Убрала варианты с черновой отделкой и «требует ремонта»."
+    elif reason == "photos":
+        st["min_photos"] = 5
+        undo = "Q:k|undo_photos"
+        msg = "📷 Дальше — только варианты, где 5 фото и больше."
+    elif reason == "undo_repair":
+        st.pop("repair_min", None); msg = "↩️ Вернула: ремонт любой."
+    elif reason == "undo_photos":
+        st.pop("min_photos", None); msg = "↩️ Вернула: показываю и с небольшим числом фото."
+    elif reason == "other":
+        msg = "✍️ Напишите в двух словах, что не так, — поправлю поиск."
+    else:
+        msg = ""
+    store.set_kv("settings", st)
+    settings.update({k: v for k, v in st.items()})
+    for k in ("repair_min", "min_photos"):
+        if k not in st:
+            settings.pop(k, None)
+    if message_id:                           # вопрос с кнопками — заменить на ответ
+        tg_call(cfg, "editMessageText", {"chat_id": cfg["telegram_chat_id"], "message_id": message_id,
+                                         "text": msg or "▶️ Дальше",
+                                         "reply_markup": json.dumps({"inline_keyboard": [[{"text": t("↩️ Отменить"),
+                                                                     "callback_data": undo}]]} if undo else
+                                                                    {"inline_keyboard": []}, ensure_ascii=False)},
+                quiet=True)
+    elif msg:
+        send_telegram(cfg, msg)
+    store.set_kv("skip_streak", {"n": 0, "asked_at": time.time()})
+    if not reason.startswith("undo") and not (store.get_kv("card_open") or {}).get("ref"):
+        if not show_next_card(cfg, store) and reason in ("repair", "photos") and not store.get_kv("card_queue"):
+            send_telegram(cfg, "Под новые условия в очереди ничего не осталось — новые пришлю сразу, как появятся.")
+    return {"price": "💸 Сначала недорогие", "repair": "🛠 Учла", "photos": "📷 Учла"}.get(reason, "👌")
+
+
 def card_action(cfg, store, settings, d, message_id=None):
-    """Кнопка карточки: Q:s|ref — сохранить, Q:n|ref — пропустить, Q:a|ref — уточнить у продавца."""
+    """Кнопка карточки: Q:s|ref — сохранить, Q:n|ref — пропустить, Q:a|ref — уточнить у продавца,
+    Q:k|причина — ответ на «что не так?» после нескольких пропусков подряд."""
     act, _, ref = d[2:].partition("|")
+    if act == "k":
+        return skip_reason(cfg, store, settings, ref, message_id)
+    streak = store.get_kv("skip_streak") or {}
+    if act == "n":
+        streak["n"] = int(streak.get("n") or 0) + 1
+    elif act in ("s", "a", "l"):
+        streak["n"] = 0
+    store.set_kv("skip_streak", streak)
+    ask_now = (act == "n" and streak["n"] >= SKIP_ASK_AFTER
+               and time.time() - float(streak.get("asked_at") or 0) > 6 * 3600)
     kind, _, key = ref.partition(":")
     if kind == "L":
         sub = {"s": f"L:s:{key}", "n": f"L:n:{key}", "a": f"L:a:{key}", "l": f"L:loc:{key}"}.get(act)
@@ -5201,7 +5305,11 @@ def card_action(cfg, store, settings, d, message_id=None):
                                              "text": "⏭ Пропущено: " + escape_html(card_line(op.get("text") or "")),
                                              "reply_markup": json.dumps({"inline_keyboard": []})}, quiet=True)
             store.set_kv("card_open", {})
-            show_next_card(cfg, store)
+            if ask_now and (store.get_kv("card_queue") or []) and free_cards_left(cfg, store):
+                store.set_kv("skip_streak", {"n": 0, "asked_at": time.time()})
+                skip_question(cfg, store)            # следующая карточка — после ответа
+            else:
+                show_next_card(cfg, store)
         else:
             card_done(cfg, store, ref, status)
     elif message_id:                          # нажали на старой карточке — просто убрать кнопки
