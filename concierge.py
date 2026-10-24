@@ -639,6 +639,13 @@ def rent_settings(ans, settings, cfg=None, store=None):
     ds = [rr.DISTRICT_LIST[int(i)] for i in (ans.get("districts") or [])
           if str(i).isdigit() and int(i) < len(rr.DISTRICT_LIST)]
     s["districts"] = ds
+    ma = rr.min_area_from(str(ans.get("note") or "")) or (int(ans["area_min"]) if str(ans.get("area_min") or "").isdigit() else None)
+    if ma:
+        s["min_area"] = ma                       # «площадь от 60 м²» из пожеланий — фильтр, а не просто слова
+    else:
+        s.pop("min_area", None)
+    if ans.get("class") in ("premium", "reno"):  # «хороший ремонт» в анкете — без черновой и «среднего»
+        s["repair_min"] = True
     city = ans.get("city_other") if ans.get("city") == "other" and ans.get("city_other") else "Ташкент"
     s["near"] = rr.near_point(cfg, store, ans.get("near"), ans.get("near_km"), city=city) \
         if ans.get("near") and cfg is not None and store is not None else None

@@ -3601,6 +3601,18 @@ with mock.patch.object(rr, "tg_call", _qtg), mock.patch.dict(cg._BIZ_STORE, {"st
     assert rr.poor_repair({"repair": "chernovaya"}) and rr.poor_repair({"text": "квартира требует ремонта"})
     assert not rr.poor_repair({"repair": "evro", "text": "евроремонт"})
     assert not rr.passes_user_filters({"rooms": 2, "text": "черновая отделка"}, {**rr.default_settings(), "repair_min": True})
+    # бета: «площадь от 60 м²» в пожеланиях — фильтр; комнаты и площадь из текста; «хороший ремонт» — без «среднего»
+    assert rr.min_area_from("площадь от 60 м²") == 60 and rr.min_area_from("рядом с метро") is None
+    _ms = cg.rent_settings({"rooms": ["2", "3"], "budget": "800", "note": "площадь от 60 м²", "class": "premium"},
+                           rr.default_settings())
+    assert _ms["min_area"] == 60 and _ms["repair_min"]
+    assert not rr.passes_user_filters({"rooms": 2, "text": "2- комн • 50м² • 1/5 этаж"}, _ms)
+    assert rr.passes_user_filters({"rooms": 3, "text": "Площадь: 95м² Ремонт: Евро"}, _ms)
+    assert rr.passes_user_filters({"rooms": 2, "text": "без площади"}, _ms)             # неизвестную не отсекаем
+    assert not rr.passes_user_filters({"text": "Количество комнат: 1 Общая площадь: 31"}, _ms)
+    assert not rr.passes_user_filters({"rooms": 2, "area": 70, "repair": "средний ремонт"}, _ms)
+    assert rr.passes_user_filters({"rooms": 2, "area": 70, "repair": "евроремонт"}, _ms)
+    assert rr.extract_rooms("Уютная студия у метро") == 1
     _qs.set_kv("settings", {}); _qs.set_kv("card_open", {}); _qs.set_kv("card_queue", []); _qs.set_kv("skip_streak", {})
 # нет контакта — вместо «Уточнить» ссылка на объявление; кнопки карточки клиенту не снимаются, прочие — снимаются
 _kb2 = rr.card_kb("L:uybor:5", 0, {"url": "https://uybor.uz/listings/5"})

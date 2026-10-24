@@ -323,12 +323,56 @@ def as_int(v):
             return None
 
 
+ROOMS_FIELD_RE = re.compile(r"(?:количество\s+комнат|комнат[ыа]?|xonalar\s+soni|xona\s+soni)\s*[:\-–]?\s*([1-6])\b", re.I)
+STUDIO_RE = re.compile(r"\bстуди[яюи]\b|\bstudiya\b|\bstudio\b", re.I)
+AREA_TEXT_RE = re.compile(r"(?<![\d.,])(\d{2,3}(?:[.,]\d)?)\s*(?:м²|м2|кв\.?\s*м(?![а-яё])|m²|m2|kv\.?\s*m(?![a-z]))", re.I)
+AREA_FIELD_RE = re.compile(r"(?:общая\s+)?площад\w*\s*[:\-–]?\s*(\d{2,3}(?:[.,]\d)?)", re.I)
+MIN_AREA_RE = re.compile(r"(?:площад\w*|метраж\w*|maydon\w*)\s*(?:от|не\s+меньше|минимум|не\s+менее|>=?|dan)?\s*(\d{2,3})"
+                         r"|от\s*(\d{2,3})\s*(?:м²|м2|кв\.?\s*м|квадрат)", re.I)
+
+
 def extract_rooms(text: str):
+    m = ROOMS_FIELD_RE.search(text or "")          # «Количество комнат: 1» — прямо сказано
+    if m:
+        return int(m.group(1))
+    if STUDIO_RE.search(text or ""):
+        return 1
     for rx in ROOMS_RE:
         m = rx.search(text or "")
         if m:
             return int(m.group(1))
     return None
+
+
+def listing_rooms(l: dict):
+    """Комнаты: поле сайта, иначе из текста («2/5/9», «Количество комнат: 1», «студия»)."""
+    r = as_int(l.get("rooms"))
+    return r if r is not None else extract_rooms(f'{l.get("title") or ""} {l.get("text") or ""}')
+
+
+def listing_area(l: dict):
+    """Площадь, м²: поле сайта, иначе из текста («Площадь: 95м²», «50 кв.м»)."""
+    try:
+        a = float(l.get("area")) if l.get("area") else None
+    except (TypeError, ValueError):
+        a = None
+    if a:
+        return a
+    t = f'{l.get("title") or ""} {l.get("text") or ""}'
+    m = AREA_FIELD_RE.search(t) or AREA_TEXT_RE.search(t)
+    if m:
+        v = float(m.group(1).replace(",", "."))
+        return v if 12 <= v <= 400 else None
+    return None
+
+
+def min_area_from(text: str):
+    """«площадь от 60 м²», «от 70 кв.м» в пожеланиях → 60 / 70."""
+    m = MIN_AREA_RE.search(text or "")
+    if not m:
+        return None
+    v = int(m.group(1) or m.group(2))
+    return v if 15 <= v <= 300 else None
 
 
 def _num(s: str):
@@ -4181,13 +4225,17 @@ def relevance_reject(l: dict, cfg: dict, settings: dict, store=None) -> str:
 def passes_user_filters(l: dict, settings: dict) -> bool:
     """Фильтры, заданные командами бота. Неизвестные комнаты/район — пропускаем."""
     rmin, rmax = as_int(settings.get("rooms_min")), as_int(settings.get("rooms_max"))
-    rooms = as_int(l.get("rooms"))
+    rooms = listing_rooms(l)
+    if settings.get("min_area"):                 # «площадь от 60 м²» — неизвестную площадь не отсекаем
+        a = listing_area(l)
+        if a is not None and a < float(settings["min_area"]) - 0.5:
+            return False
     if rmin is not None and rooms is not None:
         if not rmin <= rooms <= (rmax if rmax is not None else rmin):
             return False
     if settings.get("min_photos") and len(l.get("photo_urls") or []) < int(settings["min_photos"]):
         return False                         # «мало фото» — клиент сам попросил строже
-    if settings.get("repair_min") and poor_repair(l):
+    if settings.get("repair_min") and poor_repair(l, strict=True):
         return False                         # «ремонт не тот» — без черновой и «требует ремонта»
     if settings.get("areas"):                # обвёл на карте — внутри области И в выбранных районах (если выбраны)
         try:
@@ -4222,11 +4270,17 @@ POOR_REPAIR_RE = re.compile(r"черновая|без ремонта|требу�
                             r"ta'mir talab|ta'mirsiz|qora suvoq|remont kerak", re.I)
 
 
-def poor_repair(l) -> bool:
-    """Ремонт явно слабый: так указано на сайте (Uybor: черновая / требует ремонта) или в тексте объявления."""
-    if str(l.get("repair") or "").lower() in ("chernovaya", "kapital"):
+MID_REPAIR_RE = re.compile(r"средн\w*\s+ремонт|косметич\w*|o'rtacha\s+ta'mir|sredniy", re.I)
+
+
+def poor_repair(l, strict=False) -> bool:
+    """Ремонт явно слабый: так указано на сайте (Uybor: черновая / требует ремонта) или в тексте объявления.
+    strict — клиент просил хороший ремонт: «средний» и «косметический» тоже мимо."""
+    rep = str(l.get("repair") or "").lower()
+    if rep in ("chernovaya", "kapital") or (strict and (rep == "sredniy" or MID_REPAIR_RE.search(rep))):
         return True
-    return bool(POOR_REPAIR_RE.search(f'{l.get("title", "")} {l.get("text", "")}'))
+    t = f'{l.get("title", "")} {l.get("text", "")}'
+    return bool(POOR_REPAIR_RE.search(t) or (strict and MID_REPAIR_RE.search(t) and not re.search(r"евро|дизайн|evro", t, re.I)))
 
 
 # ------------------------------------------------ покупка от собственника ----
@@ -5022,6 +5076,27 @@ def _count_free(cfg, store):
     fc = store.get_kv("free_cards") or {}
     fc["n"] = int(fc.get("n") or 0) + 1
     store.set_kv("free_cards", fc)
+
+
+def sync_rent_settings(store) -> bool:
+    """Один раз после обновления: «площадь от …» и «хороший ремонт» из уже заполненной анкеты — в фильтры
+    (раньше они оставались только словами в пожеланиях)."""
+    if store.get_kv("rent_sync") == 2:
+        return False
+    store.set_kv("rent_sync", 2)
+    ans = (store.get_kv("anketa") or {}).get("ans") or {}
+    if ans.get("deal") != "rent":
+        return False
+    st = store.get_kv("settings") or {}
+    new = concierge.rent_settings(ans, st)
+    changed = False
+    for k in ("min_area", "repair_min"):
+        if new.get(k) and st.get(k) != new[k]:
+            st[k] = new[k]; changed = True
+    if changed:
+        store.set_kv("settings", st)
+        log.info("фильтры из анкеты: площадь %s, ремонт %s", st.get("min_area"), st.get("repair_min"))
+    return changed
 
 
 def card_fits_now(cfg, store, it) -> bool:

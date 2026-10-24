@@ -288,6 +288,7 @@ def run(cfg, store, sale_store=None, now=None, force=False):
                      ("brokers", lambda: broker_offer(cfg, store, sale_store, now)),
                      ("shortlist", lambda: _rr().check_shortlist(cfg, store)),
                      # открытая карточка ждёт с прошлых условий и больше не подходит — заменить (днём)
+                     ("rent_sync", lambda: _rr().sync_rent_settings(store)),
                      ("open_card", lambda: cfg.get("card_queue") and 9 <= now.astimezone(TZ).hour < 22
                       and _rr().recheck_open_card(cfg, store))):
         try:
