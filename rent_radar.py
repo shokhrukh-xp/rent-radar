@@ -331,8 +331,12 @@ MIN_AREA_RE = re.compile(r"(?:площад\w*|метраж\w*|maydon\w*)\s*(?:о
                          r"|от\s*(\d{2,3})\s*(?:м²|м2|кв\.?\s*м|квадрат)", re.I)
 
 
+_LAT2CYR = str.maketrans("aoecpxkmyACEHKMOPTX", "аоесрхкмуАСЕНКМОРТХ")   # латиница-двойник внутри русских слов
+
+
 def extract_rooms(text: str):
-    m = ROOMS_FIELD_RE.search(text or "")          # «Количество комнат: 1» — прямо сказано
+    m = ROOMS_FIELD_RE.search(text or "") or ROOMS_FIELD_RE.search((text or "").translate(_LAT2CYR))
+    # «Количество комнат: 1» — прямо сказано (бывает «комнaт» с латинской a)
     if m:
         return int(m.group(1))
     if STUDIO_RE.search(text or ""):
@@ -399,7 +403,17 @@ def extract_price_from_text(text: str, max_usd: int = 20000):
         v = float(m.group(1).replace(",", ".")) * 1e6
         if v >= 300000:
             return round(v), "UZS"
+    m = PRICE_FIELD_RE.search(text or "")       # «Цена: 15,460,000 (1300)» — без валюты: по величине
+    if m:
+        v = _num(m.group(1))
+        if v and v >= 300000:
+            return v, "UZS"
+        if v and 30 <= v <= max_usd:
+            return v, "USD"
     return None, None
+
+
+PRICE_FIELD_RE = re.compile(r"(?:цена|стоимость|narx|нарх|narxi)\s*[:\-–]?\s*(\d{1,3}(?:[\s.,]\d{3})+|\d+)", re.I)
 
 
 def extract_district(text: str):
@@ -4183,6 +4197,10 @@ def _process_updates(cfg: dict, store, ups: list, settings: dict) -> dict:
 
 def passes_filters(l: dict, cfg: dict, max_age=None) -> bool:
     """Цена и свежесть. max_age — свой предел (поиск по накопленному за N дней), иначе notify_max_age_days."""
+    if not l.get("price_value"):                 # сайт/пост без поля цены — из текста («Цена: 15 460 000 (1300)»)
+        v, cur = extract_price_from_text(f'{l.get("title") or ""} {l.get("text") or ""}')
+        if v:
+            l["price_value"], l["price_currency"] = v, cur
     l["price_usd"] = to_usd(l.get("price_value"), l.get("price_currency"), cfg)
     p = l["price_usd"]
     if p is not None:
@@ -5103,7 +5121,7 @@ def card_fits_now(cfg, store, it) -> bool:
     """Карточка ждала в очереди, а клиент тем временем поменял условия (обвёл область, бюджет, комнаты) —
     подходит ли она ещё. Только аренда из базы радара; остальное не трогаем."""
     ref = str(it.get("ref") or "")
-    if it.get("kind") == "loc" or not ref.startswith("L:") or ref.startswith("L:sale:"):
+    if not ref.startswith("L:") or ref.startswith("L:sale:"):
         return True
     try:
         row = store.conn.execute("SELECT data FROM listings WHERE key=?", (ref[2:],)).fetchone()
@@ -5113,6 +5131,8 @@ def card_fits_now(cfg, store, it) -> bool:
         return True
     l = {**json.loads(row[0] or "{}"), **{k: v for k, v in (it.get("l") or {}).items() if v is not None}}
     st = {**default_settings(), **(store.get_kv("settings") or {})}
+    if it.get("kind") == "loc":                  # «адрес неточный — уточнить?»: место не проверить, остальное — да
+        st = {k: v for k, v in st.items() if k not in ("areas", "near")}
     try:
         return passes_filters(l, effective_cfg(cfg, st), max_age=60) and passes_user_filters(l, st)
     except Exception as e:

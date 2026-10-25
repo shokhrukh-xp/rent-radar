@@ -3571,6 +3571,7 @@ with mock.patch.object(rr, "tg_call", _qtg), mock.patch.dict(cg._BIZ_STORE, {"st
     assert any(m == "editMessageText" and "Не подходит под новые условия" in pl["text"] for m, pl in _QT)
     assert (_qs.get_kv("card_open") or {}).get("ref") == "L:uybor:32"   # 1-комн из очереди пропущена
     assert not rr.recheck_open_card(_qcfg, _qs)                      # 2-комн подходит — не трогаем
+    assert not rr.card_fits_now(_qcfg, _qs, {"ref": "L:uybor:31", "kind": "loc"})   # «уточнить адрес?», но 1-комн
     _qs.set_kv("settings", {}); _qs.set_kv("card_open", {}); _qs.set_kv("card_queue", [])
     # 3 пропуска подряд — вопрос «что не так?» вместо следующей карточки; ответ правит поиск
     _qs.set_kv("skip_streak", {})
@@ -3613,6 +3614,12 @@ with mock.patch.object(rr, "tg_call", _qtg), mock.patch.dict(cg._BIZ_STORE, {"st
     assert not rr.passes_user_filters({"rooms": 2, "area": 70, "repair": "средний ремонт"}, _ms)
     assert rr.passes_user_filters({"rooms": 2, "area": 70, "repair": "евроремонт"}, _ms)
     assert rr.extract_rooms("Уютная студия у метро") == 1
+    # бета 25.10: «комнaт» с латинской a, цена без валюты, вопрос «адрес неточный» тоже проверяется по условиям
+    assert rr.extract_rooms("Количество комнaт: 4   Общая площадь: 105 кв") == 4
+    assert rr.extract_price_from_text("Цена: 15,460,000 (1300)   Окончательно") == (15460000, "UZS")
+    assert rr.extract_price_from_text("Цена: 700 Депозит 300") == (700, "USD")
+    _pl = {"text": "Количество комнaт: 4 Цена: 15,460,000 (1300)"}
+    assert not rr.passes_filters(dict(_pl), {**cfg, "max_price_usd": 800, "min_price_usd": None}, max_age=60)
     _qs.set_kv("settings", {}); _qs.set_kv("card_open", {}); _qs.set_kv("card_queue", []); _qs.set_kv("skip_streak", {})
 # нет контакта — вместо «Уточнить» ссылка на объявление; кнопки карточки клиенту не снимаются, прочие — снимаются
 _kb2 = rr.card_kb("L:uybor:5", 0, {"url": "https://uybor.uz/listings/5"})
